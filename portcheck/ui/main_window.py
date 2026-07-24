@@ -48,10 +48,12 @@ class BatchDialog(QDialog):
 
         self._name_edit = QLineEdit(name)
         self._name_edit.setPlaceholderText("例如: 生产环境服务器")
+        self._name_edit.setMinimumWidth(280)
         layout.addRow("集合名称:", self._name_edit)
 
         self._desc_edit = QLineEdit(description)
         self._desc_edit.setPlaceholderText("可选描述")
+        self._desc_edit.setMinimumWidth(280)
         layout.addRow("描述:", self._desc_edit)
 
         buttons = QDialogButtonBox(
@@ -90,6 +92,7 @@ class MainWindow(QMainWindow):
         self._setup_ui()
         self._setup_statusbar()
         self._refresh_batch_list()
+        self._result_panel.refresh()
 
     # ── 菜单栏 ─────────────────────────────────────────────
 
@@ -146,6 +149,7 @@ class MainWindow(QMainWindow):
         self._batch_list = QListWidget()
         self._batch_list.setDragDropMode(QAbstractItemView.InternalMove)
         self._batch_list.setDefaultDropAction(Qt.MoveAction)
+        self._batch_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._batch_list.model().rowsMoved.connect(self._on_batches_reordered)
         self._batch_list.currentRowChanged.connect(self._on_batch_selected)
         left_layout.addWidget(self._batch_list)
@@ -191,7 +195,7 @@ class MainWindow(QMainWindow):
 
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([220, 900])
+        splitter.setSizes([260, 900])
 
         main_layout.addWidget(splitter)
 
@@ -307,22 +311,27 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "错误", f"更新集合失败:\n{e}")
 
     def _delete_batch(self):
-        item = self._batch_list.currentItem()
-        if not item or item.data(Qt.UserRole) in (None, 0):
-            QMessageBox.information(self, "提示", "请选择一个自定义集合进行删除。")
+        selected = self._batch_list.selectedItems()
+        # 过滤：只保留自定义集合（排除「全部目标」和「未分类」）
+        valid = [(it.data(Qt.UserRole), it.text()) for it in selected
+                 if it.data(Qt.UserRole) not in (None, 0)]
+        if not valid:
+            QMessageBox.information(self, "提示", "请选择一个或多个自定义集合进行删除。")
             return
-        batch_id = item.data(Qt.UserRole)
-        batch = self._db.get_batch(batch_id)
-        if not batch:
-            return
+
+        if len(valid) == 1:
+            msg = f"确定要删除集合「{valid[0][1]}」吗？\n\n集合中的目标不会删除，但会变为「未分类」。"
+        else:
+            names = "\n".join(f"  • {name}" for _, name in valid)
+            msg = f"确定要删除以下 {len(valid)} 个集合吗？\n\n{names}\n\n集合中的目标不会删除，但会变为「未分类」。"
+
         reply = QMessageBox.question(
-            self, "确认删除",
-            f"确定要删除集合「{batch.name}」吗？\n\n"
-            f"集合中的目标不会删除，但会变为「未分类」。",
+            self, "确认删除", msg,
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No
         )
         if reply == QMessageBox.Yes:
-            self._db.delete_batch(batch_id)
+            for batch_id, _ in valid:
+                self._db.delete_batch(batch_id)
             self._refresh_batch_list()
             self._update_statusbar()
             self._target_panel.refresh()

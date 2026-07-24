@@ -62,10 +62,12 @@ class PortScanDialog(QDialog):
         self._ip_edit.setPlaceholderText(
             "单个: 192.168.1.1  范围: 192.168.1.1-10  CIDR: 10.0.0.0/24"
         )
+        self._ip_edit.setMinimumWidth(350)
         form.addRow("目标 IP:", self._ip_edit)
 
         self._port_edit = QLineEdit("1-1000")
         self._port_edit.setPlaceholderText("1-1000, 80,443,8080-8090")
+        self._port_edit.setMinimumWidth(350)
         form.addRow("端口范围:", self._port_edit)
 
         h_layout = QHBoxLayout()

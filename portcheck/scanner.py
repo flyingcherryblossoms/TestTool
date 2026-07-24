@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ipaddress
 import socket
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
@@ -254,6 +255,7 @@ class ScannerWorker(QThread):
         self._timeout = timeout
         self._max_workers = max_workers
         self._cancelled = False
+        self._emit_lock = threading.Lock()
 
     def run(self) -> None:
         """在工作线程中执行检测（由 start() 触发）。"""
@@ -274,6 +276,7 @@ class ScannerWorker(QThread):
         self._cancelled = True
 
     def _on_progress(self, current: int, total: int, result: ScanResult) -> None:
-        """内部进度回调，在主线程发送信号。"""
+        """内部进度回调，在多个线程池线程中调用，加锁保护信号发射。"""
         if not self._cancelled:
-            self.progress.emit(current, total, result)
+            with self._emit_lock:
+                self.progress.emit(current, total, result)

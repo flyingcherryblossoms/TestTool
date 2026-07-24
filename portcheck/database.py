@@ -408,6 +408,21 @@ class Database:
                   1 if success else 0, latency_ms, error_msg))
             return cur.lastrowid
 
+    def save_test_results_batch(self, rows: list[tuple]) -> int:
+        """批量保存测试结果（使用事务，避免逐条写入的开销和锁竞争）。
+
+        rows 中每条为 (session_id, target_id, ip, port, description, success, latency_ms, error_msg)
+        """
+        if not rows:
+            return 0
+        with self._connect() as conn:
+            conn.executemany("""
+                INSERT INTO test_results
+                    (session_id, target_id, ip, port, description, success, latency_ms, error_msg)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, rows)
+            return len(rows)
+
     def get_test_results(self, session_id: int,
                          status_filter: Optional[str] = None) -> list[TestResult]:
         """获取某次会话的测试结果。`status_filter` 为 'success'/'fail'/None(全部)。"""
@@ -507,3 +522,26 @@ class Database:
                     error_msg=r["error_msg"], tested_at=r["tested_at"]
                 )
             return None
+
+    def get_targets_last_results(self, target_ids: list[int]) -> dict[int, bool]:
+        """批量获取多个目标的最新测试结果（一次查询）。
+
+        Returns:
+            {target_id: success_bool, ...}  — 仅包含有测试记录的目标
+        """
+        if not target_ids:
+            return {}
+        placeholders = ",".join("?" * len(target_ids))
+        with self._connect() as conn:
+            rows = conn.execute(f"""
+                SELECT target_id, success FROM test_results
+                WHERE target_id IN ({placeholders})
+                ORDER BY tested_at DESC
+            """, target_ids).fetchall()
+        # 按 tested_at DESC 排序，第一条遇到的就是最新的
+        result = {}
+        for r in rows:
+            tid = r["target_id"]
+            if tid not in result:
+                result[tid] = bool(r["success"])
+        return result

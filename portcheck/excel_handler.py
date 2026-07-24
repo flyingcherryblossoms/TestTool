@@ -115,6 +115,16 @@ def _format_row(values: list) -> list:
     return [float(v) if isinstance(v, (int, float)) else str(v) for v in values]
 
 
+def _border_all(ws, max_row: int, max_col: int):
+    """给指定范围的所有单元格添加细线边框。"""
+    from openpyxl.styles import Border, Side
+    thin = Side(style="thin")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    for row in range(1, max_row + 1):
+        for col in range(1, max_col + 1):
+            ws.cell(row=row, column=col).border = border
+
+
 def export_targets_to_excel(filepath: str | Path, targets: list[dict]) -> tuple[bool, str]:
     """导出目标列表到 Excel (.xlsx)。"""
     from openpyxl import Workbook
@@ -125,15 +135,13 @@ def export_targets_to_excel(filepath: str | Path, targets: list[dict]) -> tuple[
         ws = wb.active
         ws.title = "目标列表"
 
-        # 表头样式
-        header_font = Font(bold=True, size=11)
+        header_font = Font(bold=True, size=11, color="FFFFFF")
         header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
-        header_font_white = Font(bold=True, size=11, color="FFFFFF")
 
         headers = ["IP地址", "端口", "描述", "集合", "创建时间"]
         for c, h in enumerate(headers, 1):
             cell = ws.cell(row=1, column=c, value=h)
-            cell.font = header_font_white
+            cell.font = header_font
             cell.fill = header_fill
             cell.alignment = Alignment(horizontal="center")
 
@@ -143,6 +151,8 @@ def export_targets_to_excel(filepath: str | Path, targets: list[dict]) -> tuple[
             ws.cell(row=r, column=3, value=t.get("description", ""))
             ws.cell(row=r, column=4, value=t.get("batch_name", ""))
             ws.cell(row=r, column=5, value=t.get("created_at", ""))
+
+        _border_all(ws, len(targets) + 1, len(headers))
 
         ws.column_dimensions["A"].width = 16
         ws.column_dimensions["B"].width = 8
@@ -194,6 +204,8 @@ def export_results_to_excel(filepath: str | Path, results: list[dict]) -> tuple[
             ], 1):
                 cell = ws.cell(row=r, column=c, value=val)
                 cell.fill = row_fill
+
+        _border_all(ws, len(results) + 1, len(headers))
 
         ws.column_dimensions["A"].width = 16
         ws.column_dimensions["B"].width = 8

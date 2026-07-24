@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QSettings, QTimer, Signal
+from PySide6.QtCore import Qt, QSettings, QThread, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -61,6 +62,7 @@ class TargetDialog(QDialog):
         self._ip_edit.setPlaceholderText(
             "单个: 192.168.1.1  范围: 192.168.1.1-10  CIDR: 10.0.0.0/24"
         )
+        self._ip_edit.setMinimumWidth(350)
         layout.addRow("IP 地址:", self._ip_edit)
 
         # 端口（支持范围和逗号分隔）
@@ -68,11 +70,13 @@ class TargetDialog(QDialog):
         self._port_edit.setPlaceholderText(
             "单个: 80  范围: 1-100  多个: 80,443,8080  混合: 80,443,8000-8010"
         )
+        self._port_edit.setMinimumWidth(350)
         layout.addRow("端口:", self._port_edit)
 
         # 描述（{ip} 和 {port} 会自动替换）
         self._desc_edit = QLineEdit()
         self._desc_edit.setPlaceholderText("{ip}:{port} 服务 (自动替换 IP/端口)")
+        self._desc_edit.setMinimumWidth(350)
         layout.addRow("描述:", self._desc_edit)
 
         # 集合选择
@@ -195,6 +199,59 @@ class TargetDialog(QDialog):
         return []
 
 
+class ImportWorker(QThread):
+    """后台线程执行导入，避免大数量时卡 UI。"""
+
+    progress = Signal(int, int)   # current, total
+    finished = Signal(int, int, int)  # import_count, skip_count, update_count
+
+    def __init__(self, db_path: str, targets: list[dict],
+                 overwrite: bool, parent=None):
+        super().__init__(parent)
+        self._db_path = db_path
+        self._targets = targets
+        self._overwrite = overwrite
+
+    def run(self):
+        from portcheck.database import Database
+        db = Database(self._db_path)
+
+        # 预解析集合名称 → ID
+        batch_cache = {}
+        for b in db.get_all_batches():
+            batch_cache[b.name] = b.id
+
+        import_count = skip_count = update_count = 0
+        total = len(self._targets)
+
+        for i, t in enumerate(self._targets):
+            batch_name = t.get("batch_name", "")
+            batch_id = None
+            if batch_name:
+                if batch_name in batch_cache:
+                    batch_id = batch_cache[batch_name]
+                else:
+                    batch_id = db.add_batch(batch_name, "")
+                    batch_cache[batch_name] = batch_id
+
+            existing_id = db.find_target_id(t["ip"], t["port"], batch_id)
+            if existing_id is not None:
+                if self._overwrite:
+                    db.update_target(existing_id, t["ip"], t["port"],
+                                     t.get("description", ""), batch_id)
+                    update_count += 1
+                else:
+                    skip_count += 1
+            else:
+                db.add_target(t["ip"], t["port"], t.get("description", ""), batch_id)
+                import_count += 1
+
+            if i % 20 == 0 or i == total - 1:
+                self.progress.emit(i + 1, total)
+
+        self.finished.emit(import_count, skip_count, update_count)
+
+
 class TargetPanel(QWidget):
     """目标管理面板。
 
@@ -213,6 +270,13 @@ class TargetPanel(QWidget):
         self._all_targets: list = []  # 缓存当前全部目标用于筛选
         self._sort_col: int = -1  # 当前排序列（-1 为按 sort_order）
         self._sort_asc: bool = True
+        # 筛选防抖（仅用于文本框输入 + 状态下拉）
+        self._filter_dirty = False
+        self._filter_timer = QTimer(self)
+        self._filter_timer.setSingleShot(True)
+        self._filter_timer.timeout.connect(self._do_apply_filter)
+        # 防止 populate 期间拖拽信号触发筛选循环
+        self._populating = False
         self._setup_ui()
 
     def _setup_ui(self):
@@ -227,7 +291,7 @@ class TargetPanel(QWidget):
         self._filter_edit = QLineEdit()
         self._filter_edit.setPlaceholderText("筛选 IP/端口/描述...")
         self._filter_edit.setClearButtonEnabled(True)
-        self._filter_edit.setMaximumWidth(280)
+        self._filter_edit.setMinimumWidth(200)
         self._filter_edit.textChanged.connect(self._apply_filter)
         top_layout.addWidget(self._filter_edit)
 
@@ -271,32 +335,14 @@ class TargetPanel(QWidget):
         self._table.cellClicked.connect(self._on_cell_clicked)
 
         hh = self._table.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.Fixed)
-        self._table.setColumnWidth(0, 40)   # 序号
-        hh.setSectionResizeMode(1, QHeaderView.Fixed)
-        self._table.setColumnWidth(1, 30)   # 复选框
-        hh.setSectionResizeMode(2, QHeaderView.Interactive)  # IP - 可拖拽调整
-        self._table.setColumnWidth(2, 140)
-        hh.setSectionResizeMode(3, QHeaderView.Interactive)  # 端口
-        self._table.setColumnWidth(3, 70)
-        hh.setSectionResizeMode(4, QHeaderView.Interactive)  # 描述
-        self._table.setColumnWidth(4, 160)
-        hh.setSectionResizeMode(5, QHeaderView.Interactive)  # 集合
-        self._table.setColumnWidth(5, 120)
-        hh.setSectionResizeMode(6, QHeaderView.Fixed)       # 状态
-        self._table.setColumnWidth(6, 100)
-
-        # 恢复保存的列宽
-        settings = QSettings("PortCheck", "PortCheck")
-        for col in [2, 3, 4, 5]:
-            saved = settings.value(f"target_col_{col}")
-            if saved is not None:
-                self._table.setColumnWidth(col, int(saved))
-
-        # 列宽变化时保存
-        hh.sectionResized.connect(self._save_column_widths)
-
-        # 点击表头排序
+        hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # 序号
+        hh.setSectionResizeMode(1, QHeaderView.ResizeToContents)  # 复选框
+        hh.setSectionResizeMode(2, QHeaderView.Stretch)           # IP
+        hh.setSectionResizeMode(3, QHeaderView.ResizeToContents)  # 端口
+        hh.setSectionResizeMode(4, QHeaderView.Stretch)           # 描述
+        hh.setSectionResizeMode(5, QHeaderView.Stretch)           # 集合
+        hh.setSectionResizeMode(6, QHeaderView.ResizeToContents)  # 状态
+        hh.setStretchLastSection(False)
         hh.setSectionsClickable(True)
         hh.sectionClicked.connect(self._on_header_clicked)
 
@@ -345,7 +391,7 @@ class TargetPanel(QWidget):
         self.refresh()
 
     def refresh(self) -> None:
-        """刷新目标列表。"""
+        """刷新目标列表（集合切换/增删改时调用，立即执行不防抖）。"""
         self._all_targets = self._db.get_targets(self._current_batch_id)
 
         # 更新标题
@@ -358,10 +404,21 @@ class TargetPanel(QWidget):
             name = batch.name if batch else "未知"
             self._info_label.setText(f"{name} ({len(self._all_targets)})")
 
-        self._apply_filter()
+        # 取消防抖定时器，立即执行
+        self._filter_timer.stop()
+        self._filter_dirty = False
+        self._do_apply_filter()
 
     def _apply_filter(self):
-        """根据筛选文本 + 状态 + 排序刷新表格显示。"""
+        """由筛选框/状态下拉变化触发，防抖执行（避免打字时每键都查 DB）。"""
+        if not self._filter_dirty:
+            self._filter_dirty = True
+            self._filter_timer.start(150)
+
+    def _do_apply_filter(self):
+        """实际执行筛选 + 表格填充。"""
+        self._filter_dirty = False
+
         filter_text = self._filter_edit.text().strip().lower()
         status_val = self._status_filter.currentData()
 
@@ -375,16 +432,20 @@ class TargetPanel(QWidget):
                        or filter_text in t.description.lower()
                        or filter_text in t.batch_name.lower()]
 
+        # 批量获取最近测试结果（一次查询替代逐条查询）
+        all_ids = [t.id for t in targets]
+        last_results = self._db.get_targets_last_results(all_ids) if all_ids else {}
+
         # 状态筛选
         if status_val is not None:
             filtered = []
             for t in targets:
-                last = self._db.get_target_last_result(t.id)
+                last_ok = last_results.get(t.id)
                 if status_val == "untested":
-                    if last is None:
+                    if last_ok is None:
                         filtered.append(t)
                 elif isinstance(status_val, bool):
-                    if last is not None and last.success == status_val:
+                    if last_ok is not None and last_ok == status_val:
                         filtered.append(t)
             targets = filtered
 
@@ -392,8 +453,12 @@ class TargetPanel(QWidget):
         if self._sort_col >= 0:
             targets = self._sort_targets(targets)
 
-        self._populate_table(targets)
         self._update_sort_indicator()
+        self._populate_table(targets, last_results)
+
+        # 如果填充期间又来了新请求，再次执行
+        if self._filter_dirty:
+            self._do_apply_filter()
 
     def _sort_targets(self, targets):
         """按当前排序列排序目标列表（IP 按数字段排序，端口按数值排序）。"""
@@ -436,14 +501,17 @@ class TargetPanel(QWidget):
                 arrow = ""
             self._table.horizontalHeaderItem(c).setText(label + arrow)
 
-    def _populate_table(self, targets):
-        """填充表格数据。"""
+    def _populate_table(self, targets, last_results: dict | None = None):
+        """填充表格数据（一次性完成，外层 setUpdatesEnabled 阻止中间重绘）。"""
+        self._populating = True
+        self._table.setUpdatesEnabled(False)
         self._table.setRowCount(len(targets))
+
         for row, t in enumerate(targets):
             # 序号 (col 0)
             num_item = QTableWidgetItem(str(row + 1))
             num_item.setTextAlignment(Qt.AlignCenter)
-            num_item.setFlags(Qt.ItemIsEnabled)  # 不可编辑不可拖拽
+            num_item.setFlags(Qt.ItemIsEnabled)
             self._table.setItem(row, 0, num_item)
 
             # 复选框 (col 1)
@@ -454,7 +522,7 @@ class TargetPanel(QWidget):
 
             # IP (col 2)
             ip_item = QTableWidgetItem(t.ip)
-            ip_item.setData(Qt.UserRole, t.id)  # 存储 target_id
+            ip_item.setData(Qt.UserRole, t.id)
             self._table.setItem(row, 2, ip_item)
 
             # Port (col 3)
@@ -469,19 +537,27 @@ class TargetPanel(QWidget):
             self._table.setItem(row, 5, QTableWidgetItem(t.batch_name))
 
             # 最近状态 (col 6)
-            last = self._db.get_target_last_result(t.id)
-            if last:
-                status_text = "✓ 连通" if last.success else "✗ 未连通"
+            if last_results is not None:
+                last_ok = last_results.get(t.id)
+            else:
+                last = self._db.get_target_last_result(t.id)
+                last_ok = last.success if last else None
+
+            if last_ok is not None:
+                status_text = "✓ 连通" if last_ok else "✗ 未连通"
                 status_item = QTableWidgetItem(status_text)
                 status_item.setForeground(
-                    QBrush(QColor("#27ae60") if last.success else QColor("#e74c3c"))
+                    QBrush(QColor("#27ae60") if last_ok else QColor("#e74c3c"))
                 )
             else:
                 status_item = QTableWidgetItem("-")
                 status_item.setForeground(QBrush(QColor("#999")))
             self._table.setItem(row, 6, status_item)
 
-        self._select_all_cb.setChecked(False)
+        self._table.setUpdatesEnabled(True)
+        if self._select_all_cb.isChecked():
+            self._select_all_cb.setChecked(False)
+        self._populating = False
 
     def get_selected_target_ids(self) -> list[int]:
         """获取当前勾选/选中的目标 ID 列表。"""
@@ -515,8 +591,11 @@ class TargetPanel(QWidget):
                 cb.setCheckState(check_state)
 
     def _schedule_drag_rebuild(self, *args):
-        """拖拽操作后延迟重建（debounce 50ms，合并多次信号）。"""
-        self._drag_rebuild_timer.start(50)
+        """拖拽操作后延迟重建（debounce 50ms，合并多次信号）。
+        populate 期间忽略，避免 setRowCount 触发的 rowsRemoved 导致循环。
+        """
+        if not self._populating:
+            self._drag_rebuild_timer.start(50)
 
     def _rebuild_after_drag(self):
         """拖拽完成：读取当前顺序 → 保存 → 完整重建表格。"""
@@ -529,8 +608,8 @@ class TargetPanel(QWidget):
                     ordered_ids.append(tid)
         if ordered_ids:
             self._db.update_targets_sort_order(ordered_ids)
-        # 从数据库重新加载，修复拖出列表外导致的空白行/数据丢失
-        self._apply_filter()
+            # 仅当有实际数据时才刷新，防止空表触发筛选循环
+            self._apply_filter()
 
     def _on_cell_clicked(self, row: int, col: int):
         """点击行任意位置切换复选框状态（复选框列本身 Qt 已自动处理）。"""
@@ -693,26 +772,38 @@ class TargetPanel(QWidget):
                 return
             overwrite = False
 
-        import_count = 0
-        skip_count = 0
-        update_count = 0
-        for t in targets:
-            batch_id = self._resolve_batch(t.get("batch_name", ""))
-            existing_id = self._db.find_target_id(t["ip"], t["port"], batch_id)
+        # 数量过大时二次确认
+        if len(targets) > 1000:
+            reply = QMessageBox.question(
+                self, "导入确认",
+                f"即将导入 {len(targets)} 条目标，数量较大，确定继续？",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
 
-            if existing_id is not None:
-                if overwrite:
-                    self._db.update_target(
-                        existing_id, t["ip"], t["port"],
-                        t.get("description", ""), batch_id
-                    )
-                    update_count += 1
-                else:
-                    skip_count += 1
-            else:
-                self._db.add_target(t["ip"], t["port"], t.get("description", ""), batch_id)
-                import_count += 1
+        # 异步导入 + 进度对话框
+        progress_dlg = QProgressDialog("正在导入...", "取消", 0, len(targets), self)
+        progress_dlg.setWindowTitle("导入进度")
+        progress_dlg.setWindowModality(Qt.WindowModal)
+        progress_dlg.setMinimumDuration(0)
+        progress_dlg.setAutoClose(False)
+        progress_dlg.show()
 
+        self._import_worker = ImportWorker(
+            self._db.db_path, targets, overwrite
+        )
+        self._import_worker.progress.connect(
+            lambda c, t: progress_dlg.setValue(c)
+        )
+        self._import_worker.finished.connect(
+            lambda new, skip, upd: self._on_import_done(progress_dlg, new, skip, upd, errors)
+        )
+        self._import_worker.start()
+
+    def _on_import_done(self, dlg, import_count, skip_count, update_count, errors):
+        """导入线程完成回调。"""
+        dlg.close()
         self.refresh()
         self.targets_changed.emit()
 

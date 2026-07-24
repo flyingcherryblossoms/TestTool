@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QSplitter,
@@ -36,6 +37,9 @@ class ResultPanel(QWidget):
     def __init__(self, db: Database, parent=None):
         super().__init__(parent)
         self._db = db
+        self._cached_results: list = []
+        self._sort_col: int = -1
+        self._sort_asc: bool = True
         self._setup_ui()
 
     def _setup_ui(self):
@@ -86,9 +90,15 @@ class ResultPanel(QWidget):
 
         # 筛选栏
         filter_layout = QHBoxLayout()
-        filter_layout.addWidget(QLabel("筛选:"))
+
+        self._text_filter = QLineEdit()
+        self._text_filter.setPlaceholderText("筛选 IP/端口/描述...")
+        self._text_filter.setClearButtonEnabled(True)
+        self._text_filter.textChanged.connect(self._apply_filter)
+        filter_layout.addWidget(self._text_filter)
+
         self._filter_combo = QComboBox()
-        self._filter_combo.addItem("全部", None)
+        self._filter_combo.addItem("全部状态", None)
         self._filter_combo.addItem("✓ 连通", "success")
         self._filter_combo.addItem("✗ 未连通", "fail")
         self._filter_combo.currentIndexChanged.connect(self._apply_filter)
@@ -116,6 +126,8 @@ class ResultPanel(QWidget):
         self._result_table.setAlternatingRowColors(True)
         self._result_table.verticalHeader().setVisible(False)
         self._result_table.horizontalHeader().setStretchLastSection(True)
+        self._result_table.horizontalHeader().setSectionsClickable(True)
+        self._result_table.horizontalHeader().sectionClicked.connect(self._on_result_header_clicked)
 
         hh2 = self._result_table.horizontalHeader()
         hh2.setSectionResizeMode(0, QHeaderView.Fixed)
@@ -179,7 +191,7 @@ class ResultPanel(QWidget):
         self._load_results()
 
     def _load_results(self):
-        """根据当前选中的会话和筛选条件加载结果。"""
+        """根据当前选中的会话和筛选条件（文本 + 状态）+ 排序加载结果。"""
         rows = self._session_table.selectionModel().selectedRows()
         if not rows:
             self._result_table.setRowCount(0)
@@ -188,6 +200,28 @@ class ResultPanel(QWidget):
         session_id = self._session_table.item(rows[0].row(), 0).data(Qt.UserRole)
         status_filter = self._filter_combo.currentData()
         results = self._db.get_test_results(session_id, status_filter)
+
+        text = self._text_filter.text().strip().lower()
+        if text:
+            results = [r for r in results if
+                       text in r.ip.lower()
+                       or text in str(r.port)
+                       or text in r.description.lower()
+                       or text in r.error_msg.lower()]
+
+        # 缓存用于排序切换（不用重查 DB）
+        self._cached_results = results
+
+        # 排序
+        if self._sort_col >= 0:
+            key_map = {
+                1: lambda r: tuple(int(o) for o in r.ip.split(".")),
+                2: lambda r: r.port,
+                4: lambda r: r.latency_ms if r.success else -1,
+            }
+            key_func = key_map.get(self._sort_col)
+            if key_func:
+                results.sort(key=key_func, reverse=not self._sort_asc)
 
         self._result_table.setRowCount(len(results))
         for row, r in enumerate(results):
@@ -198,25 +232,38 @@ class ResultPanel(QWidget):
             )
             self._result_table.setItem(row, 0, status_item)
             self._result_table.setItem(row, 1, QTableWidgetItem(r.ip))
-
             port_item = QTableWidgetItem(str(r.port))
             port_item.setTextAlignment(Qt.AlignCenter)
             self._result_table.setItem(row, 2, port_item)
-
             self._result_table.setItem(row, 3, QTableWidgetItem(r.description))
-
-            if r.success:
-                latency_text = f"{r.latency_ms:.1f}"
-            else:
-                latency_text = "-"
+            latency_text = f"{r.latency_ms:.1f}" if r.success else "-"
             latency_item = QTableWidgetItem(latency_text)
             latency_item.setTextAlignment(Qt.AlignCenter)
             self._result_table.setItem(row, 4, latency_item)
-
             self._result_table.setItem(row, 5, QTableWidgetItem(r.error_msg))
             self._result_table.setItem(row, 6, QTableWidgetItem(r.tested_at))
 
         self._result_count_label.setText(f"({len(results)} 条)")
+        self._update_result_sort_indicator()
+
+    def _on_result_header_clicked(self, col: int):
+        if col not in (1, 2, 4):
+            return
+        if self._sort_col == col:
+            self._sort_asc = not self._sort_asc
+        else:
+            self._sort_col = col
+            self._sort_asc = True
+        self._apply_filter()
+
+    def _update_result_sort_indicator(self):
+        headers = {1: "IP 地址", 2: "端口", 4: "延迟(ms)"}
+        for c, label in headers.items():
+            if c == self._sort_col:
+                arrow = " ▲" if self._sort_asc else " ▼"
+            else:
+                arrow = ""
+            self._result_table.horizontalHeaderItem(c).setText(label + arrow)
 
     def _delete_sessions(self):
         """批量删除选中的测试会话。"""

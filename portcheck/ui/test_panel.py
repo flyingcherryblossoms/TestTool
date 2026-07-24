@@ -8,6 +8,9 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
+    QComboBox,
+    QDoubleSpinBox,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -46,6 +49,10 @@ class TestPanel(QWidget):
         self._fail_count = 0
         self._current_batch_id: int | None = None
         self._all_results: list[ScanResult] = []  # 缓存全部结果用于筛选
+        self._db_pending: list[ScanResult] = []   # 批量写 DB 的暂存
+        self._db_batch_size = 50                   # 每攒够 N 条 flush 一次
+        self._sort_col: int = -1
+        self._sort_asc: bool = True
         self._setup_ui()
 
     def _setup_ui(self):
@@ -62,16 +69,20 @@ class TestPanel(QWidget):
         ctrl_layout.addStretch()
 
         ctrl_layout.addWidget(QLabel("超时(秒):"))
-        self._timeout_spin = QSpinBox()
-        self._timeout_spin.setRange(1, 60)
-        self._timeout_spin.setValue(1)
+        self._timeout_spin = QDoubleSpinBox()
+        self._timeout_spin.setRange(0.1, 60)
+        self._timeout_spin.setValue(1.0)
+        self._timeout_spin.setSingleStep(0.5)
+        self._timeout_spin.setDecimals(1)
         self._timeout_spin.setSuffix(" s")
+        self._timeout_spin.setMinimumWidth(80)
         ctrl_layout.addWidget(self._timeout_spin)
 
         ctrl_layout.addWidget(QLabel("并发数:"))
         self._workers_spin = QSpinBox()
         self._workers_spin.setRange(1, 200)
         self._workers_spin.setValue(50)
+        self._workers_spin.setMinimumWidth(70)
         ctrl_layout.addWidget(self._workers_spin)
 
         self._test_btn = QPushButton("▶ 开始测试")
@@ -100,10 +111,17 @@ class TestPanel(QWidget):
 
         filter_layout = QHBoxLayout()
         self._result_filter = QLineEdit()
-        self._result_filter.setPlaceholderText("筛选结果...")
+        self._result_filter.setPlaceholderText("筛选 IP/端口/描述...")
         self._result_filter.setClearButtonEnabled(True)
         self._result_filter.textChanged.connect(self._apply_result_filter)
         filter_layout.addWidget(self._result_filter)
+
+        self._status_filter = QComboBox()
+        self._status_filter.addItem("全部状态", None)
+        self._status_filter.addItem("✓ 连通", True)
+        self._status_filter.addItem("✗ 未连通", False)
+        self._status_filter.currentIndexChanged.connect(self._apply_result_filter)
+        filter_layout.addWidget(self._status_filter)
         result_layout.addLayout(filter_layout)
 
         self._result_table = QTableWidget()
@@ -120,12 +138,15 @@ class TestPanel(QWidget):
         hh = self._result_table.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.Fixed)
         self._result_table.setColumnWidth(0, 70)
-        hh.setSectionResizeMode(1, QHeaderView.Stretch)
-        hh.setSectionResizeMode(2, QHeaderView.Fixed)
+        hh.setSectionResizeMode(1, QHeaderView.Interactive)
+        self._result_table.setColumnWidth(1, 140)
+        hh.setSectionResizeMode(2, QHeaderView.Interactive)
         self._result_table.setColumnWidth(2, 70)
         hh.setSectionResizeMode(3, QHeaderView.Stretch)
-        hh.setSectionResizeMode(4, QHeaderView.Fixed)
+        hh.setSectionResizeMode(4, QHeaderView.Interactive)
         self._result_table.setColumnWidth(4, 80)
+        hh.setSectionsClickable(True)
+        hh.sectionClicked.connect(self._on_result_header_clicked)
 
         result_layout.addWidget(self._result_table)
 
@@ -213,6 +234,7 @@ class TestPanel(QWidget):
         self._success_count = 0
         self._fail_count = 0
         self._all_results = []
+        self._db_pending = []
         self._result_table.setRowCount(0)
         self._result_filter.clear()
 
@@ -253,23 +275,21 @@ class TestPanel(QWidget):
 
         self._all_results.append(result)
 
-        # 始终保存到数据库
-        self._db.save_test_result(
-            session_id=self._session_id,
-            target_id=result.target_id,
-            ip=result.ip,
-            port=result.port,
-            description=result.description,
-            success=result.success,
-            latency_ms=result.latency_ms,
-            error_msg=result.error_msg,
-        )
+        # 批量写 DB（避免 200 并发时逐条 open/close 连接导致崩溃）
+        self._db_pending.append(result)
+        if len(self._db_pending) >= self._db_batch_size:
+            self._flush_db_batch()
 
         # 仅当通过筛选时才添加到表格
         if self._result_matches_filter(result):
             self._add_result_row(result)
 
+        # 高并发时让事件循环"喘口气"，避免 UI 冻结
+        if current % 20 == 0:
+            QApplication.processEvents()
+
     def _on_all_done(self, results: list):
+        self._flush_db_batch()  # 写入剩余数据
         if self._session_id is not None:
             self._db.complete_test_session(
                 self._session_id, self._total, self._success_count, self._fail_count
@@ -311,7 +331,12 @@ class TestPanel(QWidget):
         self._result_table.scrollToBottom()
 
     def _result_matches_filter(self, result: ScanResult) -> bool:
-        """检查结果是否匹配当前筛选文本。"""
+        """检查结果是否匹配当前筛选条件（文本 + 状态）。"""
+        # 状态筛选
+        status_val = self._status_filter.currentData()
+        if status_val is not None and result.success != status_val:
+            return False
+        # 文本筛选
         text = self._result_filter.text().strip().lower()
         if not text:
             return True
@@ -323,11 +348,57 @@ class TestPanel(QWidget):
                 or text in result.error_msg.lower())
 
     def _apply_result_filter(self):
-        """筛选文本变化时重建表格。"""
+        """筛选 + 排序后重建表格。"""
+        filtered = [r for r in self._all_results if self._result_matches_filter(r)]
+        # 排序
+        if self._sort_col >= 0:
+            key_map = {
+                1: lambda r: tuple(int(o) for o in r.ip.split(".")),
+                2: lambda r: r.port,
+                4: lambda r: r.latency_ms if r.success else -1,
+            }
+            key_func = key_map.get(self._sort_col)
+            if key_func:
+                filtered.sort(key=key_func, reverse=not self._sort_asc)
+
         self._result_table.setRowCount(0)
-        for r in self._all_results:
-            if self._result_matches_filter(r):
-                self._add_result_row(r)
+        for r in filtered:
+            self._add_result_row(r)
+        self._update_result_sort_indicator()
+
+    def _on_result_header_clicked(self, col: int):
+        if col not in (1, 2, 4):
+            return
+        if self._sort_col == col:
+            self._sort_asc = not self._sort_asc
+        else:
+            self._sort_col = col
+            self._sort_asc = True
+        self._apply_result_filter()
+
+    def _update_result_sort_indicator(self):
+        headers = {1: "IP 地址", 2: "端口", 4: "延迟(ms)"}
+        for c, label in headers.items():
+            if c == self._sort_col:
+                arrow = " ▲" if self._sort_asc else " ▼"
+            else:
+                arrow = ""
+            self._result_table.horizontalHeaderItem(c).setText(label + arrow)
+
+    def _flush_db_batch(self):
+        """将暂存的结果批量写入数据库（单事务，避免锁竞争）。"""
+        if not self._db_pending:
+            return
+        rows = [
+            (self._session_id, r.target_id, r.ip, r.port, r.description,
+             1 if r.success else 0, r.latency_ms, r.error_msg)
+            for r in self._db_pending
+        ]
+        try:
+            self._db.save_test_results_batch(rows)
+        except Exception:
+            pass  # 写库失败不影响测试
+        self._db_pending.clear()
 
     def _finalize_ui(self):
         self._test_btn.setText("▶ 开始测试")
