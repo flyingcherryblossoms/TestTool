@@ -67,7 +67,7 @@ def parse_targets_csv(filepath: str | Path) -> tuple[list[CsvTarget], list[str]]
                 errors.append(f"第 {i} 行: 列数不足（至少需要 IP 和 Port）")
                 continue
 
-            ip = row[0].strip() if len(row) > 0 else ""
+            ip_raw = row[0].strip() if len(row) > 0 else ""
             port_str = row[1].strip() if len(row) > 1 else "0"
             desc = row[2].strip() if len(row) > 2 else ""
             batch = row[3].strip() if len(row) > 3 else ""
@@ -78,12 +78,19 @@ def parse_targets_csv(filepath: str | Path) -> tuple[list[CsvTarget], list[str]]
                 errors.append(f"第 {i} 行: 端口 '{port_str}' 不是有效数字")
                 continue
 
-            target = CsvTarget(ip=ip, port=port, description=desc, batch_name=batch)
-            err = target.validate()
-            if err:
-                errors.append(f"第 {i} 行: {err}")
-            else:
-                targets.append(target)
+            # 支持换行分隔的多个 IP（其余列共用）
+            ips = [ip.strip() for ip in ip_raw.split("\n") if ip.strip()]
+            if not ips:
+                errors.append(f"第 {i} 行: IP 地址为空")
+                continue
+
+            for ip in ips:
+                target = CsvTarget(ip=ip, port=port, description=desc, batch_name=batch)
+                err = target.validate()
+                if err:
+                    errors.append(f"第 {i} 行: {err}")
+                else:
+                    targets.append(target)
 
     return targets, errors
 

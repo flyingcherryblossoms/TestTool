@@ -61,10 +61,10 @@ def parse_targets_excel(filepath: str | Path) -> tuple[list[dict], list[str]]:
             errors.append(f"第 {i} 行: 列数不足（需要 IP 和端口）")
             continue
 
-        ip = values[0]
+        ip_raw = str(values[0]).strip() if values[0] is not None else ""
         port_str = values[1]
-        desc = values[2] if len(values) > 2 else ""
-        batch = values[3] if len(values) > 3 else ""
+        desc = str(values[2]).strip() if len(values) > 2 and values[2] is not None else ""
+        batch = str(values[3]).strip() if len(values) > 3 and values[3] is not None else ""
 
         try:
             port = int(float(port_str))  # Excel 可能把数字读成 float
@@ -72,14 +72,18 @@ def parse_targets_excel(filepath: str | Path) -> tuple[list[dict], list[str]]:
             errors.append(f"第 {i} 行: 端口 '{port_str}' 无效")
             continue
 
-        if not ip:
-            errors.append(f"第 {i} 行: IP 地址为空")
-            continue
         if not (1 <= port <= 65535):
             errors.append(f"第 {i} 行: 端口 {port} 超出范围")
             continue
 
-        targets.append({"ip": ip, "port": port, "description": desc, "batch_name": batch})
+        # 支持换行分隔的多个 IP（其余列共用）
+        ips = [ip.strip() for ip in ip_raw.split("\n") if ip.strip()]
+        if not ips:
+            errors.append(f"第 {i} 行: IP 地址为空")
+            continue
+
+        for ip in ips:
+            targets.append({"ip": ip, "port": port, "description": desc, "batch_name": batch})
 
     return targets, errors
 
