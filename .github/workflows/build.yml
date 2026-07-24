@@ -123,9 +123,7 @@ jobs:
   linux-x64-compat:
     runs-on: ubuntu-latest
     container:
-      image: ubuntu:18.04
-    env:
-      ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
+      image: ubuntu:20.04
     steps:
       - uses: actions/checkout@v4
 
@@ -246,9 +244,7 @@ jobs:
   linux-arm64-compat:
     runs-on: ubuntu-24.04-arm
     container:
-      image: arm64v8/ubuntu:18.04
-    env:
-      ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
+      image: arm64v8/ubuntu:20.04
     steps:
       - uses: actions/checkout@v4
 
