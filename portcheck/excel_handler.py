@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+from portcheck.scanner import expand_ip_range
+
 
 def _is_header_row(values: list[str]) -> bool:
     """判断一行是否为标题行。"""
@@ -76,14 +78,20 @@ def parse_targets_excel(filepath: str | Path) -> tuple[list[dict], list[str]]:
             errors.append(f"第 {i} 行: 端口 {port} 超出范围")
             continue
 
-        # 支持换行分隔的多个 IP（其余列共用）
-        ips = [ip.strip() for ip in ip_raw.split("\n") if ip.strip()]
-        if not ips:
+        # 支持换行分隔的多个 IP + CIDR/范围展开
+        raw_ips = [ip.strip() for ip in ip_raw.split("\n") if ip.strip()]
+        if not raw_ips:
             errors.append(f"第 {i} 行: IP 地址为空")
             continue
 
-        for ip in ips:
-            targets.append({"ip": ip, "port": port, "description": desc, "batch_name": batch})
+        for raw_ip in raw_ips:
+            try:
+                expanded = expand_ip_range(raw_ip)
+            except ValueError as e:
+                errors.append(f"第 {i} 行: {e}")
+                continue
+            for ip in expanded:
+                targets.append({"ip": ip, "port": port, "description": desc, "batch_name": batch})
 
     return targets, errors
 

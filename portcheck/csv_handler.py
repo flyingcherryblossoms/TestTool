@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from portcheck.scanner import expand_ip_range
+
 
 # ── 导入数据模型 ──────────────────────────────────────────
 
@@ -78,19 +80,25 @@ def parse_targets_csv(filepath: str | Path) -> tuple[list[CsvTarget], list[str]]
                 errors.append(f"第 {i} 行: 端口 '{port_str}' 不是有效数字")
                 continue
 
-            # 支持换行分隔的多个 IP（其余列共用）
-            ips = [ip.strip() for ip in ip_raw.split("\n") if ip.strip()]
-            if not ips:
+            # 支持换行分隔的多个 IP + CIDR/范围展开
+            raw_ips = [ip.strip() for ip in ip_raw.split("\n") if ip.strip()]
+            if not raw_ips:
                 errors.append(f"第 {i} 行: IP 地址为空")
                 continue
 
-            for ip in ips:
-                target = CsvTarget(ip=ip, port=port, description=desc, batch_name=batch)
-                err = target.validate()
-                if err:
-                    errors.append(f"第 {i} 行: {err}")
-                else:
-                    targets.append(target)
+            for raw_ip in raw_ips:
+                try:
+                    expanded = expand_ip_range(raw_ip)
+                except ValueError as e:
+                    errors.append(f"第 {i} 行: {e}")
+                    continue
+                for ip in expanded:
+                    target = CsvTarget(ip=ip, port=port, description=desc, batch_name=batch)
+                    err = target.validate()
+                    if err:
+                        errors.append(f"第 {i} 行: {err}")
+                    else:
+                        targets.append(target)
 
     return targets, errors
 
