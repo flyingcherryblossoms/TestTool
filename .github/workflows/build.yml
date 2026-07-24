@@ -2,10 +2,7 @@ name: Build
 
 on:
   push:
-    branches: [main, master]
     tags: ["v*"]
-  pull_request:
-    branches: [main, master]
   workflow_dispatch:
 
 jobs:
@@ -49,13 +46,22 @@ jobs:
             --add-data "portcheck/icon.ico;portcheck" `
             --clean --noconfirm main.py
 
+      - name: Package
+        shell: bash
+        run: |
+          cd dist
+          zip PortCheck-Windows-x64.zip PortCheck.exe
+          sha256sum PortCheck-Windows-x64.zip > PortCheck-Windows-x64.zip.sha256
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: PortCheck-Windows-x64
-          path: dist/PortCheck.exe
+          path: |
+            dist/PortCheck-Windows-x64.zip
+            dist/PortCheck-Windows-x64.zip.sha256
 
-  # ── Linux x86_64 (标准) ───────────────────────────────────
+  # ── Linux x64 ────────────────────────────────────────────
   linux-x64:
     runs-on: ubuntu-latest
     steps:
@@ -99,13 +105,21 @@ jobs:
             --add-data "portcheck/icon.png:portcheck" \
             --clean --noconfirm main.py
 
+      - name: Package
+        run: |
+          cd dist
+          tar czf PortCheck-Linux-x64.tar.gz PortCheck
+          sha256sum PortCheck-Linux-x64.tar.gz > PortCheck-Linux-x64.tar.gz.sha256
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: PortCheck-Linux-x64
-          path: dist/PortCheck
+          path: |
+            dist/PortCheck-Linux-x64.tar.gz
+            dist/PortCheck-Linux-x64.tar.gz.sha256
 
-  # ── Linux x86_64 兼容版 (glibc 2.27+, Python 3.8) ────────
+  # ── Linux x64 兼容版 (glibc 2.27+, Python 3.8) ───────────
   linux-x64-compat:
     runs-on: ubuntu-latest
     container:
@@ -117,18 +131,15 @@ jobs:
         run: |
           apt-get update -qq
           apt-get install -y -qq software-properties-common gnupg wget
-          # deadsnakes PPA 提供旧版 Python
           add-apt-repository -y ppa:deadsnakes/ppa
           apt-get update -qq
           apt-get install -y -qq python3.8 python3.8-venv python3.8-dev python3.8-distutils
           apt-get install -y -qq libegl1 libgl1 libopengl0 libxkbcommon0 libdbus-1-3
-          # pip
           wget -q https://bootstrap.pypa.io/get-pip.py -O /tmp/get-pip.py
           python3.8 /tmp/get-pip.py -q
 
       - name: Install Python deps
-        run: |
-          python3.8 -m pip install PySide6 openpyxl xlrd Pillow pyinstaller
+        run: python3.8 -m pip install PySide6 openpyxl xlrd Pillow pyinstaller
 
       - name: Generate icon
         run: |
@@ -157,11 +168,19 @@ jobs:
             --add-data "portcheck/icon.png:portcheck" \
             --clean --noconfirm main.py
 
+      - name: Package
+        run: |
+          cd dist
+          tar czf PortCheck-Linux-x64-compat.tar.gz PortCheck
+          sha256sum PortCheck-Linux-x64-compat.tar.gz > PortCheck-Linux-x64-compat.tar.gz.sha256
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: PortCheck-Linux-x64-compat
-          path: dist/PortCheck
+          path: |
+            dist/PortCheck-Linux-x64-compat.tar.gz
+            dist/PortCheck-Linux-x64-compat.tar.gz.sha256
 
   # ── Linux ARM64 ──────────────────────────────────────────
   linux-arm64:
@@ -207,11 +226,82 @@ jobs:
             --add-data "portcheck/icon.png:portcheck" \
             --clean --noconfirm main.py
 
+      - name: Package
+        run: |
+          cd dist
+          tar czf PortCheck-Linux-ARM64.tar.gz PortCheck
+          sha256sum PortCheck-Linux-ARM64.tar.gz > PortCheck-Linux-ARM64.tar.gz.sha256
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: PortCheck-Linux-ARM64
-          path: dist/PortCheck
+          path: |
+            dist/PortCheck-Linux-ARM64.tar.gz
+            dist/PortCheck-Linux-ARM64.tar.gz.sha256
+
+  # ── Linux ARM64 兼容版 (glibc 2.27+, Python 3.8) ─────────
+  linux-arm64-compat:
+    runs-on: ubuntu-24.04-arm
+    container:
+      image: arm64v8/ubuntu:18.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq software-properties-common gnupg wget
+          add-apt-repository -y ppa:deadsnakes/ppa
+          apt-get update -qq
+          apt-get install -y -qq python3.8 python3.8-venv python3.8-dev python3.8-distutils
+          apt-get install -y -qq libegl1 libgl1 libopengl0 libxkbcommon0 libdbus-1-3
+          wget -q https://bootstrap.pypa.io/get-pip.py -O /tmp/get-pip.py
+          python3.8 /tmp/get-pip.py -q
+
+      - name: Install Python deps
+        run: python3.8 -m pip install PySide6 openpyxl xlrd Pillow pyinstaller
+
+      - name: Generate icon
+        run: |
+          python3.8 -c "
+          from PIL import Image, ImageDraw
+          s=256;m=s/2
+          img=Image.new('RGBA',(s,s),(0,0,0,0))
+          d=ImageDraw.Draw(img)
+          d.rounded_rectangle([0,0,s-1,s-1],radius=s//5,fill='#1a5276')
+          pad=int(s*0.15)
+          d.rounded_rectangle([pad,pad,s-pad,s-pad],radius=s//6,fill='#2980b9')
+          cx,cy,nr=m,m*0.88,int(s*0.07)
+          nodes=[(cx,int(cy-s*0.22)),(int(cx-s*0.2),int(cy+s*0.12)),(int(cx+s*0.2),int(cy+s*0.12))]
+          for i in range(3):
+           for j in range(i+1,3):d.line([nodes[i],nodes[j]],fill='#aed6f1',width=5)
+          for nx,ny in nodes:d.ellipse([nx-nr,ny-nr,nx+nr,ny+nr],fill='#ecf0f1')
+          tx,ty,ts=int(m+s*0.22),int(m+s*0.22),s*0.26
+          p1,p2,p3=(tx-int(ts*0.45),ty-int(ts*0.05)),(tx-int(ts*0.05),ty+int(ts*0.35)),(tx+int(ts*0.5),ty-int(ts*0.3))
+          d.line([p1,p2,p3],fill='#2ecc71',width=10,joint='curve')
+          img.save('portcheck/icon.png')
+          "
+
+      - name: Build
+        run: |
+          python3.8 -m PyInstaller --onefile --windowed --name PortCheck \
+            --add-data "portcheck/icon.png:portcheck" \
+            --clean --noconfirm main.py
+
+      - name: Package
+        run: |
+          cd dist
+          tar czf PortCheck-Linux-ARM64-compat.tar.gz PortCheck
+          sha256sum PortCheck-Linux-ARM64-compat.tar.gz > PortCheck-Linux-ARM64-compat.tar.gz.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PortCheck-Linux-ARM64-compat
+          path: |
+            dist/PortCheck-Linux-ARM64-compat.tar.gz
+            dist/PortCheck-Linux-ARM64-compat.tar.gz.sha256
 
   # ── macOS ARM64 ──────────────────────────────────────────
   macos-arm64:
@@ -252,16 +342,24 @@ jobs:
             --add-data "portcheck/icon.png:portcheck" \
             --clean --noconfirm main.py
 
+      - name: Package
+        run: |
+          cd dist
+          tar czf PortCheck-macOS-ARM64.tar.gz PortCheck
+          shasum -a 256 PortCheck-macOS-ARM64.tar.gz > PortCheck-macOS-ARM64.tar.gz.sha256
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: PortCheck-macOS-ARM64
-          path: dist/PortCheck
+          path: |
+            dist/PortCheck-macOS-ARM64.tar.gz
+            dist/PortCheck-macOS-ARM64.tar.gz.sha256
 
   # ── 发布 Release ─────────────────────────────────────────
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [windows, linux-x64, linux-x64-compat, linux-arm64, macos-arm64]
+    needs: [windows, linux-x64, linux-x64-compat, linux-arm64, linux-arm64-compat, macos-arm64]
     runs-on: ubuntu-latest
     permissions:
       contents: write
