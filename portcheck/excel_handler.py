@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from portcheck.scanner import expand_ip_range
+from portcheck.scanner import expand_ip_range, expand_port_range
 
 
 def _is_header_row(values: list[str]) -> bool:
@@ -64,33 +64,44 @@ def parse_targets_excel(filepath: str | Path) -> tuple[list[dict], list[str]]:
             continue
 
         ip_raw = str(values[0]).strip() if values[0] is not None else ""
-        port_str = values[1]
+        port_raw = str(values[1]).strip() if values[1] is not None else ""
         desc = str(values[2]).strip() if len(values) > 2 and values[2] is not None else ""
         batch = str(values[3]).strip() if len(values) > 3 and values[3] is not None else ""
 
-        try:
-            port = int(float(port_str))  # Excel 可能把数字读成 float
-        except (ValueError, TypeError):
-            errors.append(f"第 {i} 行: 端口 '{port_str}' 无效")
-            continue
-
-        if not (1 <= port <= 65535):
-            errors.append(f"第 {i} 行: 端口 {port} 超出范围")
-            continue
-
-        # 支持换行分隔的多个 IP + CIDR/范围展开
+        # 展开 IP（换行 + CIDR/范围）
         raw_ips = [ip.strip() for ip in ip_raw.split("\n") if ip.strip()]
         if not raw_ips:
             errors.append(f"第 {i} 行: IP 地址为空")
             continue
 
+        ips = []
         for raw_ip in raw_ips:
             try:
-                expanded = expand_ip_range(raw_ip)
+                ips.extend(expand_ip_range(raw_ip))
             except ValueError as e:
                 errors.append(f"第 {i} 行: {e}")
                 continue
-            for ip in expanded:
+
+        # 展开端口（换行 + 范围）
+        raw_ports = [p.strip() for p in port_raw.split("\n") if p.strip()]
+        if not raw_ports:
+            # 兼容旧格式：单行逗号/范围格式
+            raw_ports = [port_raw]
+        ports = []
+        for rp in raw_ports:
+            try:
+                ports.extend(expand_port_range(rp))
+            except ValueError as e:
+                errors.append(f"第 {i} 行: {e}")
+                continue
+
+        if not ports:
+            errors.append(f"第 {i} 行: 端口无效")
+            continue
+
+        # 笛卡尔积
+        for ip in ips:
+            for port in ports:
                 targets.append({"ip": ip, "port": port, "description": desc, "batch_name": batch})
 
     return targets, errors

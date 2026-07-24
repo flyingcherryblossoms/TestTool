@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from portcheck.scanner import expand_ip_range
+from portcheck.scanner import expand_ip_range, expand_port_range
 
 
 # ── 导入数据模型 ──────────────────────────────────────────
@@ -70,29 +70,41 @@ def parse_targets_csv(filepath: str | Path) -> tuple[list[CsvTarget], list[str]]
                 continue
 
             ip_raw = row[0].strip() if len(row) > 0 else ""
-            port_str = row[1].strip() if len(row) > 1 else "0"
+            port_raw = row[1].strip() if len(row) > 1 else "0"
             desc = row[2].strip() if len(row) > 2 else ""
             batch = row[3].strip() if len(row) > 3 else ""
 
-            try:
-                port = int(port_str)
-            except ValueError:
-                errors.append(f"第 {i} 行: 端口 '{port_str}' 不是有效数字")
-                continue
-
-            # 支持换行分隔的多个 IP + CIDR/范围展开
+            # 展开 IP（换行 + CIDR/范围）
             raw_ips = [ip.strip() for ip in ip_raw.split("\n") if ip.strip()]
             if not raw_ips:
                 errors.append(f"第 {i} 行: IP 地址为空")
                 continue
 
+            ips = []
             for raw_ip in raw_ips:
                 try:
-                    expanded = expand_ip_range(raw_ip)
+                    ips.extend(expand_ip_range(raw_ip))
                 except ValueError as e:
                     errors.append(f"第 {i} 行: {e}")
                     continue
-                for ip in expanded:
+
+            # 展开端口（换行 + 范围）
+            raw_ports = [p.strip() for p in port_raw.split("\n") if p.strip()]
+            ports = []
+            for rp in raw_ports:
+                try:
+                    ports.extend(expand_port_range(rp))
+                except ValueError as e:
+                    errors.append(f"第 {i} 行: {e}")
+                    continue
+
+            if not ports:
+                errors.append(f"第 {i} 行: 端口无效")
+                continue
+
+            # 笛卡尔积
+            for ip in ips:
+                for port in ports:
                     target = CsvTarget(ip=ip, port=port, description=desc, batch_name=batch)
                     err = target.validate()
                     if err:
