@@ -44,6 +44,7 @@ class TestPanel(QWidget):
         self._success_count = 0
         self._fail_count = 0
         self._current_batch_id: int | None = None
+        self._all_results: list[ScanResult] = []  # 缓存全部结果用于筛选
         self._setup_ui()
 
     def _setup_ui(self):
@@ -95,6 +96,14 @@ class TestPanel(QWidget):
         # ── 实时结果表格 ────────────────────────────────────
         result_group = QGroupBox("测试结果")
         result_layout = QVBoxLayout(result_group)
+
+        filter_layout = QHBoxLayout()
+        self._result_filter = QLineEdit()
+        self._result_filter.setPlaceholderText("筛选结果...")
+        self._result_filter.setClearButtonEnabled(True)
+        self._result_filter.textChanged.connect(self._apply_result_filter)
+        filter_layout.addWidget(self._result_filter)
+        result_layout.addLayout(filter_layout)
 
         self._result_table = QTableWidget()
         self._result_table.setColumnCount(6)
@@ -202,7 +211,9 @@ class TestPanel(QWidget):
         self._total = len(scan_targets)
         self._success_count = 0
         self._fail_count = 0
+        self._all_results = []
         self._result_table.setRowCount(0)
+        self._result_filter.clear()
 
         self._test_btn.setText("⏹ 停止测试")
         self._progress_bar.setVisible(True)
@@ -239,6 +250,9 @@ class TestPanel(QWidget):
         else:
             self._fail_count += 1
 
+        self._all_results.append(result)
+
+        # 始终保存到数据库
         self._db.save_test_result(
             session_id=self._session_id,
             target_id=result.target_id,
@@ -250,6 +264,29 @@ class TestPanel(QWidget):
             error_msg=result.error_msg,
         )
 
+        # 仅当通过筛选时才添加到表格
+        if self._result_matches_filter(result):
+            self._add_result_row(result)
+
+    def _on_all_done(self, results: list):
+        if self._session_id is not None:
+            self._db.complete_test_session(
+                self._session_id, self._total, self._success_count, self._fail_count
+            )
+        self._finalize_ui()
+        self._status_label.setText(
+            f"测试完成 | 共计 {self._total} | "
+            f"连通 {self._success_count} | 未连通 {self._fail_count}"
+        )
+        self.test_finished.emit()
+
+    def _on_error(self, error_msg: str):
+        self._finalize_ui()
+        QMessageBox.critical(self, "测试错误", f"检测过程发生错误:\n{error_msg}")
+        self._status_label.setText(f"测试失败: {error_msg}")
+
+    def _add_result_row(self, result: ScanResult):
+        """添加一行结果到表格。"""
         row = self._result_table.rowCount()
         self._result_table.insertRow(row)
 
@@ -272,22 +309,24 @@ class TestPanel(QWidget):
         self._result_table.setItem(row, 5, QTableWidgetItem(result.error_msg))
         self._result_table.scrollToBottom()
 
-    def _on_all_done(self, results: list):
-        if self._session_id is not None:
-            self._db.complete_test_session(
-                self._session_id, self._total, self._success_count, self._fail_count
-            )
-        self._finalize_ui()
-        self._status_label.setText(
-            f"测试完成 | 共计 {self._total} | "
-            f"连通 {self._success_count} | 未连通 {self._fail_count}"
-        )
-        self.test_finished.emit()
+    def _result_matches_filter(self, result: ScanResult) -> bool:
+        """检查结果是否匹配当前筛选文本。"""
+        text = self._result_filter.text().strip().lower()
+        if not text:
+            return True
+        status = "连通" if result.success else "未连通"
+        return (text in result.ip.lower()
+                or text in str(result.port)
+                or text in result.description.lower()
+                or text in status
+                or text in result.error_msg.lower())
 
-    def _on_error(self, error_msg: str):
-        self._finalize_ui()
-        QMessageBox.critical(self, "测试错误", f"检测过程发生错误:\n{error_msg}")
-        self._status_label.setText(f"测试失败: {error_msg}")
+    def _apply_result_filter(self):
+        """筛选文本变化时重建表格。"""
+        self._result_table.setRowCount(0)
+        for r in self._all_results:
+            if self._result_matches_filter(r):
+                self._add_result_row(r)
 
     def _finalize_ui(self):
         self._test_btn.setText("▶ 开始测试")
