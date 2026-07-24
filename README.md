@@ -3,7 +3,7 @@
 跨平台网络端口连通性检测工具。支持批量 TCP 测试、IP/端口范围展开、端口扫描、集合管理，CSV/Excel 导入导出。
 
 ![Windows](https://img.shields.io/badge/Windows-x64-blue)
-![Linux](https://img.shields.io/badge/Linux-x64%20%7C%20ARM64-orange)
+![Linux](https://img.shields.io/badge/Linux-x64%20%7C%20ARM64%20%7C%20Compat-orange)
 ![macOS](https://img.shields.io/badge/macOS-ARM64-silver)
 ![Python](https://img.shields.io/badge/Python-3.11+-green)
 ![License](https://img.shields.io/badge/License-MIT-yellow)
