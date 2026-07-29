@@ -146,6 +146,12 @@ class MainWindow(QMainWindow):
 
         left_layout.addWidget(QLabel("<b>集合列表</b>"))
 
+        self._batch_search = QLineEdit()
+        self._batch_search.setPlaceholderText("搜索集合...")
+        self._batch_search.setClearButtonEnabled(True)
+        self._batch_search.textChanged.connect(self._filter_batch_list)
+        left_layout.addWidget(self._batch_search)
+
         self._batch_list = QListWidget()
         self._batch_list.setDragDropMode(QAbstractItemView.InternalMove)
         self._batch_list.setDefaultDropAction(Qt.MoveAction)
@@ -257,6 +263,27 @@ class MainWindow(QMainWindow):
         # 默认选中第一项
         if self._batch_list.currentRow() < 0:
             self._batch_list.setCurrentRow(0)
+
+        # 应用当前搜索文本的筛选
+        search_text = self._batch_search.text().strip().lower()
+        if search_text:
+            self._filter_batch_list(search_text)
+
+    def _filter_batch_list(self, text: str):
+        """根据搜索文本筛选集合列表项。"""
+        search = text.strip().lower()
+        for row in range(self._batch_list.count()):
+            item = self._batch_list.item(row)
+            if item:
+                item.setHidden(search not in item.text().lower())
+
+        # 选中第一个可见项（跳过搜索框聚焦导致的闪烁）
+        visible_rows = [r for r in range(self._batch_list.count())
+                        if not self._batch_list.item(r).isHidden()]
+        if visible_rows:
+            current = self._batch_list.currentRow()
+            if current < 0 or self._batch_list.item(current).isHidden():
+                self._batch_list.setCurrentRow(visible_rows[0])
 
     def _on_batch_selected(self, row: int):
         """集合选择变更，更新所有面板。"""
