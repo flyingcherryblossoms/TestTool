@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QSpinBox,
@@ -48,6 +49,8 @@ class TestPanel(QWidget):
         self._success_count = 0
         self._fail_count = 0
         self._current_batch_id: int | None = None
+        self._selected_target_ids: list[int] = []   # 从目标管理传入的选中目标 ID
+        self._selected_label: str = ""              # 选中目标的显示标签
         self._all_results: list[ScanResult] = []  # 缓存全部结果用于筛选
         self._db_pending: list[ScanResult] = []   # 批量写 DB 的暂存
         self._db_batch_size = 50                   # 每攒够 N 条 flush 一次
@@ -91,6 +94,20 @@ class TestPanel(QWidget):
         ctrl_layout.addWidget(self._test_btn)
 
         layout.addWidget(ctrl_group)
+
+        # ── 选中目标列表（从目标管理传入时显示）────────────────
+        self._selected_group = QGroupBox("选中目标列表")
+        self._selected_group.setVisible(False)
+        selected_layout = QVBoxLayout(self._selected_group)
+        selected_layout.setContentsMargins(4, 4, 4, 4)
+        self._selected_text = QPlainTextEdit()
+        self._selected_text.setReadOnly(True)
+        self._selected_text.setMaximumBlockCount(500)
+        self._selected_text.setPlaceholderText("从目标管理勾选后点击「测试选中」将在此显示目标列表")
+        self._selected_text.setMinimumHeight(120)
+        self._selected_text.setMaximumHeight(280)
+        selected_layout.addWidget(self._selected_text)
+        layout.addWidget(self._selected_group)
 
         # ── 进度栏 ──────────────────────────────────────────
         progress_group = QGroupBox("测试进度")
@@ -159,8 +176,10 @@ class TestPanel(QWidget):
     # ── 公开接口 ───────────────────────────────────────────
 
     def set_batch(self, batch_id: int | None) -> None:
-        """设置当前集合，更新控制栏标签。"""
+        """设置当前集合，更新控制栏标签和选中目标列表。"""
         self._current_batch_id = batch_id
+        self._selected_target_ids = []  # 清除选中目标，让 _start_test 按集合测试
+        self._selected_label = ""
         targets = self._db.get_targets(batch_id)
         if batch_id is None:
             self._batch_label.setText(f"待测目标: 全部 ({len(targets)})")
@@ -171,11 +190,23 @@ class TestPanel(QWidget):
             name = batch.name if batch else "未知"
             self._batch_label.setText(f"待测目标: {name} ({len(targets)})")
 
+        # 更新选中目标列表（展示集合中的目标）
+        if targets:
+            lines = []
+            for t in targets:
+                batch_info = f"  [{t.batch_name}]" if t.batch_name else ""
+                lines.append(f"{t.ip}:{t.port}{batch_info}  {t.description}")
+            self._selected_text.setPlainText("\n".join(lines))
+            self._selected_group.setVisible(True)
+        else:
+            self._selected_text.clear()
+            self._selected_group.setVisible(False)
+
     def is_running(self) -> bool:
         return self._worker is not None and self._worker.isRunning()
 
     def start_test_with_ids(self, target_ids: list[int], label: str = "选中目标") -> None:
-        """使用指定目标 ID 列表启动测试（供外部调用）。"""
+        """使用指定目标 ID 列表启动测试（供外部调用）。存储选中 ID 以便后续「开始测试」复用。"""
         if self.is_running():
             QMessageBox.information(self, "提示", "有测试正在进行中，请等待完成。")
             return
@@ -189,6 +220,18 @@ class TestPanel(QWidget):
         if not targets:
             QMessageBox.information(self, "提示", "没有找到有效的目标。")
             return
+
+        # 存储选中目标以便后续「开始测试」复用
+        self._selected_target_ids = target_ids
+        self._selected_label = label
+
+        # 更新选中目标列表显示（含集合信息）
+        lines = []
+        for t in targets:
+            batch_info = f"  [{t.batch_name}]" if t.batch_name else ""
+            lines.append(f"{t.ip}:{t.port}{batch_info}  {t.description}")
+        self._selected_text.setPlainText("\n".join(lines))
+        self._selected_group.setVisible(True)
 
         scan_targets = [
             ScanTarget(id=t.id, ip=t.ip, port=t.port, description=t.description)
@@ -208,7 +251,12 @@ class TestPanel(QWidget):
             self._start_test()
 
     def _start_test(self):
-        """启动连通性检测（按当前集合）。"""
+        """启动连通性检测。优先使用从目标管理传入的选中目标，否则按当前集合。"""
+        # 优先使用从目标管理传入的选中目标
+        if self._selected_target_ids:
+            self.start_test_with_ids(self._selected_target_ids, self._selected_label)
+            return
+
         targets = self._db.get_targets(self._current_batch_id)
         if not targets:
             QMessageBox.information(self, "提示", "当前集合没有目标，请先添加目标。")
