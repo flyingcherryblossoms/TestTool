@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from functools import partial
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
