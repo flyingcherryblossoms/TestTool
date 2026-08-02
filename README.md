@@ -1,6 +1,6 @@
-# PortCheck
+# TestTool
 
-跨平台网络端口连通性检测工具。支持批量 TCP 测试、IP/端口范围展开、端口扫描、集合管理，CSV/Excel 导入导出。
+跨平台网络测试工具。支持批量 TCP 连通性检测、TCP/WebSocket 协议测试、IP/端口范围展开、端口扫描、集合管理、CSV/Excel 导入导出。
 
 ![Windows](https://img.shields.io/badge/Windows-x64-blue)
 ![Linux](https://img.shields.io/badge/Linux-x64%20%7C%20ARM64%20%7C%20Compat-orange)
@@ -63,13 +63,13 @@
 
 ### Windows
 
-下载 `PortCheck.exe`，双击运行。
+下载 `TestTool.exe`，双击运行。
 
 ### Linux ARM64
 
 ```bash
-chmod +x PortCheck
-./PortCheck
+chmod +x TestTool
+./TestTool
 ```
 
 ### 源码运行
@@ -216,12 +216,12 @@ img.save('portcheck/icon.png')
 ```bash
 pip install PySide6 openpyxl xlrd Pillow pyinstaller
 
-pyinstaller --onefile --windowed --name PortCheck \
+pyinstaller --onefile --windowed --name TestTool \
     --icon=portcheck/icon.ico \
     --add-data "portcheck/icon.ico;portcheck" \
     --clean --noconfirm main.py
 
-# 输出: dist/PortCheck.exe
+# 输出: dist/TestTool.exe
 ```
 
 ### Linux ARM64
@@ -232,11 +232,11 @@ sudo apt-get install -y libegl1 libgl1 libopengl0 libxkbcommon0
 
 pip install PySide6 openpyxl xlrd Pillow pyinstaller
 
-pyinstaller --onefile --windowed --name PortCheck \
+pyinstaller --onefile --windowed --name TestTool \
     --add-data "portcheck/icon.png:portcheck" \
     --clean --noconfirm main.py
 
-# 输出: dist/PortCheck
+# 输出: dist/TestTool
 ```
 
 ## GitHub Actions 自动构建
@@ -251,7 +251,7 @@ git push origin v1.0.0
 ## 项目结构
 
 ```
-PortCheck/
+TestTool/
 ├── main.py                        # 入口（GUI + CLI 双模式）
 ├── requirements.txt               # PySide6
 └── portcheck/

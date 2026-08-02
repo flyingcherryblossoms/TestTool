@@ -31,6 +31,7 @@ from portcheck.csv_handler import export_targets_to_csv
 from portcheck.database import Database
 from portcheck.excel_handler import export_targets_to_excel
 from portcheck.ui.port_scan_dialog import PortScanDialog
+from portcheck.ui.protocol_panel import ProtocolPanel
 from portcheck.ui.result_panel import ResultPanel
 from portcheck.ui.target_panel import TargetPanel
 from portcheck.ui.test_panel import TestPanel
@@ -79,12 +80,12 @@ class BatchDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
-    """PortCheck 主窗口。"""
+    """TestTool 主窗口。"""
 
     def __init__(self, db_path: str = ""):
         super().__init__()
         self._db = Database(db_path)
-        self.setWindowTitle("PortCheck - 网络端口连通性检测工具")
+        self.setWindowTitle("TestTool - 网络测试工具")
         self.setMinimumSize(1100, 700)
         self.resize(1200, 800)
 
@@ -187,6 +188,7 @@ class MainWindow(QMainWindow):
         self._target_panel = TargetPanel(self._db)
         self._target_panel.targets_changed.connect(self._on_targets_changed)
         self._target_panel.test_selected.connect(self._on_test_selected)
+        self._target_panel.protocol_test_selected.connect(self._on_protocol_test_selected)
         self._tabs.addTab(self._target_panel, "目标管理")
 
         self._test_panel = TestPanel(self._db)
@@ -195,6 +197,9 @@ class MainWindow(QMainWindow):
 
         self._result_panel = ResultPanel(self._db)
         self._tabs.addTab(self._result_panel, "测试历史")
+
+        self._protocol_panel = ProtocolPanel(self._db)
+        self._tabs.addTab(self._protocol_panel, "协议测试")
 
         right_layout.addWidget(self._tabs)
         splitter.addWidget(right_panel)
@@ -414,11 +419,11 @@ class MainWindow(QMainWindow):
 
     def _show_about(self):
         QMessageBox.about(
-            self, "关于 PortCheck",
-            "<h3>PortCheck v1.0</h3>"
-            "<p>网络端口连通性检测工具</p>"
+            self, "关于 TestTool",
+            "<h3>TestTool v1.0</h3>"
+            "<p>网络测试工具 —— 端口连通性检测 / 协议测试</p>"
             "<p>基于 Python + PySide6 + SQLite 构建</p>"
-            "<p>用于批量检测本机到远程 IP:Port 的 TCP 连通性。</p>"
+            "<p>支持 TCP/WebSocket 客户端与服务端、批量端口检测。</p>"
         )
 
     # ── 选中目标测试 ───────────────────────────────────────
@@ -427,6 +432,11 @@ class MainWindow(QMainWindow):
         """目标面板「测试选中」按钮回调：切换到测试页并启动测试。"""
         self._tabs.setCurrentIndex(1)  # 切换到「连通测试」标签页
         self._test_panel.start_test_with_ids(target_ids, label="选中目标")
+
+    def _on_protocol_test_selected(self, ip: str, port: int):
+        """目标面板「协议测试」按钮回调：切换到协议测试页并预填目标。"""
+        self._tabs.setCurrentIndex(3)  # 切换到「协议测试」标签页
+        self._protocol_panel.prefill_client_target(ip, port)
 
     # ── 端口扫描 ───────────────────────────────────────────
 
@@ -450,4 +460,16 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 return
             self._test_panel._cancel_test()
+
+        if self._protocol_panel.has_active_servers():
+            reply = QMessageBox.question(
+                self, "确认退出",
+                "有正在运行的协议监听器，退出将全部停止，确定退出吗？",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                event.ignore()
+                return
+            self._protocol_panel.stop_all_servers()
+
         event.accept()

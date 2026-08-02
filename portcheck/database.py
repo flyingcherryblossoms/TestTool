@@ -62,6 +62,51 @@ class TestResult:
     tested_at: str = ""
 
 
+@dataclass
+class ProtocolCollection:
+    """保存的协议测试配置（TCP/WebSocket 客户端）。"""
+    id: int
+    name: str
+    protocol_type: str = "tcp_client"  # tcp_client | ws_client
+    target_ip: str = ""
+    target_port: int = 0
+    encoding: str = "UTF-8"
+    head_length: int = 5              # 0=raw, >0=长度头位数
+    timeout: float = 5.0
+    ws_path: str = ""                 # WebSocket 路径
+    ws_use_ssl: bool = False
+    description: str = ""
+    created_at: str = ""
+
+
+@dataclass
+class ProtocolMessage:
+    """协议测试集合内的消息模板。"""
+    id: int
+    collection_id: int
+    direction: str = "send"           # "send" | "expected_response"
+    message: str = ""
+    sort_order: int = 0
+    created_at: str = ""
+
+
+@dataclass
+class ProtocolServer:
+    """持久化的协议服务端监听器配置。"""
+    id: int
+    name: str = ""
+    server_type: str = ""             # "tcp_server" | "ws_server"
+    ip: str = "0.0.0.0"
+    port: int = 0
+    encoding: str = "UTF-8"
+    head_length: int = 0
+    ws_path: str = ""
+    response_mode: str = "fixed"      # "fixed" | "echo"
+    response_message: str = ""
+    sort_order: int = 0
+    created_at: str = ""
+
+
 # ── SQL 建表语句 ──────────────────────────────────────────
 
 SCHEMA_SQL = """
@@ -119,6 +164,51 @@ CREATE TABLE IF NOT EXISTS test_results (
 CREATE INDEX IF NOT EXISTS idx_targets_batch ON targets(batch_id);
 CREATE INDEX IF NOT EXISTS idx_results_session ON test_results(session_id);
 CREATE INDEX IF NOT EXISTS idx_results_status ON test_results(success);
+
+CREATE TABLE IF NOT EXISTS protocol_collections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    protocol_type TEXT NOT NULL DEFAULT 'tcp_client',
+    target_ip TEXT DEFAULT '',
+    target_port INTEGER DEFAULT 0,
+    encoding TEXT DEFAULT 'UTF-8',
+    head_length INTEGER DEFAULT 5,
+    timeout REAL DEFAULT 5.0,
+    ws_path TEXT DEFAULT '',
+    ws_use_ssl INTEGER DEFAULT 0,
+    description TEXT DEFAULT '',
+    created_at TIMESTAMP DEFAULT (datetime('now', 'localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS protocol_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    collection_id INTEGER NOT NULL,
+    direction TEXT NOT NULL DEFAULT 'send',
+    message TEXT DEFAULT '',
+    sort_order INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT (datetime('now', 'localtime')),
+    FOREIGN KEY (collection_id) REFERENCES protocol_collections(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS protocol_servers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    server_type TEXT NOT NULL DEFAULT 'tcp_server',
+    ip TEXT DEFAULT '0.0.0.0',
+    port INTEGER NOT NULL,
+    encoding TEXT DEFAULT 'UTF-8',
+    head_length INTEGER DEFAULT 0,
+    ws_path TEXT DEFAULT '',
+    response_mode TEXT DEFAULT 'fixed',
+    response_message TEXT DEFAULT '',
+    sort_order INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT (datetime('now', 'localtime'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_protocol_msgs_collection
+    ON protocol_messages(collection_id);
+CREATE INDEX IF NOT EXISTS idx_protocol_servers_type
+    ON protocol_servers(server_type);
 """
 
 
@@ -545,3 +635,254 @@ class Database:
             if tid not in result:
                 result[tid] = bool(r["success"])
         return result
+
+    # ── 协议测试集合操作 ─────────────────────────────────────
+
+    def get_all_protocol_collections(self,
+                                     protocol_type: str | None = None
+                                     ) -> list[ProtocolCollection]:
+        """获取协议测试集合列表，可按类型筛选。"""
+        with self._connect() as conn:
+            if protocol_type:
+                rows = conn.execute("""
+                    SELECT * FROM protocol_collections
+                    WHERE protocol_type = ?
+                    ORDER BY created_at DESC
+                """, (protocol_type,)).fetchall()
+            else:
+                rows = conn.execute("""
+                    SELECT * FROM protocol_collections
+                    ORDER BY created_at DESC
+                """).fetchall()
+            return [ProtocolCollection(
+                id=r["id"], name=r["name"],
+                protocol_type=r["protocol_type"],
+                target_ip=r["target_ip"], target_port=r["target_port"],
+                encoding=r["encoding"], head_length=r["head_length"],
+                timeout=r["timeout"], ws_path=r["ws_path"],
+                ws_use_ssl=bool(r["ws_use_ssl"]),
+                description=r["description"], created_at=r["created_at"]
+            ) for r in rows]
+
+    def get_protocol_collection(self, collection_id: int
+                                ) -> Optional[ProtocolCollection]:
+        """获取单个协议测试集合。"""
+        with self._connect() as conn:
+            r = conn.execute(
+                "SELECT * FROM protocol_collections WHERE id = ?",
+                (collection_id,)
+            ).fetchone()
+            if r:
+                return ProtocolCollection(
+                    id=r["id"], name=r["name"],
+                    protocol_type=r["protocol_type"],
+                    target_ip=r["target_ip"], target_port=r["target_port"],
+                    encoding=r["encoding"], head_length=r["head_length"],
+                    timeout=r["timeout"], ws_path=r["ws_path"],
+                    ws_use_ssl=bool(r["ws_use_ssl"]),
+                    description=r["description"], created_at=r["created_at"]
+                )
+            return None
+
+    def add_protocol_collection(self, name: str, protocol_type: str,
+                                target_ip: str = "", target_port: int = 0,
+                                encoding: str = "UTF-8",
+                                head_length: int = 5,
+                                timeout: float = 5.0,
+                                ws_path: str = "",
+                                ws_use_ssl: bool = False,
+                                description: str = "") -> int:
+        """添加协议测试集合，返回新 ID。"""
+        with self._connect() as conn:
+            cur = conn.execute("""
+                INSERT INTO protocol_collections
+                    (name, protocol_type, target_ip, target_port, encoding,
+                     head_length, timeout, ws_path, ws_use_ssl, description)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (name, protocol_type, target_ip, target_port, encoding,
+                  head_length, timeout, ws_path, 1 if ws_use_ssl else 0,
+                  description))
+            return cur.lastrowid
+
+    def update_protocol_collection(self, collection_id: int, name: str,
+                                   protocol_type: str,
+                                   target_ip: str = "",
+                                   target_port: int = 0,
+                                   encoding: str = "UTF-8",
+                                   head_length: int = 5,
+                                   timeout: float = 5.0,
+                                   ws_path: str = "",
+                                   ws_use_ssl: bool = False,
+                                   description: str = "") -> None:
+        """更新协议测试集合。"""
+        with self._connect() as conn:
+            conn.execute("""
+                UPDATE protocol_collections SET
+                    name = ?, protocol_type = ?, target_ip = ?,
+                    target_port = ?, encoding = ?, head_length = ?,
+                    timeout = ?, ws_path = ?, ws_use_ssl = ?, description = ?
+                WHERE id = ?
+            """, (name, protocol_type, target_ip, target_port, encoding,
+                  head_length, timeout, ws_path, 1 if ws_use_ssl else 0,
+                  description, collection_id))
+
+    def delete_protocol_collection(self, collection_id: int) -> None:
+        """删除协议测试集合（关联消息会因 ON DELETE CASCADE 自动删除）。"""
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM protocol_collections WHERE id = ?",
+                (collection_id,)
+            )
+
+    # ── 协议消息操作 ─────────────────────────────────────────
+
+    def get_protocol_messages(self, collection_id: int
+                              ) -> list[ProtocolMessage]:
+        """获取指定集合的所有消息（按 sort_order 排序）。"""
+        with self._connect() as conn:
+            rows = conn.execute("""
+                SELECT * FROM protocol_messages
+                WHERE collection_id = ?
+                ORDER BY sort_order, created_at
+            """, (collection_id,)).fetchall()
+            return [ProtocolMessage(
+                id=r["id"], collection_id=r["collection_id"],
+                direction=r["direction"], message=r["message"],
+                sort_order=r["sort_order"], created_at=r["created_at"]
+            ) for r in rows]
+
+    def add_protocol_message(self, collection_id: int, direction: str,
+                             message: str, sort_order: int = 0) -> int:
+        """添加一条协议消息，返回新 ID。"""
+        with self._connect() as conn:
+            cur = conn.execute("""
+                INSERT INTO protocol_messages
+                    (collection_id, direction, message, sort_order)
+                VALUES (?, ?, ?, ?)
+            """, (collection_id, direction, message, sort_order))
+            return cur.lastrowid
+
+    def save_protocol_messages_batch(self,
+                                     rows: list[tuple]) -> int:
+        """批量保存协议消息（事务写入）。
+
+        rows 中每条为 (collection_id, direction, message, sort_order)
+        """
+        if not rows:
+            return 0
+        with self._connect() as conn:
+            conn.executemany("""
+                INSERT INTO protocol_messages
+                    (collection_id, direction, message, sort_order)
+                VALUES (?, ?, ?, ?)
+            """, rows)
+            return len(rows)
+
+    def delete_protocol_messages(self, collection_id: int) -> None:
+        """删除指定集合的所有消息。"""
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM protocol_messages WHERE collection_id = ?",
+                (collection_id,)
+            )
+
+    # ── 协议服务端操作 ───────────────────────────────────────
+
+    def get_all_protocol_servers(self,
+                                 server_type: str | None = None
+                                 ) -> list[ProtocolServer]:
+        """获取协议服务端监听器列表，可按类型筛选。"""
+        with self._connect() as conn:
+            if server_type:
+                rows = conn.execute("""
+                    SELECT * FROM protocol_servers
+                    WHERE server_type = ?
+                    ORDER BY sort_order, created_at DESC
+                """, (server_type,)).fetchall()
+            else:
+                rows = conn.execute("""
+                    SELECT * FROM protocol_servers
+                    ORDER BY sort_order, created_at DESC
+                """).fetchall()
+            return [ProtocolServer(
+                id=r["id"], name=r["name"], server_type=r["server_type"],
+                ip=r["ip"], port=r["port"], encoding=r["encoding"],
+                head_length=r["head_length"], ws_path=r["ws_path"],
+                response_mode=r["response_mode"],
+                response_message=r["response_message"],
+                sort_order=r["sort_order"], created_at=r["created_at"]
+            ) for r in rows]
+
+    def get_protocol_server(self, server_id: int
+                            ) -> Optional[ProtocolServer]:
+        """获取单个协议服务端配置。"""
+        with self._connect() as conn:
+            r = conn.execute(
+                "SELECT * FROM protocol_servers WHERE id = ?",
+                (server_id,)
+            ).fetchone()
+            if r:
+                return ProtocolServer(
+                    id=r["id"], name=r["name"],
+                    server_type=r["server_type"],
+                    ip=r["ip"], port=r["port"], encoding=r["encoding"],
+                    head_length=r["head_length"], ws_path=r["ws_path"],
+                    response_mode=r["response_mode"],
+                    response_message=r["response_message"],
+                    sort_order=r["sort_order"], created_at=r["created_at"]
+                )
+            return None
+
+    def add_protocol_server(self, name: str, server_type: str,
+                            ip: str = "0.0.0.0", port: int = 0,
+                            encoding: str = "UTF-8",
+                            head_length: int = 0,
+                            ws_path: str = "",
+                            response_mode: str = "fixed",
+                            response_message: str = "") -> int:
+        """添加协议服务端配置，返回新 ID。"""
+        with self._connect() as conn:
+            cur = conn.execute("""
+                INSERT INTO protocol_servers
+                    (name, server_type, ip, port, encoding, head_length,
+                     ws_path, response_mode, response_message)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (name, server_type, ip, port, encoding, head_length,
+                  ws_path, response_mode, response_message))
+            return cur.lastrowid
+
+    def update_protocol_server(self, server_id: int, name: str,
+                               server_type: str, ip: str = "0.0.0.0",
+                               port: int = 0, encoding: str = "UTF-8",
+                               head_length: int = 0,
+                               ws_path: str = "",
+                               response_mode: str = "fixed",
+                               response_message: str = "") -> None:
+        """更新协议服务端配置。"""
+        with self._connect() as conn:
+            conn.execute("""
+                UPDATE protocol_servers SET
+                    name = ?, server_type = ?, ip = ?, port = ?,
+                    encoding = ?, head_length = ?, ws_path = ?,
+                    response_mode = ?, response_message = ?
+                WHERE id = ?
+            """, (name, server_type, ip, port, encoding, head_length,
+                  ws_path, response_mode, response_message, server_id))
+
+    def delete_protocol_server(self, server_id: int) -> None:
+        """删除协议服务端配置。"""
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM protocol_servers WHERE id = ?",
+                (server_id,)
+            )
+
+    def update_protocol_servers_sort_order(self,
+                                           ordered_ids: list[int]) -> None:
+        """按传入的 ID 顺序更新服务端排序。"""
+        with self._connect() as conn:
+            for idx, server_id in enumerate(ordered_ids):
+                conn.execute(
+                    "UPDATE protocol_servers SET sort_order = ? WHERE id = ?",
+                    (idx, server_id)
+                )

@@ -1,4 +1,4 @@
-"""PortCheck 入口 —— 网络端口连通性检测工具。
+"""TestTool 入口 —— 网络端口连通性检测与协议测试工具。
 
 用法:
     python main.py                 # 启动 GUI
@@ -35,8 +35,8 @@ def _get_icon_path() -> str:
 def run_gui(db_path: str) -> None:
     """启动图形界面。"""
     app = QApplication(sys.argv)
-    app.setApplicationName("PortCheck")
-    app.setOrganizationName("PortCheck")
+    app.setApplicationName("TestTool")
+    app.setOrganizationName("TestTool")
 
     # 设置窗口图标
     icon_path = _get_icon_path()
@@ -81,7 +81,7 @@ def run_cli(targets: list[tuple[str, int]], timeout: float = 3.0) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="PortCheck - 网络端口连通性检测工具"
+        description="TestTool - 网络端口连通性检测与协议测试工具"
     )
     parser.add_argument("--db", type=str, default="", help="SQLite 数据库路径")
     parser.add_argument("--cli", nargs="+", help="命令行模式: IP1 Port1 [IP2 Port2 ...]")

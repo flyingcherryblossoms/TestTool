@@ -41,7 +41,7 @@ jobs:
 
       - name: Build
         run: |
-          pyinstaller --onefile --windowed --name PortCheck `
+          pyinstaller --onefile --windowed --name TestTool `
             --icon=portcheck/icon.ico `
             --add-data "portcheck/icon.ico;portcheck" `
             --clean --noconfirm main.py
@@ -50,17 +50,17 @@ jobs:
         shell: pwsh
         run: |
           cd dist
-          Compress-Archive -Path PortCheck.exe -DestinationPath PortCheck-Windows-x64.zip
-          (Get-FileHash PortCheck-Windows-x64.zip -Algorithm SHA256).Hash + "  PortCheck-Windows-x64.zip" |
-            Out-File -Encoding ASCII PortCheck-Windows-x64.zip.sha256
+          Compress-Archive -Path TestTool.exe -DestinationPath TestTool-Windows-x64.zip
+          (Get-FileHash TestTool-Windows-x64.zip -Algorithm SHA256).Hash + "  TestTool-Windows-x64.zip" |
+            Out-File -Encoding ASCII TestTool-Windows-x64.zip.sha256
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PortCheck-Windows-x64
+          name: TestTool-Windows-x64
           path: |
-            dist/PortCheck-Windows-x64.zip
-            dist/PortCheck-Windows-x64.zip.sha256
+            dist/TestTool-Windows-x64.zip
+            dist/TestTool-Windows-x64.zip.sha256
 
   # ── Linux x64 ────────────────────────────────────────────
   linux-x64:
@@ -102,23 +102,23 @@ jobs:
 
       - name: Build
         run: |
-          pyinstaller --onefile --windowed --name PortCheck \
+          pyinstaller --onefile --windowed --name TestTool \
             --add-data "portcheck/icon.png:portcheck" \
             --clean --noconfirm main.py
 
       - name: Package
         run: |
           cd dist
-          tar czf PortCheck-Linux-x64.tar.gz PortCheck
-          sha256sum PortCheck-Linux-x64.tar.gz > PortCheck-Linux-x64.tar.gz.sha256
+          tar czf TestTool-Linux-x64.tar.gz TestTool
+          sha256sum TestTool-Linux-x64.tar.gz > TestTool-Linux-x64.tar.gz.sha256
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PortCheck-Linux-x64
+          name: TestTool-Linux-x64
           path: |
-            dist/PortCheck-Linux-x64.tar.gz
-            dist/PortCheck-Linux-x64.tar.gz.sha256
+            dist/TestTool-Linux-x64.tar.gz
+            dist/TestTool-Linux-x64.tar.gz.sha256
 
   # ── Linux x64 兼容版 (glibc 2.27+, Python 3.8) ───────────
   linux-x64-compat:
@@ -167,7 +167,7 @@ jobs:
       - name: Build
         run: |
           QT_PLUGINS=$(python3.8 -c "import PySide6,os;print(os.path.join(os.path.dirname(PySide6.__file__),'Qt','plugins'))")
-          python3.8 -m PyInstaller --onefile --name PortCheck \
+          python3.8 -m PyInstaller --onefile --name TestTool \
             --add-data "portcheck/icon.png:portcheck" \
             --add-data "${QT_PLUGINS}/platforms:PySide6/Qt/plugins/platforms" \
             --clean --noconfirm main.py
@@ -175,16 +175,16 @@ jobs:
       - name: Package
         run: |
           cd dist
-          tar czf PortCheck-Linux-x64-compat.tar.gz PortCheck
-          sha256sum PortCheck-Linux-x64-compat.tar.gz > PortCheck-Linux-x64-compat.tar.gz.sha256
+          tar czf TestTool-Linux-x64-compat.tar.gz TestTool
+          sha256sum TestTool-Linux-x64-compat.tar.gz > TestTool-Linux-x64-compat.tar.gz.sha256
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PortCheck-Linux-x64-compat
+          name: TestTool-Linux-x64-compat
           path: |
-            dist/PortCheck-Linux-x64-compat.tar.gz
-            dist/PortCheck-Linux-x64-compat.tar.gz.sha256
+            dist/TestTool-Linux-x64-compat.tar.gz
+            dist/TestTool-Linux-x64-compat.tar.gz.sha256
 
   # ── Linux ARM64 ──────────────────────────────────────────
   linux-arm64:
@@ -226,23 +226,23 @@ jobs:
 
       - name: Build
         run: |
-          pyinstaller --onefile --windowed --name PortCheck \
+          pyinstaller --onefile --windowed --name TestTool \
             --add-data "portcheck/icon.png:portcheck" \
             --clean --noconfirm main.py
 
       - name: Package
         run: |
           cd dist
-          tar czf PortCheck-Linux-ARM64.tar.gz PortCheck
-          sha256sum PortCheck-Linux-ARM64.tar.gz > PortCheck-Linux-ARM64.tar.gz.sha256
+          tar czf TestTool-Linux-ARM64.tar.gz TestTool
+          sha256sum TestTool-Linux-ARM64.tar.gz > TestTool-Linux-ARM64.tar.gz.sha256
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PortCheck-Linux-ARM64
+          name: TestTool-Linux-ARM64
           path: |
-            dist/PortCheck-Linux-ARM64.tar.gz
-            dist/PortCheck-Linux-ARM64.tar.gz.sha256
+            dist/TestTool-Linux-ARM64.tar.gz
+            dist/TestTool-Linux-ARM64.tar.gz.sha256
 
   # ── Linux ARM64 兼容版 (glibc 2.27+, Python 3.8) ─────────
   linux-arm64-compat:
@@ -291,7 +291,7 @@ jobs:
       - name: Build
         run: |
           QT_PLUGINS=$(python3.8 -c "import PySide6,os;print(os.path.join(os.path.dirname(PySide6.__file__),'Qt','plugins'))")
-          python3.8 -m PyInstaller --onefile --name PortCheck \
+          python3.8 -m PyInstaller --onefile --name TestTool \
             --add-data "portcheck/icon.png:portcheck" \
             --add-data "${QT_PLUGINS}/platforms:PySide6/Qt/plugins/platforms" \
             --clean --noconfirm main.py
@@ -299,16 +299,16 @@ jobs:
       - name: Package
         run: |
           cd dist
-          tar czf PortCheck-Linux-ARM64-compat.tar.gz PortCheck
-          sha256sum PortCheck-Linux-ARM64-compat.tar.gz > PortCheck-Linux-ARM64-compat.tar.gz.sha256
+          tar czf TestTool-Linux-ARM64-compat.tar.gz TestTool
+          sha256sum TestTool-Linux-ARM64-compat.tar.gz > TestTool-Linux-ARM64-compat.tar.gz.sha256
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PortCheck-Linux-ARM64-compat
+          name: TestTool-Linux-ARM64-compat
           path: |
-            dist/PortCheck-Linux-ARM64-compat.tar.gz
-            dist/PortCheck-Linux-ARM64-compat.tar.gz.sha256
+            dist/TestTool-Linux-ARM64-compat.tar.gz
+            dist/TestTool-Linux-ARM64-compat.tar.gz.sha256
 
   # ── macOS ARM64 ──────────────────────────────────────────
   macos-arm64:
@@ -345,23 +345,23 @@ jobs:
 
       - name: Build
         run: |
-          pyinstaller --onefile --windowed --name PortCheck \
+          pyinstaller --onefile --windowed --name TestTool \
             --add-data "portcheck/icon.png:portcheck" \
             --clean --noconfirm main.py
 
       - name: Package
         run: |
           cd dist
-          tar czf PortCheck-macOS-ARM64.tar.gz PortCheck
-          shasum -a 256 PortCheck-macOS-ARM64.tar.gz > PortCheck-macOS-ARM64.tar.gz.sha256
+          tar czf TestTool-macOS-ARM64.tar.gz TestTool
+          shasum -a 256 TestTool-macOS-ARM64.tar.gz > TestTool-macOS-ARM64.tar.gz.sha256
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PortCheck-macOS-ARM64
+          name: TestTool-macOS-ARM64
           path: |
-            dist/PortCheck-macOS-ARM64.tar.gz
-            dist/PortCheck-macOS-ARM64.tar.gz.sha256
+            dist/TestTool-macOS-ARM64.tar.gz
+            dist/TestTool-macOS-ARM64.tar.gz.sha256
 
   # ── 发布 Release ─────────────────────────────────────────
   release:
@@ -373,7 +373,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: PortCheck-*
+          pattern: TestTool-*
           merge-multiple: true
           path: artifacts
 

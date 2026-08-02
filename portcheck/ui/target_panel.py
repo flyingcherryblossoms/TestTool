@@ -261,7 +261,8 @@ class TargetPanel(QWidget):
     """
 
     targets_changed = Signal()
-    test_selected = Signal(list)  # list[target_id]
+    test_selected = Signal(list)          # list[target_id]
+    protocol_test_selected = Signal(str, int)  # ip, port
 
     def __init__(self, db: Database, parent=None):
         super().__init__(parent)
@@ -370,6 +371,14 @@ class TargetPanel(QWidget):
         )
         self._test_selected_btn.clicked.connect(self._on_test_selected)
         btn_layout.addWidget(self._test_selected_btn)
+
+        self._proto_test_btn = QPushButton("协议测试")
+        self._proto_test_btn.setStyleSheet(
+            "QPushButton { color: #fff; background-color: #8e44ad; padding: 4px 12px; }"
+            "QPushButton:hover { background-color: #9b59b6; }"
+        )
+        self._proto_test_btn.clicked.connect(self._on_protocol_test_selected)
+        btn_layout.addWidget(self._proto_test_btn)
 
         btn_layout.addStretch()
 
@@ -579,7 +588,7 @@ class TargetPanel(QWidget):
 
     def _save_column_widths(self):
         """保存用户调整后的列宽到 QSettings。"""
-        settings = QSettings("PortCheck", "PortCheck")
+        settings = QSettings("TestTool", "TestTool")
         for col in [2, 3, 4, 5]:  # IP, 端口, 描述, 集合
             settings.setValue(f"target_col_{col}", self._table.columnWidth(col))
 
@@ -693,6 +702,21 @@ class TargetPanel(QWidget):
             QMessageBox.information(self, "提示", "当前没有可测试的目标。")
             return
         self.test_selected.emit(ids)
+
+    def _on_protocol_test_selected(self):
+        """将第一个勾选目标的 IP/端口发送到协议测试面板。"""
+        ids = self.get_selected_target_ids()
+        if not ids:
+            # 没有勾选 → 取表格第一个
+            item = self._table.item(0, 2)
+            if item:
+                ids = [item.data(Qt.UserRole)]
+        if not ids:
+            QMessageBox.information(self, "提示", "当前没有可测试的目标。")
+            return
+        target = self._db.get_target(ids[0])
+        if target:
+            self.protocol_test_selected.emit(target.ip, target.port)
 
     def _import_file(self):
         filepath, _ = QFileDialog.getOpenFileName(
