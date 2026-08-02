@@ -1,4 +1,4 @@
-"""协议测试面板 —— 客户端 / 服务端两个标签页，协议类型内部切换。"""
+"""协议测试面板 —— 测试集合 / 客户端 / 服务端 / 测试历史 四个子标签页。"""
 
 from __future__ import annotations
 
@@ -8,11 +8,13 @@ from functools import partial
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -22,6 +24,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -43,24 +46,23 @@ from portcheck.ui.protocol_workers import (
     WsClientWorker,
     WsServerWorker,
 )
+from portcheck.csv_handler import export_results_to_csv
+from portcheck.excel_handler import export_results_to_excel
 
 
 ENCODINGS = ["UTF-8", "GBK", "GB2312", "ISO-8859-1", "ASCII"]
 
 
 def _slot(fn, *args):
-    """返回忽略所有信号参数、只调用 fn(*args) 的可调用对象。"""
     def handler(*_sig_args):
         fn(*args)
     return handler
 
 
-# ── 服务端配置对话框 ────────────────────────────────────────
+# ── 服务端对话框 ──────────────────────────────────────────
 
 
 class ServerDialog(QDialog):
-    """新建/编辑协议服务端监听器配置。"""
-
     def __init__(self, title: str, server_type: str,
                  server: dict | None = None, parent=None):
         super().__init__(parent)
@@ -68,16 +70,13 @@ class ServerDialog(QDialog):
         self.setMinimumWidth(420)
         self._server_type = server_type
         self._is_tcp = server_type == "tcp_server"
-
         layout = QFormLayout(self)
 
         self._name_edit = QLineEdit(server.get("name", "") if server else "")
         self._name_edit.setPlaceholderText("例如: 生产环境监听")
         layout.addRow("名称:", self._name_edit)
-
         self._ip_edit = QLineEdit(server.get("ip", "0.0.0.0") if server else "0.0.0.0")
         layout.addRow("监听地址:", self._ip_edit)
-
         self._port_spin = QSpinBox()
         self._port_spin.setRange(1, 65535)
         self._port_spin.setValue(server.get("port", 35126) if server else 35126)
@@ -89,21 +88,16 @@ class ServerDialog(QDialog):
             enc = server.get("encoding", "UTF-8") if server else "UTF-8"
             self._encoding_combo.setCurrentText(enc)
             layout.addRow("编码:", self._encoding_combo)
-
             self._head_len_spin = QSpinBox()
             self._head_len_spin.setRange(0, 20)
             self._head_len_spin.setToolTip("0=原始模式")
             self._head_len_spin.setSuffix(" 位")
-            self._head_len_spin.setValue(
-                server.get("head_length", 5) if server else 5
-            )
+            self._head_len_spin.setValue(server.get("head_length", 5) if server else 5)
             layout.addRow("HeadLen:", self._head_len_spin)
         else:
             self._encoding_combo = None
             self._head_len_spin = None
-            self._ws_path_edit = QLineEdit(
-                server.get("ws_path", "/") if server else "/"
-            )
+            self._ws_path_edit = QLineEdit(server.get("ws_path", "/") if server else "/")
             layout.addRow("路径:", self._ws_path_edit)
 
         self._response_mode_combo = QComboBox()
@@ -113,7 +107,6 @@ class ServerDialog(QDialog):
             self._response_mode_combo.setCurrentIndex(1)
         self._response_mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         layout.addRow("响应模式:", self._response_mode_combo)
-
         self._response_edit = QPlainTextEdit()
         self._response_edit.setPlaceholderText("输入固定响应内容...")
         self._response_edit.setMaximumHeight(120)
@@ -155,11 +148,451 @@ class ServerDialog(QDialog):
         return data
 
 
-# ── 协议测试面板 ────────────────────────────────────────────
+# ── 测试集合管理标签页 (Subtab 1) ──────────────────────────
+
+
+class _CollectionManagerTab(QWidget):
+    """协议测试集合管理 —— 左侧集合列表 + 右侧目标表格。"""
+
+    collection_selected = Signal(object)  # ProtocolCollection | None
+    target_test_requested = Signal(object, object)  # collection, target
+
+    def __init__(self, db: Database, parent=None):
+        super().__init__(parent)
+        self._db = db
+        self._current_coll = None
+        self._setup_ui()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        splitter = QSplitter(Qt.Horizontal)
+
+        # 左侧: 集合列表
+        left = QWidget()
+        ll = QVBoxLayout(left)
+        ll.setContentsMargins(4, 4, 4, 4)
+        ll.addWidget(QLabel("<b>测试集合</b>"))
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("搜索...")
+        self._search.setClearButtonEnabled(True)
+        self._search.textChanged.connect(self._filter_list)
+        ll.addWidget(self._search)
+
+        self._list = QListWidget()
+        self._list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._list.customContextMenuRequested.connect(self._on_list_menu)
+        self._list.currentRowChanged.connect(self._on_list_selected)
+        ll.addWidget(self._list)
+
+        bl = QHBoxLayout()
+        bl.addWidget(QPushButton("新建", clicked=self._on_new))
+        bl.addWidget(QPushButton("编辑", clicked=self._on_edit))
+        bl.addWidget(QPushButton("删除", clicked=self._on_delete))
+        ll.addLayout(bl)
+
+        splitter.addWidget(left)
+
+        # 右侧: 目标表格
+        right = QWidget()
+        rl = QVBoxLayout(right)
+        rl.setContentsMargins(4, 4, 4, 4)
+        rl.addWidget(QLabel("<b>目标列表</b>"))
+
+        self._target_table = QTableWidget()
+        self._target_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._target_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._target_table.setAlternatingRowColors(True)
+        self._target_table.verticalHeader().setVisible(False)
+        self._target_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._target_table.customContextMenuRequested.connect(self._on_target_menu)
+        rl.addWidget(self._target_table)
+
+        tbl = QHBoxLayout()
+        tbl.addWidget(QPushButton("添加目标", clicked=self._on_add_target))
+        tbl.addWidget(QPushButton("编辑", clicked=self._on_edit_target))
+        tbl.addWidget(QPushButton("删除", clicked=self._on_delete_target))
+        tbl.addStretch()
+        tbl.addWidget(QPushButton("▸ 测试", clicked=self._on_test_target))
+        rl.addLayout(tbl)
+
+        splitter.addWidget(right)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([200, 600])
+        layout.addWidget(splitter)
+
+        self._refresh_list()
+
+    def _refresh_list(self):
+        self._list.blockSignals(True)
+        self._list.clear()
+        self._list.addItem("-- 全部 --")
+        self._list.item(0).setData(Qt.UserRole, None)
+        for c in self._db.get_all_protocol_collections():
+            label = f"{c.name}\n({c.protocol_type})"
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, c.id)
+            self._list.addItem(item)
+        self._list.blockSignals(False)
+        if self._list.currentRow() < 0:
+            self._list.setCurrentRow(0)
+
+    def _filter_list(self, text: str):
+        s = text.strip().lower()
+        for row in range(self._list.count()):
+            item = self._list.item(row)
+            if item:
+                item.setHidden(s not in item.text().lower() if s else False)
+
+    def _on_list_selected(self, row: int):
+        if row < 0:
+            return
+        item = self._list.item(row)
+        if not item:
+            return
+        cid = item.data(Qt.UserRole)
+        if cid is None:
+            self._current_coll = None
+            self._target_table.setRowCount(0)
+            self._target_table.setColumnCount(3)
+            self._target_table.setHorizontalHeaderLabels(["IP", "端口", "描述"])
+            self.collection_selected.emit(None)
+            return
+        self._current_coll = self._db.get_protocol_collection(cid)
+        self.collection_selected.emit(self._current_coll)
+        self._refresh_targets()
+
+    def _refresh_targets(self):
+        table = self._target_table
+        table.setColumnCount(4)
+        table.setHorizontalHeaderLabels(["#", "IP", "端口", "描述"])
+        hh = table.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.Fixed)
+        table.setColumnWidth(0, 30)
+        hh.setSectionResizeMode(1, QHeaderView.Interactive)
+        hh.setSectionResizeMode(2, QHeaderView.Fixed)
+        table.setColumnWidth(2, 60)
+        hh.setSectionResizeMode(3, QHeaderView.Stretch)
+
+        cid = self._current_coll.id if self._current_coll else None
+        if cid is None:
+            table.setRowCount(0)
+            return
+        targets = self._db.get_protocol_targets(cid)
+        table.setRowCount(len(targets))
+        for row, t in enumerate(targets):
+            ni = QTableWidgetItem(str(row + 1))
+            ni.setTextAlignment(Qt.AlignCenter)
+            ni.setData(Qt.UserRole, t.id)
+            table.setItem(row, 0, ni)
+            table.setItem(row, 1, QTableWidgetItem(t.ip))
+            pi = QTableWidgetItem(str(t.port))
+            pi.setTextAlignment(Qt.AlignCenter)
+            table.setItem(row, 2, pi)
+            table.setItem(row, 3, QTableWidgetItem(t.description))
+
+    # ── 集合操作 ──────────────────────────────────────────
+
+    def _on_list_menu(self, pos):
+        item = self._list.itemAt(pos)
+        if not item or item.data(Qt.UserRole) is None:
+            return
+        menu = QMenu(self)
+        menu.addAction("编辑", self._on_edit)
+        menu.addAction("删除", self._on_delete)
+        menu.exec(self._list.mapToGlobal(pos))
+
+    def _on_new(self):
+        name, ok = QInputDialog.getText(self, "新建测试集合", "集合名称:")
+        if not ok or not name.strip():
+            return
+        cid = self._db.add_protocol_collection(
+            name=name.strip(), protocol_type="tcp_client"
+        )
+        self._refresh_list()
+        for i in range(self._list.count()):
+            if self._list.item(i).data(Qt.UserRole) == cid:
+                self._list.setCurrentRow(i)
+                break
+
+    def _on_edit(self):
+        if not self._current_coll:
+            return
+        name, ok = QInputDialog.getText(
+            self, "编辑集合", "集合名称:", text=self._current_coll.name
+        )
+        if ok and name.strip():
+            self._db.update_protocol_collection(
+                self._current_coll.id, name=name.strip()
+            )
+            self._refresh_list()
+
+    def _on_delete(self):
+        if not self._current_coll:
+            return
+        r = QMessageBox.question(
+            self, "确认删除",
+            f"确定要删除集合 [{self._current_coll.name}] 吗？",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if r == QMessageBox.Yes:
+            self._db.delete_protocol_collection(self._current_coll.id)
+            self._current_coll = None
+            self._refresh_list()
+
+    # ── 目标操作 ──────────────────────────────────────────
+
+    def _on_target_menu(self, pos):
+        row = self._target_table.rowAt(pos.y())
+        if row < 0 or not self._current_coll:
+            return
+        menu = QMenu(self)
+        menu.addAction("编辑", self._on_edit_target)
+        menu.addAction("删除", self._on_delete_target)
+        menu.addSeparator()
+        menu.addAction("测试此目标", self._on_test_target)
+        menu.exec(self._target_table.mapToGlobal(pos))
+
+    def _on_add_target(self):
+        if not self._current_coll:
+            QMessageBox.information(self, "提示", "请先选择或新建一个集合。")
+            return
+        dlg = _TargetDialog("添加目标", parent=self)
+        if dlg.exec() == QDialog.Accepted:
+            ip, port, desc = dlg.get_data()
+            self._db.add_protocol_target(self._current_coll.id, ip, port, desc)
+            self._refresh_targets()
+
+    def _on_edit_target(self):
+        row = self._target_table.currentRow()
+        if row < 0:
+            return
+        tid = self._target_table.item(row, 0).data(Qt.UserRole)
+        ip = self._target_table.item(row, 1).text()
+        port = int(self._target_table.item(row, 2).text())
+        desc = self._target_table.item(row, 3).text() if self._target_table.item(row, 3) else ""
+        dlg = _TargetDialog("编辑目标", ip=ip, port=port, desc=desc, parent=self)
+        if dlg.exec() == QDialog.Accepted:
+            nip, nport, ndesc = dlg.get_data()
+            # 简单实现: 删除旧的，添加新的
+            self._db.delete_protocol_target(tid)
+            self._db.add_protocol_target(self._current_coll.id, nip, nport, ndesc)
+            self._refresh_targets()
+
+    def _on_delete_target(self):
+        rows = set(i.row() for i in self._target_table.selectedIndexes())
+        if not rows:
+            return
+        r = QMessageBox.question(
+            self, "确认删除", f"确定要删除选中的 {len(rows)} 个目标吗？",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if r == QMessageBox.Yes:
+            for row in rows:
+                tid = self._target_table.item(row, 0).data(Qt.UserRole)
+                self._db.delete_protocol_target(tid)
+            self._refresh_targets()
+
+    def _on_test_target(self):
+        if not self._current_coll:
+            return
+        row = self._target_table.currentRow()
+        if row < 0:
+            return
+        tid = self._target_table.item(row, 0).data(Qt.UserRole)
+        ip = self._target_table.item(row, 1).text()
+        port = int(self._target_table.item(row, 2).text())
+        from portcheck.database import ProtocolTarget
+        target = ProtocolTarget(id=tid, collection_id=self._current_coll.id, ip=ip, port=port)
+        self.target_test_requested.emit(self._current_coll, target)
+
+
+class _TargetDialog(QDialog):
+    """添加/编辑协议目标对话框。"""
+    def __init__(self, title: str, ip: str = "", port: int = 35126,
+                 desc: str = "", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumWidth(350)
+        layout = QFormLayout(self)
+        self._ip = QLineEdit(ip)
+        self._ip.setPlaceholderText("192.168.1.1")
+        layout.addRow("IP:", self._ip)
+        self._port = QSpinBox()
+        self._port.setRange(1, 65535)
+        self._port.setValue(port)
+        layout.addRow("端口:", self._port)
+        self._desc = QLineEdit(desc)
+        layout.addRow("描述:", self._desc)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(lambda: self.accept() if self._ip.text().strip() else
+                                 QMessageBox.warning(self, "验证失败", "IP 不能为空。"))
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+
+    def get_data(self) -> tuple[str, int, str]:
+        return (
+            self._ip.text().strip(),
+            self._port.value(),
+            self._desc.text().strip()
+        )
+
+
+# ── 协议测试历史 (Subtab 4) ────────────────────────────────
+
+
+class _ProtocolHistoryTab(QWidget):
+    """协议测试历史 —— 列表展示 + 详情 + 筛选导出。"""
+
+    def __init__(self, db: Database, parent=None):
+        super().__init__(parent)
+        self._db = db
+        self._all_sessions = []
+        self._setup_ui()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+
+        # 筛选栏
+        fl = QHBoxLayout()
+        fl.addWidget(QLabel("协议:"))
+        self._proto_filter = QComboBox()
+        self._proto_filter.addItem("全部", None)
+        self._proto_filter.addItem("TCP", "tcp_client")
+        self._proto_filter.addItem("WebSocket", "ws_client")
+        self._proto_filter.currentIndexChanged.connect(self.refresh)
+        fl.addWidget(self._proto_filter)
+
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("搜索 IP/端口...")
+        self._search.setClearButtonEnabled(True)
+        self._search.textChanged.connect(self._filter)
+        fl.addWidget(self._search)
+        fl.addStretch()
+
+        export_btn = QPushButton("导出")
+        export_btn.clicked.connect(self._export)
+        fl.addWidget(export_btn)
+        layout.addLayout(fl)
+
+        # 表格
+        self._table = QTableWidget()
+        self._table.setColumnCount(7)
+        self._table.setHorizontalHeaderLabels([
+            "时间", "集合", "协议", "目标", "端口", "结果", "详情"
+        ])
+        self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._table.setAlternatingRowColors(True)
+        self._table.verticalHeader().setVisible(False)
+        hh = self._table.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.Interactive)
+        self._table.setColumnWidth(0, 160)
+        hh.setSectionResizeMode(1, QHeaderView.Stretch)
+        hh.setSectionResizeMode(5, QHeaderView.Fixed)
+        self._table.setColumnWidth(5, 50)
+        hh.setSectionResizeMode(6, QHeaderView.Fixed)
+        self._table.setColumnWidth(6, 50)
+        self._table.cellClicked.connect(self._on_cell_clicked)
+        layout.addWidget(self._table)
+
+        # 详情
+        self._detail = QPlainTextEdit()
+        self._detail.setReadOnly(True)
+        self._detail.setPlaceholderText("点击「详情」列查看请求和响应...")
+        self._detail.setMaximumHeight(150)
+        layout.addWidget(self._detail)
+
+    def refresh(self):
+        proto = self._proto_filter.currentData()
+        self._all_sessions = self._db.get_protocol_test_sessions(proto)
+        self._populate_table()
+        if self._search.text().strip():
+            self._filter(self._search.text())
+
+    def _populate_table(self):
+        sessions = self._all_sessions
+        self._table.setRowCount(len(sessions))
+        for row, s in enumerate(sessions):
+            self._table.setItem(row, 0, QTableWidgetItem(s.started_at))
+            self._table.setItem(row, 1, QTableWidgetItem(s.collection_name or "-"))
+            proto_label = "TCP" if "tcp" in s.protocol_type else "WS"
+            self._table.setItem(row, 2, QTableWidgetItem(proto_label))
+            self._table.setItem(row, 3, QTableWidgetItem(s.target_ip))
+            self._table.setItem(row, 4, QTableWidgetItem(str(s.target_port)))
+            ok = "OK" if s.success else "FAIL"
+            ri = QTableWidgetItem(ok)
+            ri.setForeground(
+                Qt.green if s.success else Qt.red
+            )
+            self._table.setItem(row, 5, ri)
+            btn = QPushButton("→")
+            btn.setMaximumWidth(40)
+            btn.clicked.connect(partial(self._show_detail, row))
+            self._table.setCellWidget(row, 6, btn)
+
+    def _filter(self, text: str):
+        s = text.strip().lower()
+        for row in range(self._table.rowCount()):
+            ip = self._table.item(row, 3)
+            port = self._table.item(row, 4)
+            match = (ip and s in ip.text().lower()) or (port and s in port.text())
+            self._table.setRowHidden(row, not match if s else False)
+
+    def _on_cell_clicked(self, row: int, col: int):
+        if row < len(self._all_sessions):
+            sess = self._all_sessions[row]
+            detail = (
+                f"请求:\n"
+                f"---\n"
+                f"响应 ({'OK' if sess.success else 'FAIL'}):\n{sess.response}"
+            )
+            if sess.error_msg:
+                detail += f"\n\n错误:\n{sess.error_msg}"
+            self._detail.setPlainText(detail)
+
+    def _show_detail(self, row: int):
+        self._on_cell_clicked(row, 6)
+
+    def _export(self):
+        proto = self._proto_filter.currentData()
+        sessions = self._all_sessions
+        if not sessions:
+            QMessageBox.information(self, "提示", "没有可导出的数据。")
+            return
+        fp, _ = QFileDialog.getSaveFileName(
+            self, "导出测试历史", "protocol_history.csv",
+            "CSV (*.csv);;Excel (*.xlsx)"
+        )
+        if not fp:
+            return
+        data = [{
+            "started_at": s.started_at,
+            "collection": s.collection_name,
+            "protocol": s.protocol_type,
+            "target_ip": s.target_ip,
+            "target_port": str(s.target_port),
+            "success": "OK" if s.success else "FAIL",
+            "response": s.response,
+            "error": s.error_msg,
+        } for s in sessions]
+        if fp.endswith(".csv"):
+            ok, err = export_results_to_csv(fp, data)
+        else:
+            ok, err = export_results_to_excel(fp, data)
+        if ok:
+            QMessageBox.information(self, "导出完成", f"已导出 {len(data)} 条记录。")
+        else:
+            QMessageBox.critical(self, "导出失败", str(err))
+
+
+# ── 协议测试主面板 ──────────────────────────────────────────
 
 
 class ProtocolPanel(QWidget):
-    """协议测试面板 —— 客户端 / 服务端 两个标签页。"""
 
     def __init__(self, db: Database, parent=None):
         super().__init__(parent)
@@ -167,15 +600,36 @@ class ProtocolPanel(QWidget):
         self._tcp_workers: dict[int, TcpServerWorker] = {}
         self._ws_workers: dict[int, WsServerWorker] = {}
         self._client_worker = None
+        self._current_test_target = None  # (collection, target) for history
         self._setup_ui()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setContentsMargins(0, 0, 0, 0)
         self._sub_tabs = QTabWidget()
+
+        # Subtab 1: 测试集合
+        self._coll_mgr = _CollectionManagerTab(self._db)
+        self._coll_mgr.collection_selected.connect(self._on_collection_loaded)
+        self._coll_mgr.target_test_requested.connect(self._on_target_test)
+        self._sub_tabs.addTab(self._coll_mgr, "测试集合")
+
+        # Subtab 2: 客户端
         self._sub_tabs.addTab(self._build_client_tab(), "客户端")
+
+        # Subtab 3: 服务端
         self._sub_tabs.addTab(self._build_server_tab(), "服务端")
+
+        # Subtab 4: 测试历史
+        self._history_tab = _ProtocolHistoryTab(self._db)
+        self._sub_tabs.addTab(self._history_tab, "测试历史")
+        self._sub_tabs.currentChanged.connect(self._on_subtab_changed)
+
         layout.addWidget(self._sub_tabs)
+
+    def _on_subtab_changed(self, idx: int):
+        if idx == 3:  # 测试历史
+            self._history_tab.refresh()
 
     # ── 公共方法 ─────────────────────────────────────────────
 
@@ -191,11 +645,56 @@ class ProtocolPanel(QWidget):
         self._ws_workers.clear()
 
     def prefill_client_target(self, ip: str, port: int) -> None:
-        """从外部（目标管理面板）预填客户端目标 IP 和端口。切换到 TCP 客户端模式。"""
-        self._sub_tabs.setCurrentIndex(0)  # 切换到客户端标签页
-        self._client_proto_combo.setCurrentIndex(0)  # 切换到 TCP
+        self._sub_tabs.setCurrentIndex(1)
+        self._client_proto_combo.setCurrentIndex(0)
         self._tcp_ip.setText(ip)
         self._tcp_port.setValue(port)
+
+    # ── 集合 → 客户端联动 ────────────────────────────────────
+
+    def _on_collection_loaded(self, coll):
+        if coll is None:
+            return
+        proto = coll.protocol_type
+        idx = 0 if proto == "tcp_client" else 1
+        self._client_proto_combo.setCurrentIndex(idx)
+        if proto == "tcp_client":
+            self._tcp_enc.setCurrentText(coll.encoding)
+            self._tcp_hl.setValue(coll.head_length)
+            self._tcp_timeout.setValue(coll.timeout)
+        else:
+            scheme = "wss" if coll.ws_use_ssl else "ws"
+            self._ws_url.setText(f"{scheme}://{coll.target_ip}:{coll.target_port}{coll.ws_path or '/'}")
+            self._ws_timeout.setValue(coll.timeout)
+            self._ws_ssl.setChecked(coll.ws_use_ssl)
+        msgs = self._db.get_protocol_messages(coll.id)
+        send = next((m.message for m in msgs if m.direction == "send"), "")
+        self._client_send.setPlainText(send)
+
+    def _on_target_test(self, coll, target):
+        # 预填客户端参数并切换到客户端标签页
+        proto = coll.protocol_type
+        idx = 0 if proto == "tcp_client" else 1
+        self._client_proto_combo.setCurrentIndex(idx)
+        if proto == "tcp_client":
+            self._tcp_ip.setText(target.ip)
+            self._tcp_port.setValue(target.port)
+            self._tcp_enc.setCurrentText(coll.encoding)
+            self._tcp_hl.setValue(coll.head_length)
+            self._tcp_timeout.setValue(coll.timeout)
+        else:
+            scheme = "wss" if coll.ws_use_ssl else "ws"
+            self._ws_url.setText(
+                f"{scheme}://{target.ip}:{target.port}{coll.ws_path or '/'}"
+            )
+            self._ws_timeout.setValue(coll.timeout)
+            self._ws_ssl.setChecked(coll.ws_use_ssl)
+        # 加载集合的消息模板
+        msgs = self._db.get_protocol_messages(coll.id)
+        send = next((m.message for m in msgs if m.direction == "send"), "")
+        self._client_send.setPlainText(send)
+        self._current_test_target = (coll, target)
+        self._sub_tabs.setCurrentIndex(1)  # 切换到客户端
 
     # ═══════════════════════════════════════════════════════════
     # 客户端标签页
@@ -203,57 +702,22 @@ class ProtocolPanel(QWidget):
 
     def _build_client_tab(self) -> QWidget:
         tab = QWidget()
-        outer = QVBoxLayout(tab)
-        outer.setContentsMargins(0, 0, 0, 0)
+        layout = QVBoxLayout(tab)
 
-        splitter = QSplitter(Qt.Horizontal)
-
-        # ── 左侧: 集合列表 ────────────────────────────────────
-        left = QWidget()
-        ll = QVBoxLayout(left)
-        ll.setContentsMargins(4, 4, 4, 4)
-
-        ll.addWidget(QLabel("<b>测试集合</b>"))
-
-        self._coll_search = QLineEdit()
-        self._coll_search.setPlaceholderText("搜索...")
-        self._coll_search.setClearButtonEnabled(True)
-        self._coll_search.textChanged.connect(self._filter_collection_list)
-        ll.addWidget(self._coll_search)
-
-        self._coll_list = QListWidget()
-        self._coll_list.setSelectionMode(QAbstractItemView.SingleSelection)
-        self._coll_list.currentRowChanged.connect(self._on_collection_list_selected)
-        ll.addWidget(self._coll_list)
-
-        bl = QHBoxLayout()
-        bl.addWidget(QPushButton("Save", clicked=_slot(self._save_client_collection)))
-        bl.addWidget(QPushButton("Delete", clicked=_slot(self._delete_client_collection)))
-        ll.addLayout(bl)
-
-        splitter.addWidget(left)
-
-        # ── 右侧: 表单 ────────────────────────────────────────
-        right = QWidget()
-        rl = QVBoxLayout(right)
-        rl.setContentsMargins(4, 4, 4, 4)
-
-        # 协议类型切换
+        # 协议类型
         top = QHBoxLayout()
         top.addWidget(QLabel("<b>协议类型:</b>"))
         self._client_proto_combo = QComboBox()
         self._client_proto_combo.addItem("TCP", "tcp_client")
         self._client_proto_combo.addItem("WebSocket", "ws_client")
-        self._client_proto_combo.currentIndexChanged.connect(self._on_client_proto_changed)
+        self._client_proto_combo.currentIndexChanged.connect(self._on_client_proto)
         top.addWidget(self._client_proto_combo)
         top.addStretch()
-        rl.addLayout(top)
+        layout.addLayout(top)
 
-        # 连接参数 (TCP / WS 切换)
+        # 连接参数
         conn = QGroupBox("连接参数")
         cf = QFormLayout(conn)
-
-        # TCP 参数页
         self._tcp_params = QWidget()
         tf = QFormLayout(self._tcp_params)
         tf.setContentsMargins(0, 0, 0, 0)
@@ -271,7 +735,7 @@ class ProtocolPanel(QWidget):
         self._tcp_hl.setRange(0, 20)
         self._tcp_hl.setValue(5)
         self._tcp_hl.setSuffix(" 位")
-        self._tcp_hl.setToolTip("0=原始模式（无长度头）")
+        self._tcp_hl.setToolTip("0=原始模式")
         tf.addRow("HeadLen:", self._tcp_hl)
         self._tcp_timeout = QDoubleSpinBox()
         self._tcp_timeout.setRange(0.1, 60)
@@ -280,7 +744,6 @@ class ProtocolPanel(QWidget):
         self._tcp_timeout.setSuffix(" s")
         tf.addRow("超时:", self._tcp_timeout)
 
-        # WS 参数页
         self._ws_params = QWidget()
         wf = QFormLayout(self._ws_params)
         wf.setContentsMargins(0, 0, 0, 0)
@@ -297,11 +760,11 @@ class ProtocolPanel(QWidget):
         self._ws_ssl.setChecked(True)
         wf.addRow("", self._ws_ssl)
 
-        self._client_param_stack = QStackedWidget()
-        self._client_param_stack.addWidget(self._tcp_params)
-        self._client_param_stack.addWidget(self._ws_params)
-        cf.addRow(self._client_param_stack)
-        rl.addWidget(conn)
+        self._param_stack = QStackedWidget()
+        self._param_stack.addWidget(self._tcp_params)
+        self._param_stack.addWidget(self._ws_params)
+        cf.addRow(self._param_stack)
+        layout.addWidget(conn)
 
         # 发送消息
         send = QGroupBox("发送消息")
@@ -309,7 +772,7 @@ class ProtocolPanel(QWidget):
         self._client_send = QPlainTextEdit()
         self._client_send.setPlaceholderText("输入要发送的报文...")
         self._client_send.setMinimumHeight(80)
-        self._client_send.textChanged.connect(self._update_client_length_label)
+        self._client_send.textChanged.connect(self._update_len)
         sl.addWidget(self._client_send)
         self._client_len_label = QLabel("报文长度: 0 字节, 长度头: 00000")
         sl.addWidget(self._client_len_label)
@@ -321,38 +784,30 @@ class ProtocolPanel(QWidget):
         br.addWidget(QPushButton("清空", clicked=self._client_send.clear))
         br.addStretch()
         sl.addLayout(br)
-        rl.addWidget(send)
+        layout.addWidget(send)
 
         # 响应
         resp = QGroupBox("响应")
-        rl2 = QVBoxLayout(resp)
+        rl = QVBoxLayout(resp)
         self._client_resp = QPlainTextEdit()
         self._client_resp.setReadOnly(True)
         self._client_resp.setPlaceholderText("响应将显示在这里...")
         self._client_resp.setMinimumHeight(80)
-        rl2.addWidget(self._client_resp)
-        rl2.addWidget(QPushButton("清空响应", clicked=self._client_resp.clear))
-        rl.addWidget(resp)
+        rl.addWidget(self._client_resp)
+        rl.addWidget(QPushButton("清空响应", clicked=self._client_resp.clear))
+        layout.addWidget(resp)
 
-        splitter.addWidget(right)
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([220, 600])
-        outer.addWidget(splitter)
-
-        self._refresh_collection_list()
         return tab
 
     def _current_client_proto(self) -> str:
         return self._client_proto_combo.currentData()
 
-    def _on_client_proto_changed(self, idx: int):
+    def _on_client_proto(self, idx: int):
         proto = self._current_client_proto()
-        self._client_param_stack.setCurrentIndex(0 if proto == "tcp_client" else 1)
-        self._refresh_collection_list()
-        self._update_client_length_label()
+        self._param_stack.setCurrentIndex(0 if proto == "tcp_client" else 1)
+        self._update_len()
 
-    def _update_client_length_label(self):
+    def _update_len(self):
         proto = self._current_client_proto()
         if proto == "tcp_client":
             msg = self._client_send.toPlainText()
@@ -365,8 +820,7 @@ class ProtocolPanel(QWidget):
             except (UnicodeEncodeError, UnicodeDecodeError):
                 self._client_len_label.setText("编码错误")
         else:
-            msg = self._client_send.toPlainText()
-            self._client_len_label.setText(f"消息长度: {len(msg)} 字符")
+            self._client_len_label.setText(f"消息长度: {len(self._client_send.toPlainText())} 字符")
 
     def _client_send_message(self):
         if self._client_worker and self._client_worker.isRunning():
@@ -382,18 +836,20 @@ class ProtocolPanel(QWidget):
 
         proto = self._current_client_proto()
         if proto == "tcp_client":
+            ip = self._tcp_ip.text().strip()
+            port = self._tcp_port.value()
+            self._last_ip, self._last_port = ip, port
             self._client_worker = TcpClientWorker(
-                ip=self._tcp_ip.text().strip(),
-                port=self._tcp_port.value(),
-                message=msg,
+                ip=ip, port=port, message=msg,
                 encoding=self._tcp_enc.currentText(),
                 head_len=self._tcp_hl.value(),
                 timeout=self._tcp_timeout.value(),
             )
         else:
+            url = self._ws_url.text().strip()
+            self._last_ip, self._last_port = url, 0
             self._client_worker = WsClientWorker(
-                url=self._ws_url.text().strip(),
-                message=msg,
+                url=url, message=msg,
                 timeout=self._ws_timeout.value(),
             )
         self._client_worker.finished.connect(self._on_client_done)
@@ -406,140 +862,19 @@ class ProtocolPanel(QWidget):
         tag = "OK" if success else "FAIL"
         self._client_resp.appendPlainText(f"[{ts}] {tag}:\n{response}")
 
-    # ── 集合列表管理 ─────────────────────────────────────────
-
-    def _refresh_collection_list(self):
-        """刷新集合列表。"""
-        proto = self._current_client_proto()
-        self._coll_list.blockSignals(True)
-        self._coll_list.clear()
-
-        # "新建测试" 占位项
-        new_item = QListWidgetItem("+ 新建测试")
-        new_item.setData(Qt.UserRole, None)
-        new_item.setForeground(Qt.gray)
-        self._coll_list.addItem(new_item)
-
-        for c in self._db.get_all_protocol_collections(proto):
-            label = f"{c.name}\n{c.target_ip}:{c.target_port}"
-            item = QListWidgetItem(label)
-            item.setData(Qt.UserRole, c.id)
-            self._coll_list.addItem(item)
-
-        self._coll_list.blockSignals(False)
-
-        # 应用搜索过滤
-        search = self._coll_search.text().strip().lower()
-        if search:
-            self._filter_collection_list(search)
-
-    def _filter_collection_list(self, text: str):
-        search = text.strip().lower()
-        for row in range(self._coll_list.count()):
-            item = self._coll_list.item(row)
-            if item:
-                # 不过滤 "新建测试" 项
-                if item.data(Qt.UserRole) is None:
-                    item.setHidden(False)
-                else:
-                    item.setHidden(search not in item.text().lower())
-
-    def _on_collection_list_selected(self, row: int):
-        if row < 0:
-            return
-        item = self._coll_list.item(row)
-        if not item:
-            return
-        cid = item.data(Qt.UserRole)
-        if cid is None:  # "+ 新建测试"
-            return
-
-        coll = self._db.get_protocol_collection(cid)
-        if not coll:
-            return
-
-        proto = coll.protocol_type
-        idx = 0 if proto == "tcp_client" else 1
-        self._client_proto_combo.setCurrentIndex(idx)
-
-        if proto == "tcp_client":
-            self._tcp_ip.setText(coll.target_ip)
-            self._tcp_port.setValue(coll.target_port)
-            self._tcp_enc.setCurrentText(coll.encoding)
-            self._tcp_hl.setValue(coll.head_length)
-            self._tcp_timeout.setValue(coll.timeout)
-        else:
-            scheme = "wss" if coll.ws_use_ssl else "ws"
-            url = f"{scheme}://{coll.target_ip}:{coll.target_port}{coll.ws_path or '/'}"
-            self._ws_url.setText(url)
-            self._ws_timeout.setValue(coll.timeout)
-            self._ws_ssl.setChecked(coll.ws_use_ssl)
-
-        msgs = self._db.get_protocol_messages(cid)
-        send = next((m.message for m in msgs if m.direction == "send"), "")
-        self._client_send.setPlainText(send)
-
-    def _save_client_collection(self):
-        name, ok = QInputDialog.getText(self, "保存测试集合", "集合名称:")
-        if not ok or not name.strip():
-            return
-        name = name.strip()
-        proto = self._current_client_proto()
-
-        if proto == "tcp_client":
-            cid = self._db.add_protocol_collection(
-                name=name, protocol_type="tcp_client",
-                target_ip=self._tcp_ip.text().strip(),
-                target_port=self._tcp_port.value(),
-                encoding=self._tcp_enc.currentText(),
-                head_length=self._tcp_hl.value(),
-                timeout=self._tcp_timeout.value(),
-            )
-        else:
-            ip, port, path, ssl = _parse_ws_url(self._ws_url.text().strip())
-            cid = self._db.add_protocol_collection(
-                name=name, protocol_type="ws_client",
-                target_ip=ip, target_port=port,
-                timeout=self._ws_timeout.value(),
-                ws_path=path, ws_use_ssl=ssl,
-            )
-
-        batch = []
-        sm = self._client_send.toPlainText()
-        rm = self._client_resp.toPlainText()
-        if sm:
-            batch.append((cid, "send", sm, 0))
-        if rm:
-            batch.append((cid, "expected_response", rm, 1))
-        if batch:
-            self._db.save_protocol_messages_batch(batch)
-
-        self._refresh_collection_list()
-        # 选中刚保存的项
-        for i in range(self._coll_list.count()):
-            if self._coll_list.item(i).data(Qt.UserRole) == cid:
-                self._coll_list.setCurrentRow(i)
-                break
-        QMessageBox.information(self, "已保存", f"集合 [{name}] 已保存。")
-
-    def _delete_client_collection(self):
-        item = self._coll_list.currentItem()
-        if not item:
-            QMessageBox.information(self, "提示", "请从列表中选择一个集合。")
-            return
-        cid = item.data(Qt.UserRole)
-        if cid is None:
-            return
-        coll = self._db.get_protocol_collection(cid)
-        if not coll:
-            return
-        r = QMessageBox.question(
-            self, "确认删除", f"确定要删除集合 [{coll.name}] 吗？",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        # 记录到测试历史
+        coll, target = self._current_test_target or (None, None)
+        self._db.add_protocol_test_session(
+            collection_id=coll.id if coll else None,
+            collection_name=coll.name if coll else "",
+            target_id=target.id if target else None,
+            protocol_type=self._current_client_proto(),
+            target_ip=getattr(self, '_last_ip', ''),
+            target_port=getattr(self, '_last_port', 0),
+            success=success,
+            response=response,
+            error_msg="" if success else response,
         )
-        if r == QMessageBox.Yes:
-            self._db.delete_protocol_collection(cid)
-            self._refresh_collection_list()
 
     # ═══════════════════════════════════════════════════════════
     # 服务端标签页
@@ -575,7 +910,7 @@ class ProtocolPanel(QWidget):
         bl.addWidget(QPushButton("编辑", clicked=_slot(self._edit_server)))
         bl.addWidget(QPushButton("删除", clicked=_slot(self._delete_server)))
         bl.addStretch()
-        bl.addWidget(QPushButton("全部停止", clicked=self._stop_all_current_servers))
+        bl.addWidget(QPushButton("全部停止", clicked=self._stop_all_current))
         tll.addLayout(bl)
         layout.addWidget(tbl)
 
@@ -601,7 +936,7 @@ class ProtocolPanel(QWidget):
         return (self._tcp_workers if self._current_server_proto() == "tcp_server"
                 else self._ws_workers)
 
-    def _stop_all_current_servers(self):
+    def _stop_all_current(self):
         for w in list(self._current_workers().values()):
             w.stop_server()
         self._current_workers().clear()
@@ -613,10 +948,9 @@ class ProtocolPanel(QWidget):
         workers = self._current_workers()
         table = self._server_table
         is_tcp = st == "tcp_server"
-        if is_tcp:
-            cols = ["名称", "监听地址", "端口", "编码", "HeadLen", "响应模式", "操作"]
-        else:
-            cols = ["名称", "监听地址", "端口", "路径", "响应模式", "操作"]
+        cols = (["名称", "监听地址", "端口", "编码", "HeadLen", "响应模式", "操作"]
+                if is_tcp else
+                ["名称", "监听地址", "端口", "路径", "响应模式", "操作"])
         table.setColumnCount(len(cols))
         table.setHorizontalHeaderLabels(cols)
         hh = table.horizontalHeader()
@@ -705,13 +1039,12 @@ class ProtocolPanel(QWidget):
             self._server_log.appendPlainText(f"Start [{srv.name}] {srv.ip}:{srv.port}")
         self._refresh_server_table()
 
-    def _on_worker_finished(self, server_type: str, server_id: int):
-        workers = self._tcp_workers if server_type == "tcp_server" else self._ws_workers
-        workers.pop(server_id, None)
+    def _on_worker_finished(self, st: str, sid: int):
+        workers = self._tcp_workers if st == "tcp_server" else self._ws_workers
+        workers.pop(sid, None)
         self._refresh_server_table()
 
-    def _on_server_message(self, st: str, name: str,
-                           addr: str = "", msg: str = ""):
+    def _on_server_message(self, st, name, addr="", msg=""):
         ts = datetime.now().strftime("%H:%M:%S")
         a = f" [{addr}]" if addr else ""
         self._server_log.appendPlainText(f"[{ts}] [{name}]{a} RECV:\n{msg}")
@@ -736,8 +1069,7 @@ class ProtocolPanel(QWidget):
         table = self._server_table
         rows = set(i.row() for i in table.selectedIndexes())
         if not rows:
-            QMessageBox.information(self, "提示", "请选择一条记录。")
-            return
+            return QMessageBox.information(self, "提示", "请选择一条记录。")
         row = rows.pop()
         item = table.item(row, 0)
         if not item:
@@ -746,16 +1078,12 @@ class ProtocolPanel(QWidget):
         srv = self._db.get_protocol_server(sid)
         if not srv:
             return
-        workers = self._current_workers()
-        if sid in workers:
-            QMessageBox.warning(self, "提示", "请先停止该监听器再编辑。")
-            return
-        data = {
-            "name": srv.name, "ip": srv.ip, "port": srv.port,
-            "encoding": srv.encoding, "head_length": srv.head_length,
-            "ws_path": srv.ws_path, "response_mode": srv.response_mode,
-            "response_message": srv.response_message,
-        }
+        if sid in self._current_workers():
+            return QMessageBox.warning(self, "提示", "请先停止该监听器再编辑。")
+        data = dict(name=srv.name, ip=srv.ip, port=srv.port,
+                    encoding=srv.encoding, head_length=srv.head_length,
+                    ws_path=srv.ws_path, response_mode=srv.response_mode,
+                    response_message=srv.response_message)
         dlg = ServerDialog("编辑监听器", st, data, parent=self)
         if dlg.exec() == QDialog.Accepted:
             d = dlg.get_data()
@@ -774,8 +1102,7 @@ class ProtocolPanel(QWidget):
         table = self._server_table
         rows = set(i.row() for i in table.selectedIndexes())
         if not rows:
-            QMessageBox.information(self, "提示", "请选择一条记录。")
-            return
+            return QMessageBox.information(self, "提示", "请选择一条记录。")
         row = rows.pop()
         item = table.item(row, 0)
         if not item:
@@ -785,8 +1112,7 @@ class ProtocolPanel(QWidget):
         if not srv:
             return
         if sid in self._current_workers():
-            QMessageBox.warning(self, "提示", "请先停止该监听器再删除。")
-            return
+            return QMessageBox.warning(self, "提示", "请先停止该监听器再删除。")
         r = QMessageBox.question(
             self, "确认删除", f"确定要删除监听器 [{srv.name}] 吗？",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No
@@ -794,31 +1120,3 @@ class ProtocolPanel(QWidget):
         if r == QMessageBox.Yes:
             self._db.delete_protocol_server(sid)
             self._refresh_server_table()
-
-
-# ── URL 解析 ────────────────────────────────────────────────
-
-
-def _parse_ws_url(url: str) -> tuple[str, int, str, bool]:
-    url = url.strip()
-    use_ssl = url.startswith("wss://")
-    if url.startswith("ws://"):
-        url = url[5:]
-    elif url.startswith("wss://"):
-        url = url[6:]
-    if "/" in url:
-        host, path = url.split("/", 1)
-        path = "/" + path
-    else:
-        host = url
-        path = "/"
-    if ":" in host:
-        ip, port_str = host.rsplit(":", 1)
-        try:
-            port = int(port_str)
-        except ValueError:
-            port = 443 if use_ssl else 80
-    else:
-        ip = host
-        port = 443 if use_ssl else 80
-    return ip, port, path, use_ssl

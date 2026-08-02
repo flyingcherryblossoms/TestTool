@@ -107,6 +107,34 @@ class ProtocolServer:
     created_at: str = ""
 
 
+@dataclass
+class ProtocolTarget:
+    """协议测试集合内的目标 IP:Port。"""
+    id: int
+    collection_id: int
+    ip: str = ""
+    port: int = 0
+    description: str = ""
+    sort_order: int = 0
+    created_at: str = ""
+
+
+@dataclass
+class ProtocolTestSession:
+    """协议测试会话记录。"""
+    id: int
+    collection_id: int | None = None
+    collection_name: str = ""
+    target_id: int | None = None
+    protocol_type: str = ""
+    target_ip: str = ""
+    target_port: int = 0
+    started_at: str = ""
+    success: bool = False
+    response: str = ""
+    error_msg: str = ""
+
+
 # ── SQL 建表语句 ──────────────────────────────────────────
 
 SCHEMA_SQL = """
@@ -209,6 +237,36 @@ CREATE INDEX IF NOT EXISTS idx_protocol_msgs_collection
     ON protocol_messages(collection_id);
 CREATE INDEX IF NOT EXISTS idx_protocol_servers_type
     ON protocol_servers(server_type);
+
+CREATE TABLE IF NOT EXISTS protocol_targets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    collection_id INTEGER NOT NULL,
+    ip TEXT NOT NULL,
+    port INTEGER NOT NULL,
+    description TEXT DEFAULT '',
+    sort_order INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT (datetime('now', 'localtime')),
+    FOREIGN KEY (collection_id) REFERENCES protocol_collections(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS protocol_test_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    collection_id INTEGER,
+    collection_name TEXT DEFAULT '',
+    target_id INTEGER,
+    protocol_type TEXT DEFAULT '',
+    target_ip TEXT DEFAULT '',
+    target_port INTEGER DEFAULT 0,
+    started_at TIMESTAMP DEFAULT (datetime('now', 'localtime')),
+    success INTEGER DEFAULT 0,
+    response TEXT DEFAULT '',
+    error_msg TEXT DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_protocol_targets_coll
+    ON protocol_targets(collection_id);
+CREATE INDEX IF NOT EXISTS idx_protocol_sessions_time
+    ON protocol_test_sessions(started_at DESC);
 """
 
 
@@ -875,6 +933,111 @@ class Database:
             conn.execute(
                 "DELETE FROM protocol_servers WHERE id = ?",
                 (server_id,)
+            )
+
+    # ── 协议目标操作 ──────────────────────────────────────
+
+    def get_protocol_targets(self, collection_id: int) -> list[ProtocolTarget]:
+        """获取协议集合内的目标列表。"""
+        with self._connect() as conn:
+            rows = conn.execute("""
+                SELECT * FROM protocol_targets
+                WHERE collection_id = ?
+                ORDER BY sort_order, created_at
+            """, (collection_id,)).fetchall()
+            return [ProtocolTarget(
+                id=r["id"], collection_id=r["collection_id"],
+                ip=r["ip"], port=r["port"],
+                description=r["description"],
+                sort_order=r["sort_order"], created_at=r["created_at"]
+            ) for r in rows]
+
+    def add_protocol_target(self, collection_id: int, ip: str, port: int,
+                            description: str = "") -> int:
+        """添加协议目标，返回新 ID。"""
+        with self._connect() as conn:
+            cur = conn.execute("""
+                INSERT INTO protocol_targets (collection_id, ip, port, description)
+                VALUES (?, ?, ?, ?)
+            """, (collection_id, ip.strip(), port, description))
+            return cur.lastrowid
+
+    def add_protocol_targets_batch(self, targets: list[tuple]) -> int:
+        """批量添加协议目标。targets 为 [(collection_id, ip, port, desc), ...]"""
+        with self._connect() as conn:
+            count = 0
+            for cid, ip, port, desc in targets:
+                conn.execute(
+                    "INSERT INTO protocol_targets (collection_id, ip, port, description) VALUES (?, ?, ?, ?)",
+                    (cid, ip.strip(), port, desc)
+                )
+                count += 1
+            return count
+
+    def delete_protocol_target(self, target_id: int) -> None:
+        """删除单个协议目标。"""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM protocol_targets WHERE id = ?", (target_id,))
+
+    def delete_protocol_targets_for(self, collection_id: int) -> None:
+        """删除集合下所有协议目标。"""
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM protocol_targets WHERE collection_id = ?",
+                (collection_id,)
+            )
+
+    # ── 协议测试会话操作 ────────────────────────────────────
+
+    def add_protocol_test_session(self, collection_id: int | None,
+                                  collection_name: str,
+                                  target_id: int | None,
+                                  protocol_type: str,
+                                  target_ip: str, target_port: int,
+                                  success: bool, response: str,
+                                  error_msg: str = "") -> int:
+        """记录一次协议测试，返回会话 ID。"""
+        with self._connect() as conn:
+            cur = conn.execute("""
+                INSERT INTO protocol_test_sessions
+                    (collection_id, collection_name, target_id, protocol_type,
+                     target_ip, target_port, success, response, error_msg)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (collection_id, collection_name, target_id, protocol_type,
+                  target_ip, target_port, 1 if success else 0, response, error_msg))
+            return cur.lastrowid
+
+    def get_protocol_test_sessions(self, protocol_type: str | None = None,
+                                   limit: int = 100) -> list[ProtocolTestSession]:
+        """获取最近的协议测试会话。protocol_type=None 获取全部。"""
+        with self._connect() as conn:
+            if protocol_type:
+                rows = conn.execute("""
+                    SELECT * FROM protocol_test_sessions
+                    WHERE protocol_type = ?
+                    ORDER BY started_at DESC LIMIT ?
+                """, (protocol_type, limit)).fetchall()
+            else:
+                rows = conn.execute("""
+                    SELECT * FROM protocol_test_sessions
+                    ORDER BY started_at DESC LIMIT ?
+                """, (limit,)).fetchall()
+            return [ProtocolTestSession(
+                id=r["id"], collection_id=r["collection_id"],
+                collection_name=r["collection_name"],
+                target_id=r["target_id"], protocol_type=r["protocol_type"],
+                target_ip=r["target_ip"], target_port=r["target_port"],
+                started_at=r["started_at"],
+                success=bool(r["success"]), response=r["response"],
+                error_msg=r["error_msg"]
+            ) for r in rows]
+
+    def delete_protocol_test_session(self, session_id: int) -> None:
+        """删除协议测试会话记录。"""
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM protocol_test_sessions WHERE id = ?",
+                (session_id,)
             )
 
     def update_protocol_servers_sort_order(self,
