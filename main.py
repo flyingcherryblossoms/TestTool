@@ -15,7 +15,7 @@ from pathlib import Path
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
-from portcheck.ui.main_window import MainWindow
+from src.ui.main_window import MainWindow
 
 
 def _get_icon_path() -> str:
@@ -26,7 +26,7 @@ def _get_icon_path() -> str:
         base = Path(__file__).resolve().parent
     # Windows 优先 ICO，Linux 用 PNG
     for name in ("icon.ico", "icon.png"):
-        icon = base / "portcheck" / name
+        icon = base / "src" / name
         if icon.exists():
             return str(icon)
     return ""
@@ -57,7 +57,7 @@ def run_gui(db_path: str) -> None:
 
 def run_cli(targets: list[tuple[str, int]], timeout: float = 3.0) -> None:
     """命令行模式: 快速检测几个目标。"""
-    from portcheck.scanner import ScanTarget, scan_targets_sync
+    from src.scanner import ScanTarget, scan_targets_sync
 
     scan_targets = [
         ScanTarget(id=0, ip=ip, port=port, description=f"{ip}:{port}")
@@ -110,10 +110,10 @@ def main() -> None:
             db_path = args.db
         elif getattr(sys, 'frozen', False):
             # PyInstaller 打包后：存到 exe 同目录，数据不丢失
-            db_path = str(Path(sys.executable).parent / "portcheck.db")
+            db_path = str(Path(sys.executable).parent / "testtool.db")
         else:
             # 源码运行：存到项目目录
-            db_path = str(Path(__file__).resolve().parent / "portcheck.db")
+            db_path = str(Path(__file__).resolve().parent / "testtool.db")
         run_gui(db_path)
 
 

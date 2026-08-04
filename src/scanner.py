@@ -187,21 +187,26 @@ def test_tcp_connect(ip: str, port: int, timeout: float = 3.0) -> tuple[bool, fl
 
 def scan_targets_sync(targets: list[ScanTarget], timeout: float = 3.0,
                        max_workers: int = 30,
-                       progress_callback=None) -> list[ScanResult]:
+                       progress_callback=None,
+                       cancel_event: threading.Event | None = None) -> list[ScanResult]:
     """同步（阻塞式）并发检测多个目标。
 
     使用 ThreadPoolExecutor 并发执行 TCP 连接测试，
     每个目标完成时调用 progress_callback(current, total, result)。
+    如果 cancel_event 被设置，跳过尚未开始检测的目标。
     """
     results: list[ScanResult] = []
     total = len(targets)
     completed = 0
+    skipped = 0
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_target = {
-            executor.submit(test_tcp_connect, t.ip, t.port, timeout): t
-            for t in targets
-        }
+        future_to_target = {}
+        for t in targets:
+            if cancel_event and cancel_event.is_set():
+                skipped += 1
+                continue
+            future_to_target[executor.submit(test_tcp_connect, t.ip, t.port, timeout)] = t
 
         for future in as_completed(future_to_target):
             target = future_to_target[future]
@@ -225,7 +230,7 @@ def scan_targets_sync(targets: list[ScanTarget], timeout: float = 3.0,
             completed += 1
             if progress_callback:
                 try:
-                    progress_callback(completed, total, result)
+                    progress_callback(completed + skipped, total, result)
                 except Exception:
                     pass  # 回调异常不影响检测
 
@@ -254,7 +259,7 @@ class ScannerWorker(QThread):
         self._targets = targets
         self._timeout = timeout
         self._max_workers = max_workers
-        self._cancelled = False
+        self._cancel_event = threading.Event()
         self._emit_lock = threading.Lock()
 
     def run(self) -> None:
@@ -265,18 +270,19 @@ class ScannerWorker(QThread):
                 timeout=self._timeout,
                 max_workers=self._max_workers,
                 progress_callback=self._on_progress,
+                cancel_event=self._cancel_event,
             )
-            if not self._cancelled:
+            if not self._cancel_event.is_set():
                 self.finished_all.emit(results)
         except Exception as e:
             self.error_occurred.emit(str(e))
 
     def cancel(self) -> None:
-        """请求取消。注意：已在执行中的连接不会立即中断。"""
-        self._cancelled = True
+        """请求取消。正在执行的连接会尽快完成，未开始的将被跳过。"""
+        self._cancel_event.set()
 
     def _on_progress(self, current: int, total: int, result: ScanResult) -> None:
         """内部进度回调，在多个线程池线程中调用，加锁保护信号发射。"""
-        if not self._cancelled:
+        if not self._cancel_event.is_set():
             with self._emit_lock:
                 self.progress.emit(current, total, result)

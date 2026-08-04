@@ -30,13 +30,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from portcheck.csv_handler import export_targets_to_csv, parse_targets_csv
-from portcheck.database import Database
-from portcheck.excel_handler import (
+from src.csv_handler import export_targets_to_csv, parse_targets_csv
+from src.database import Database
+from src.excel_handler import (
     export_targets_to_excel,
     parse_targets_excel,
 )
-from portcheck.scanner import build_scan_targets, expand_ip_range, expand_port_range
+from src.scanner import build_scan_targets, expand_ip_range, expand_port_range
 
 
 class TargetDialog(QDialog):
@@ -213,7 +213,7 @@ class ImportWorker(QThread):
         self._overwrite = overwrite
 
     def run(self):
-        from portcheck.database import Database
+        from src.database import Database
         db = Database(self._db_path)
 
         # 预解析集合名称 → ID
@@ -645,7 +645,7 @@ class TargetPanel(QWidget):
                         t["ip"], t["port"], t["description"], t["batch_id"]
                     )
                 self.refresh()
-                self.targets_changed.emit
+                self.targets_changed.emit()
                 QMessageBox.information(
                     self, "添加完成",
                     f"成功添加 {len(targets)} 个目标。"

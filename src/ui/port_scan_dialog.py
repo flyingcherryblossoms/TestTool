@@ -25,8 +25,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from portcheck.database import Database
-from portcheck.scanner import (
+from src.database import Database
+from src.scanner import (
     ScanResult,
     ScanTarget,
     ScannerWorker,

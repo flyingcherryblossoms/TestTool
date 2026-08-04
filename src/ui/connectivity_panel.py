@@ -3,35 +3,34 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QAction
+
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QApplication,
-    QDialog,
     QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QMenu,
     QMessageBox,
     QPushButton,
+    QSplitter,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from portcheck.database import Database
-from portcheck.ui.target_panel import TargetPanel
-from portcheck.ui.test_panel import TestPanel
-from portcheck.ui.result_panel import ResultPanel
+from src.database import Database
+from src.ui.target_panel import TargetPanel
+from src.ui.test_panel import TestPanel
+from src.ui.result_panel import ResultPanel
 
 
 class _BatchListTab(QWidget):
-    """集合列表子标签页 —— 支持右键菜单管理集合。"""
+    """集合列表 —— 分类树形结构：全部 / 未分类 / 自定义集合。"""
 
     batch_changed = Signal(object)  # batch_id | None
 
@@ -45,7 +44,7 @@ class _BatchListTab(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
 
-        layout.addWidget(QLabel("<b>集合列表</b>"))
+        layout.addWidget(QLabel("<b>集合分类</b>"))
 
         self._search = QLineEdit()
         self._search.setPlaceholderText("搜索集合...")
@@ -53,12 +52,14 @@ class _BatchListTab(QWidget):
         self._search.textChanged.connect(self._filter)
         layout.addWidget(self._search)
 
-        self._list = QListWidget()
-        self._list.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self._list.setContextMenuPolicy(Qt.CustomContextMenu)
-        self._list.customContextMenuRequested.connect(self._on_context_menu)
-        self._list.currentRowChanged.connect(self._on_selected)
-        layout.addWidget(self._list)
+        self._tree = QTreeWidget()
+        self._tree.setHeaderHidden(True)
+        self._tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._tree.customContextMenuRequested.connect(self._on_context_menu)
+        self._tree.currentItemChanged.connect(self._on_selected)
+        self._tree.setIndentation(16)
+        layout.addWidget(self._tree)
 
         btn_layout = QHBoxLayout()
         btn_layout.addWidget(QPushButton("新建", clicked=self._on_new))
@@ -67,64 +68,105 @@ class _BatchListTab(QWidget):
         layout.addLayout(btn_layout)
 
     def refresh(self, select_id: int | None = None):
-        self._list.blockSignals(True)
-        self._list.clear()
+        current = self._tree.currentItem()
+        prev_batch_id = current.data(0, Qt.UserRole) if current else None
+        if select_id is not None:
+            prev_batch_id = select_id
+
+        self._tree.blockSignals(True)
+        self._tree.clear()
         self._all_batches = self._db.get_all_batches()
+        bold_font = self._tree.font()
+        bold_font.setBold(True)
 
-        all_item = QListWidgetItem("全部目标")
-        all_item.setData(Qt.UserRole, None)
-        self._list.addItem(all_item)
-
+        # ── 一级节点：未分类（有数据才显示）──
         uncat = self._db.get_targets(0)
         if uncat:
-            u = QListWidgetItem(f"未分类 ({len(uncat)})")
-            u.setData(Qt.UserRole, 0)
-            self._list.addItem(u)
+            u = QTreeWidgetItem([f"未分类 ({len(uncat)})"])
+            u.setData(0, Qt.UserRole, 0)
+            u.setFont(0, bold_font)
+            self._tree.addTopLevelItem(u)
 
-        target_idx = 1 + (1 if uncat else 0)
-        for i, b in enumerate(self._all_batches):
-            item = QListWidgetItem(f"{b.name} ({b.target_count})")
-            item.setData(Qt.UserRole, b.id)
-            self._list.addItem(item)
-            if select_id is not None and b.id == select_id:
-                self._list.setCurrentRow(target_idx + i)
+        # ── 父节点：自定义集合 ──
+        custom_parent = QTreeWidgetItem([f"自定义集合 ({len(self._all_batches)})"])
+        custom_parent.setData(0, Qt.UserRole, None)
+        custom_parent.setFont(0, bold_font)
+        custom_parent.setFlags(custom_parent.flags() & ~Qt.ItemIsSelectable)
+        self._tree.addTopLevelItem(custom_parent)
 
-        self._list.blockSignals(False)
-        if self._list.currentRow() < 0:
-            self._list.setCurrentRow(0)
+        # ── 子节点：各集合 ──
+        restored = False
+        for b in self._all_batches:
+            child = QTreeWidgetItem([f"{b.name} ({b.target_count})"])
+            child.setData(0, Qt.UserRole, b.id)
+            custom_parent.addChild(child)
+            if prev_batch_id is not None and b.id == prev_batch_id:
+                self._tree.setCurrentItem(child)
+                restored = True
+
+        custom_parent.setExpanded(True)
+
+        # 恢复选中：默认选未分类（有则选），否则选第一个集合
+        if not restored:
+            if uncat:
+                self._tree.setCurrentItem(u)
+            elif custom_parent.childCount() > 0:
+                self._tree.setCurrentItem(custom_parent.child(0))
+
+        self._tree.blockSignals(False)
+        if not self._tree.currentItem() and self._tree.topLevelItemCount() > 0:
+            self._tree.setCurrentItem(self._tree.topLevelItem(0))
 
         if self._search.text().strip():
             self._filter(self._search.text())
 
     def _filter(self, text: str):
         s = text.strip().lower()
-        for row in range(self._list.count()):
-            item = self._list.item(row)
-            if item:
-                item.setHidden(s not in item.text().lower() if s else False)
 
-    def _on_selected(self, row: int):
-        if row < 0:
+        def _match(item):
+            return s in item.text(0).lower()
+
+        def _show_branch(item, visible: bool):
+            item.setHidden(not visible)
+
+        # 遍历所有顶层节点
+        for i in range(self._tree.topLevelItemCount()):
+            top = self._tree.topLevelItem(i)
+            if top.childCount() == 0:
+                # 无子节点：直接匹配
+                top.setHidden(s not in top.text(0).lower() if s else False)
+            else:
+                # 有子节点：任一子节点匹配就显示父节点
+                any_visible = False
+                for j in range(top.childCount()):
+                    child = top.child(j)
+                    match = s in child.text(0).lower() if s else True
+                    child.setHidden(not match)
+                    if match:
+                        any_visible = True
+                top.setHidden(not any_visible if s else False)
+
+    def _on_selected(self, current, previous):
+        if not current:
             return
-        item = self._list.item(row)
-        if item:
-            self.batch_changed.emit(item.data(Qt.UserRole))
+        bid = current.data(0, Qt.UserRole)
+        self.batch_changed.emit(bid)
 
     def _on_context_menu(self, pos):
-        item = self._list.itemAt(pos)
+        item = self._tree.itemAt(pos)
         if not item:
             return
-        bid = item.data(Qt.UserRole)
+        bid = item.data(0, Qt.UserRole)
         if bid in (None, 0):
-            return  # 不显示全部/未分类的右键菜单
+            return  # 不显示全部/未分类/分类父节点的右键菜单
 
         menu = QMenu(self)
         menu.addAction("编辑", lambda: self._on_edit())
         menu.addAction("删除", lambda: self._on_delete())
-        menu.exec(self._list.mapToGlobal(pos))
+        menu.exec(self._tree.mapToGlobal(pos))
 
     def _on_new(self):
-        from portcheck.ui.main_window import BatchDialog
+        from src.ui.main_window import BatchDialog
         dlg = BatchDialog("新建集合", parent=self)
         if dlg.exec() == QDialog.Accepted:
             try:
@@ -134,17 +176,17 @@ class _BatchListTab(QWidget):
                 QMessageBox.critical(self, "错误", f"创建集合失败:\n{e}")
 
     def _on_edit(self):
-        item = self._list.currentItem()
+        item = self._tree.currentItem()
         if not item:
             return
-        bid = item.data(Qt.UserRole)
+        bid = item.data(0, Qt.UserRole)
         if bid in (None, 0):
             QMessageBox.information(self, "提示", "请选择自定义集合。")
             return
         batch = self._db.get_batch(bid)
         if not batch:
             return
-        from portcheck.ui.main_window import BatchDialog
+        from src.ui.main_window import BatchDialog
         dlg = BatchDialog("编辑集合", batch.name, batch.description, parent=self)
         if dlg.exec() == QDialog.Accepted:
             try:
@@ -154,9 +196,9 @@ class _BatchListTab(QWidget):
                 QMessageBox.critical(self, "错误", f"更新集合失败:\n{e}")
 
     def _on_delete(self):
-        selected = self._list.selectedItems()
-        valid = [(it.data(Qt.UserRole), it.text()) for it in selected
-                 if it.data(Qt.UserRole) not in (None, 0)]
+        selected = self._tree.selectedItems()
+        valid = [(it.data(0, Qt.UserRole), it.text(0)) for it in selected
+                 if it.data(0, Qt.UserRole) not in (None, 0)]
         if not valid:
             QMessageBox.information(self, "提示", "请选择自定义集合。")
             return
@@ -171,78 +213,12 @@ class _BatchListTab(QWidget):
             self.refresh()
 
 
-class _SimpleIPTab(QWidget):
-    """IP 地址管理子标签页 —— 独立 IP 列表，不关联端口。"""
-
-    def __init__(self, db: Database, parent=None):
-        super().__init__(parent)
-        self._db = db
-        self._setup_ui()
-
-    def _setup_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.addWidget(QLabel("<b>IP 地址管理</b>"))
-
-        self._search = QLineEdit()
-        self._search.setPlaceholderText("搜索 IP...")
-        self._search.setClearButtonEnabled(True)
-        self._search.textChanged.connect(self._filter)
-        layout.addWidget(self._search)
-
-        self._table = QTableWidget()
-        self._table.setColumnCount(2)
-        self._table.setHorizontalHeaderLabels(["IP 地址", "目标数"])
-        self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self._table.setAlternatingRowColors(True)
-        self._table.verticalHeader().setVisible(False)
-        self._table.horizontalHeader().setStretchLastSection(True)
-        self._table.setContextMenuPolicy(Qt.CustomContextMenu)
-        self._table.customContextMenuRequested.connect(self._on_context_menu)
-        layout.addWidget(self._table)
-
-        self._all_ips: list[tuple[str, int]] = []
-
-    def refresh(self, batch_id: int | None = None):
-        targets = self._db.get_targets(batch_id)
-        ip_map: dict[str, int] = {}
-        for t in targets:
-            ip_map[t.ip] = ip_map.get(t.ip, 0) + 1
-        self._all_ips = sorted(ip_map.items(), key=lambda x: tuple(int(o) for o in x[0].split(".")))
-
-        self._table.setRowCount(len(self._all_ips))
-        for row, (ip, count) in enumerate(self._all_ips):
-            self._table.setItem(row, 0, QTableWidgetItem(ip))
-            self._table.setItem(row, 1, QTableWidgetItem(str(count)))
-
-        if self._search.text().strip():
-            self._filter(self._search.text())
-
-    def _filter(self, text: str):
-        s = text.strip().lower()
-        for row in range(self._table.rowCount()):
-            item = self._table.item(row, 0)
-            if item:
-                self._table.setRowHidden(row, s not in item.text().lower() if s else False)
-
-    def _on_context_menu(self, pos):
-        row = self._table.rowAt(pos.y())
-        if row < 0:
-            return
-        ip = self._table.item(row, 0).text()
-        menu = QMenu(self)
-        act = QAction(f"复制 {ip}", self)
-        act.triggered.connect(lambda: QApplication.clipboard().setText(ip))
-        menu.addAction(act)
-        menu.exec(self._table.mapToGlobal(pos))
-
 
 # ── 连通测试主面板 ──────────────────────────────────────────
 
 
 class ConnectivityPanel(QWidget):
-    """连通测试面板 —— 5 个子标签页。"""
+    """连通测试面板 —— 左侧固定集合分类 + 右侧 3 个子标签页。"""
 
     targets_changed = Signal()
     protocol_test_selected = Signal(str, int)
@@ -256,18 +232,17 @@ class ConnectivityPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        self._tabs = QTabWidget()
+        splitter = QSplitter(Qt.Horizontal)
 
-        # Subtab 1: 集合列表
+        # 左侧: 集合分类（固定）
         self._batch_tab = _BatchListTab(self._db)
         self._batch_tab.batch_changed.connect(self._on_batch_changed)
-        self._tabs.addTab(self._batch_tab, "集合列表")
+        splitter.addWidget(self._batch_tab)
 
-        # Subtab 2: IP 地址管理
-        self._ip_tab = _SimpleIPTab(self._db)
-        self._tabs.addTab(self._ip_tab, "IP地址管理")
+        # 右侧: 功能标签页
+        self._tabs = QTabWidget()
 
-        # Subtab 3: 目标管理
+        # Tab 0: 目标管理
         self._target_panel = TargetPanel(self._db)
         self._target_panel.targets_changed.connect(self._on_targets_changed)
         self._target_panel.test_selected.connect(self._on_test_selected)
@@ -276,33 +251,41 @@ class ConnectivityPanel(QWidget):
         )
         self._tabs.addTab(self._target_panel, "目标管理")
 
-        # Subtab 4: 连通测试
+        # Tab 1: 连通测试
         self._test_panel = TestPanel(self._db)
         self._test_panel.test_finished.connect(self._on_test_finished)
         self._tabs.addTab(self._test_panel, "连通测试")
 
-        # Subtab 5: 测试历史
+        # Tab 2: 测试历史
         self._result_panel = ResultPanel(self._db)
         self._tabs.addTab(self._result_panel, "测试历史")
 
-        layout.addWidget(self._tabs)
+        splitter.addWidget(self._tabs)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([220, 880])
 
+        layout.addWidget(splitter)
+
+        self._tabs.currentChanged.connect(self._on_tab_changed)
         self._batch_tab.refresh()
 
     # ── 信号转发 ────────────────────────────────────────────
 
+    def _on_tab_changed(self, idx: int):
+        if idx == 2:  # 测试历史
+            self._result_panel.refresh()
+
     def _on_batch_changed(self, batch_id):
         self._target_panel.set_batch(batch_id)
         self._test_panel.set_batch(batch_id)
-        self._ip_tab.refresh(batch_id)
 
     def _on_targets_changed(self):
         self._batch_tab.refresh()
-        self._ip_tab.refresh()
         self.targets_changed.emit()
 
     def _on_test_selected(self, target_ids: list[int]):
-        self._tabs.setCurrentIndex(3)  # 切换到连通测试
+        self._tabs.setCurrentIndex(1)  # 切换到连通测试
         self._test_panel.start_test_with_ids(target_ids, label="选中目标")
 
     def _on_test_finished(self):

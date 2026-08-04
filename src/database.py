@@ -64,17 +64,10 @@ class TestResult:
 
 @dataclass
 class ProtocolCollection:
-    """保存的协议测试配置（TCP/WebSocket 客户端）。"""
+    """协议测试集合。"""
     id: int
     name: str
     protocol_type: str = "tcp_client"  # tcp_client | ws_client
-    target_ip: str = ""
-    target_port: int = 0
-    encoding: str = "UTF-8"
-    head_length: int = 5              # 0=raw, >0=长度头位数
-    timeout: float = 5.0
-    ws_path: str = ""                 # WebSocket 路径
-    ws_use_ssl: bool = False
     description: str = ""
     created_at: str = ""
 
@@ -103,18 +96,26 @@ class ProtocolServer:
     ws_path: str = ""
     response_mode: str = "fixed"      # "fixed" | "echo"
     response_message: str = ""
+    target_id: int | None = None      # 关联的协议目标
     sort_order: int = 0
     created_at: str = ""
 
 
 @dataclass
 class ProtocolTarget:
-    """协议测试集合内的目标 IP:Port。"""
+    """协议测试集合内的目标 IP:Port，含独立客户端参数。"""
     id: int
     collection_id: int
     ip: str = ""
     port: int = 0
     description: str = ""
+    encoding: str = "UTF-8"
+    head_length: int = 5              # 0=raw, >0=长度头位数
+    timeout: float = 5.0
+    ws_path: str = ""                 # WebSocket 路径
+    ws_use_ssl: bool = False
+    send_message: str = ""            # 发送消息模板
+    send_presets: str = "[]"          # JSON 格式多预设报文 [{"name":"...","message":"..."}]
     sort_order: int = 0
     created_at: str = ""
 
@@ -197,13 +198,6 @@ CREATE TABLE IF NOT EXISTS protocol_collections (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     protocol_type TEXT NOT NULL DEFAULT 'tcp_client',
-    target_ip TEXT DEFAULT '',
-    target_port INTEGER DEFAULT 0,
-    encoding TEXT DEFAULT 'UTF-8',
-    head_length INTEGER DEFAULT 5,
-    timeout REAL DEFAULT 5.0,
-    ws_path TEXT DEFAULT '',
-    ws_use_ssl INTEGER DEFAULT 0,
     description TEXT DEFAULT '',
     created_at TIMESTAMP DEFAULT (datetime('now', 'localtime'))
 );
@@ -229,8 +223,10 @@ CREATE TABLE IF NOT EXISTS protocol_servers (
     ws_path TEXT DEFAULT '',
     response_mode TEXT DEFAULT 'fixed',
     response_message TEXT DEFAULT '',
+    target_id INTEGER,
     sort_order INTEGER DEFAULT 0,
-    created_at TIMESTAMP DEFAULT (datetime('now', 'localtime'))
+    created_at TIMESTAMP DEFAULT (datetime('now', 'localtime')),
+    FOREIGN KEY (target_id) REFERENCES protocol_targets(id) ON DELETE SET NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_protocol_msgs_collection
@@ -244,6 +240,13 @@ CREATE TABLE IF NOT EXISTS protocol_targets (
     ip TEXT NOT NULL,
     port INTEGER NOT NULL,
     description TEXT DEFAULT '',
+    encoding TEXT DEFAULT 'UTF-8',
+    head_length INTEGER DEFAULT 5,
+    timeout REAL DEFAULT 5.0,
+    ws_path TEXT DEFAULT '',
+    ws_use_ssl INTEGER DEFAULT 0,
+    send_message TEXT DEFAULT '',
+    send_presets TEXT DEFAULT '[]',
     sort_order INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT (datetime('now', 'localtime')),
     FOREIGN KEY (collection_id) REFERENCES protocol_collections(id) ON DELETE CASCADE
@@ -267,6 +270,11 @@ CREATE INDEX IF NOT EXISTS idx_protocol_targets_coll
     ON protocol_targets(collection_id);
 CREATE INDEX IF NOT EXISTS idx_protocol_sessions_time
     ON protocol_test_sessions(started_at DESC);
+
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT DEFAULT ''
+);
 """
 
 
@@ -278,7 +286,7 @@ class Database:
 
     def __init__(self, db_path: str | Path = ""):
         if not db_path:
-            db_path = Path(__file__).parent.parent / "portcheck.db"
+            db_path = Path(__file__).parent.parent / "testtool.db"
         self.db_path = Path(db_path)
         self._init_db()
 
@@ -296,6 +304,99 @@ class Database:
                     )
                 except sqlite3.OperationalError:
                     pass  # 列已存在
+
+            # ── 协议测试 v2 迁移 ─────────────────────────
+            self._migrate_protocol_v2(conn)
+
+    def _migrate_protocol_v2(self, conn: sqlite3.Connection) -> None:
+        """协议测试 v2 迁移：目标扩展 + 服务端关联 + 集合精简。"""
+        # 1. 为目标表添加新列（已存在则跳过）
+        for col, col_type in [
+            ("encoding", "TEXT DEFAULT 'UTF-8'"),
+            ("head_length", "INTEGER DEFAULT 5"),
+            ("timeout", "REAL DEFAULT 5.0"),
+            ("ws_path", "TEXT DEFAULT ''"),
+            ("ws_use_ssl", "INTEGER DEFAULT 0"),
+            ("send_message", "TEXT DEFAULT ''"),
+            ("send_presets", "TEXT DEFAULT '[]'"),
+        ]:
+            try:
+                conn.execute(
+                    f"ALTER TABLE protocol_targets ADD COLUMN {col} {col_type}"
+                )
+            except sqlite3.OperationalError:
+                pass
+
+        # 2. 为服务端表添加 target_id 列
+        try:
+            conn.execute(
+                "ALTER TABLE protocol_servers ADD COLUMN target_id INTEGER "
+                "REFERENCES protocol_targets(id) ON DELETE SET NULL"
+            )
+        except sqlite3.OperationalError:
+            pass
+
+        # 3. 检测是否需要数据迁移（集合表是否还有 target_ip 列）
+        cols = [r[1] for r in conn.execute(
+            "PRAGMA table_info(protocol_collections)"
+        ).fetchall()]
+        if "target_ip" not in cols:
+            return  # 已迁移过
+
+        # 4. 将集合的客户端参数复制到其下的每个目标
+        collections = conn.execute(
+            "SELECT * FROM protocol_collections"
+        ).fetchall()
+        for coll in collections:
+            cid = coll["id"]
+            targets = conn.execute(
+                "SELECT id FROM protocol_targets WHERE collection_id = ?",
+                (cid,)
+            ).fetchall()
+            if not targets:
+                continue
+            for t in targets:
+                conn.execute("""
+                    UPDATE protocol_targets SET
+                        encoding = ?, head_length = ?, timeout = ?,
+                        ws_path = ?, ws_use_ssl = ?
+                    WHERE id = ?
+                """, (coll["encoding"], coll["head_length"], coll["timeout"],
+                      coll["ws_path"], coll["ws_use_ssl"], t["id"]))
+            # 复制第一条 send 消息到每个目标的 send_message
+            send_msg = conn.execute(
+                "SELECT message FROM protocol_messages "
+                "WHERE collection_id = ? AND direction = 'send' "
+                "ORDER BY sort_order LIMIT 1",
+                (cid,)
+            ).fetchone()
+            if send_msg and send_msg["message"]:
+                for t in targets:
+                    conn.execute(
+                        "UPDATE protocol_targets SET send_message = ? WHERE id = ?",
+                        (send_msg["message"], t["id"])
+                    )
+
+        # 5. 用重建方式移除集合表的客户端参数字段
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS protocol_collections_v2 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                protocol_type TEXT NOT NULL DEFAULT 'tcp_client',
+                description TEXT DEFAULT '',
+                created_at TIMESTAMP DEFAULT (datetime('now', 'localtime'))
+            )
+        """)
+        conn.execute("""
+            INSERT INTO protocol_collections_v2
+                (id, name, protocol_type, description, created_at)
+            SELECT id, name, protocol_type, description, created_at
+            FROM protocol_collections
+        """)
+        conn.execute("DROP TABLE protocol_collections")
+        conn.execute(
+            "ALTER TABLE protocol_collections_v2 RENAME TO protocol_collections"
+        )
 
     def _connect(self) -> sqlite3.Connection:
         """获取数据库连接（启用 WAL 和外键）。"""
@@ -715,10 +816,6 @@ class Database:
             return [ProtocolCollection(
                 id=r["id"], name=r["name"],
                 protocol_type=r["protocol_type"],
-                target_ip=r["target_ip"], target_port=r["target_port"],
-                encoding=r["encoding"], head_length=r["head_length"],
-                timeout=r["timeout"], ws_path=r["ws_path"],
-                ws_use_ssl=bool(r["ws_use_ssl"]),
                 description=r["description"], created_at=r["created_at"]
             ) for r in rows]
 
@@ -734,55 +831,30 @@ class Database:
                 return ProtocolCollection(
                     id=r["id"], name=r["name"],
                     protocol_type=r["protocol_type"],
-                    target_ip=r["target_ip"], target_port=r["target_port"],
-                    encoding=r["encoding"], head_length=r["head_length"],
-                    timeout=r["timeout"], ws_path=r["ws_path"],
-                    ws_use_ssl=bool(r["ws_use_ssl"]),
                     description=r["description"], created_at=r["created_at"]
                 )
             return None
 
     def add_protocol_collection(self, name: str, protocol_type: str,
-                                target_ip: str = "", target_port: int = 0,
-                                encoding: str = "UTF-8",
-                                head_length: int = 5,
-                                timeout: float = 5.0,
-                                ws_path: str = "",
-                                ws_use_ssl: bool = False,
                                 description: str = "") -> int:
         """添加协议测试集合，返回新 ID。"""
         with self._connect() as conn:
             cur = conn.execute("""
-                INSERT INTO protocol_collections
-                    (name, protocol_type, target_ip, target_port, encoding,
-                     head_length, timeout, ws_path, ws_use_ssl, description)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (name, protocol_type, target_ip, target_port, encoding,
-                  head_length, timeout, ws_path, 1 if ws_use_ssl else 0,
-                  description))
+                INSERT INTO protocol_collections (name, protocol_type, description)
+                VALUES (?, ?, ?)
+            """, (name, protocol_type, description))
             return cur.lastrowid
 
     def update_protocol_collection(self, collection_id: int, name: str,
                                    protocol_type: str,
-                                   target_ip: str = "",
-                                   target_port: int = 0,
-                                   encoding: str = "UTF-8",
-                                   head_length: int = 5,
-                                   timeout: float = 5.0,
-                                   ws_path: str = "",
-                                   ws_use_ssl: bool = False,
                                    description: str = "") -> None:
         """更新协议测试集合。"""
         with self._connect() as conn:
             conn.execute("""
                 UPDATE protocol_collections SET
-                    name = ?, protocol_type = ?, target_ip = ?,
-                    target_port = ?, encoding = ?, head_length = ?,
-                    timeout = ?, ws_path = ?, ws_use_ssl = ?, description = ?
+                    name = ?, protocol_type = ?, description = ?
                 WHERE id = ?
-            """, (name, protocol_type, target_ip, target_port, encoding,
-                  head_length, timeout, ws_path, 1 if ws_use_ssl else 0,
-                  description, collection_id))
+            """, (name, protocol_type, description, collection_id))
 
     def delete_protocol_collection(self, collection_id: int) -> None:
         """删除协议测试集合（关联消息会因 ON DELETE CASCADE 自动删除）。"""
@@ -847,27 +919,32 @@ class Database:
     # ── 协议服务端操作 ───────────────────────────────────────
 
     def get_all_protocol_servers(self,
-                                 server_type: str | None = None
+                                 server_type: str | None = None,
+                                 target_id: int | None = None
                                  ) -> list[ProtocolServer]:
-        """获取协议服务端监听器列表，可按类型筛选。"""
+        """获取协议服务端监听器列表，可按类型和目标筛选。"""
         with self._connect() as conn:
+            conditions = []
+            params: list = []
             if server_type:
-                rows = conn.execute("""
-                    SELECT * FROM protocol_servers
-                    WHERE server_type = ?
-                    ORDER BY sort_order, created_at DESC
-                """, (server_type,)).fetchall()
-            else:
-                rows = conn.execute("""
-                    SELECT * FROM protocol_servers
-                    ORDER BY sort_order, created_at DESC
-                """).fetchall()
+                conditions.append("server_type = ?")
+                params.append(server_type)
+            if target_id is not None:
+                conditions.append("target_id = ?")
+                params.append(target_id)
+            where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+            rows = conn.execute(f"""
+                SELECT * FROM protocol_servers
+                {where}
+                ORDER BY sort_order, created_at DESC
+            """, params).fetchall()
             return [ProtocolServer(
                 id=r["id"], name=r["name"], server_type=r["server_type"],
                 ip=r["ip"], port=r["port"], encoding=r["encoding"],
                 head_length=r["head_length"], ws_path=r["ws_path"],
                 response_mode=r["response_mode"],
                 response_message=r["response_message"],
+                target_id=r["target_id"],
                 sort_order=r["sort_order"], created_at=r["created_at"]
             ) for r in rows]
 
@@ -887,6 +964,7 @@ class Database:
                     head_length=r["head_length"], ws_path=r["ws_path"],
                     response_mode=r["response_mode"],
                     response_message=r["response_message"],
+                    target_id=r["target_id"],
                     sort_order=r["sort_order"], created_at=r["created_at"]
                 )
             return None
@@ -897,16 +975,17 @@ class Database:
                             head_length: int = 0,
                             ws_path: str = "",
                             response_mode: str = "fixed",
-                            response_message: str = "") -> int:
+                            response_message: str = "",
+                            target_id: int | None = None) -> int:
         """添加协议服务端配置，返回新 ID。"""
         with self._connect() as conn:
             cur = conn.execute("""
                 INSERT INTO protocol_servers
                     (name, server_type, ip, port, encoding, head_length,
-                     ws_path, response_mode, response_message)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     ws_path, response_mode, response_message, target_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (name, server_type, ip, port, encoding, head_length,
-                  ws_path, response_mode, response_message))
+                  ws_path, response_mode, response_message, target_id))
             return cur.lastrowid
 
     def update_protocol_server(self, server_id: int, name: str,
@@ -915,17 +994,20 @@ class Database:
                                head_length: int = 0,
                                ws_path: str = "",
                                response_mode: str = "fixed",
-                               response_message: str = "") -> None:
+                               response_message: str = "",
+                               target_id: int | None = None) -> None:
         """更新协议服务端配置。"""
         with self._connect() as conn:
             conn.execute("""
                 UPDATE protocol_servers SET
                     name = ?, server_type = ?, ip = ?, port = ?,
                     encoding = ?, head_length = ?, ws_path = ?,
-                    response_mode = ?, response_message = ?
+                    response_mode = ?, response_message = ?,
+                    target_id = ?
                 WHERE id = ?
             """, (name, server_type, ip, port, encoding, head_length,
-                  ws_path, response_mode, response_message, server_id))
+                  ws_path, response_mode, response_message, target_id,
+                  server_id))
 
     def delete_protocol_server(self, server_id: int) -> None:
         """删除协议服务端配置。"""
@@ -934,6 +1016,11 @@ class Database:
                 "DELETE FROM protocol_servers WHERE id = ?",
                 (server_id,)
             )
+
+    def get_protocol_servers_by_target(self, target_id: int
+                                       ) -> list[ProtocolServer]:
+        """获取关联到指定目标的所有服务端配置。"""
+        return self.get_all_protocol_servers(target_id=target_id)
 
     # ── 协议目标操作 ──────────────────────────────────────
 
@@ -949,17 +1036,34 @@ class Database:
                 id=r["id"], collection_id=r["collection_id"],
                 ip=r["ip"], port=r["port"],
                 description=r["description"],
+                encoding=r["encoding"], head_length=r["head_length"],
+                timeout=r["timeout"], ws_path=r["ws_path"],
+                ws_use_ssl=bool(r["ws_use_ssl"]),
+                send_message=r["send_message"],
+                send_presets=r["send_presets"],
                 sort_order=r["sort_order"], created_at=r["created_at"]
             ) for r in rows]
 
     def add_protocol_target(self, collection_id: int, ip: str, port: int,
-                            description: str = "") -> int:
+                            description: str = "",
+                            encoding: str = "UTF-8",
+                            head_length: int = 5,
+                            timeout: float = 5.0,
+                            ws_path: str = "",
+                            ws_use_ssl: bool = False,
+                            send_message: str = "",
+                            send_presets: str = "[]") -> int:
         """添加协议目标，返回新 ID。"""
         with self._connect() as conn:
             cur = conn.execute("""
-                INSERT INTO protocol_targets (collection_id, ip, port, description)
-                VALUES (?, ?, ?, ?)
-            """, (collection_id, ip.strip(), port, description))
+                INSERT INTO protocol_targets
+                    (collection_id, ip, port, description, encoding,
+                     head_length, timeout, ws_path, ws_use_ssl,
+                     send_message, send_presets)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (collection_id, ip.strip(), port, description, encoding,
+                  head_length, timeout, ws_path, 1 if ws_use_ssl else 0,
+                  send_message, send_presets))
             return cur.lastrowid
 
     def add_protocol_targets_batch(self, targets: list[tuple]) -> int:
@@ -986,6 +1090,48 @@ class Database:
                 "DELETE FROM protocol_targets WHERE collection_id = ?",
                 (collection_id,)
             )
+
+    def get_protocol_target(self, target_id: int) -> Optional[ProtocolTarget]:
+        """获取单个协议目标。"""
+        with self._connect() as conn:
+            r = conn.execute(
+                "SELECT * FROM protocol_targets WHERE id = ?", (target_id,)
+            ).fetchone()
+            if r:
+                return ProtocolTarget(
+                    id=r["id"], collection_id=r["collection_id"],
+                    ip=r["ip"], port=r["port"],
+                    description=r["description"],
+                    encoding=r["encoding"], head_length=r["head_length"],
+                    timeout=r["timeout"], ws_path=r["ws_path"],
+                    ws_use_ssl=bool(r["ws_use_ssl"]),
+                    send_message=r["send_message"],
+                send_presets=r["send_presets"],
+                    sort_order=r["sort_order"], created_at=r["created_at"]
+                )
+            return None
+
+    def update_protocol_target(self, target_id: int, ip: str, port: int,
+                               description: str = "",
+                               encoding: str = "UTF-8",
+                               head_length: int = 5,
+                               timeout: float = 5.0,
+                               ws_path: str = "",
+                               ws_use_ssl: bool = False,
+                               send_message: str = "",
+                               send_presets: str = "[]") -> None:
+        """更新协议目标（含客户端参数）。"""
+        with self._connect() as conn:
+            conn.execute("""
+                UPDATE protocol_targets SET
+                    ip = ?, port = ?, description = ?,
+                    encoding = ?, head_length = ?, timeout = ?,
+                    ws_path = ?, ws_use_ssl = ?, send_message = ?,
+                    send_presets = ?
+                WHERE id = ?
+            """, (ip.strip(), port, description, encoding,
+                  head_length, timeout, ws_path, 1 if ws_use_ssl else 0,
+                  send_message, send_presets, target_id))
 
     # ── 协议测试会话操作 ────────────────────────────────────
 
@@ -1032,6 +1178,26 @@ class Database:
                 error_msg=r["error_msg"]
             ) for r in rows]
 
+    def get_protocol_test_sessions_by_target(self, target_id: int,
+                                             limit: int = 50
+                                             ) -> list[ProtocolTestSession]:
+        """获取指定目标的协议测试会话。"""
+        with self._connect() as conn:
+            rows = conn.execute("""
+                SELECT * FROM protocol_test_sessions
+                WHERE target_id = ?
+                ORDER BY started_at DESC LIMIT ?
+            """, (target_id, limit)).fetchall()
+            return [ProtocolTestSession(
+                id=r["id"], collection_id=r["collection_id"],
+                collection_name=r["collection_name"],
+                target_id=r["target_id"], protocol_type=r["protocol_type"],
+                target_ip=r["target_ip"], target_port=r["target_port"],
+                started_at=r["started_at"],
+                success=bool(r["success"]), response=r["response"],
+                error_msg=r["error_msg"]
+            ) for r in rows]
+
     def delete_protocol_test_session(self, session_id: int) -> None:
         """删除协议测试会话记录。"""
         with self._connect() as conn:
@@ -1049,3 +1215,21 @@ class Database:
                     "UPDATE protocol_servers SET sort_order = ? WHERE id = ?",
                     (idx, server_id)
                 )
+
+    # ── 应用设置 ────────────────────────────────────────────
+
+    def get_setting(self, key: str, default: str = "") -> str:
+        """读取应用设置。"""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT value FROM app_settings WHERE key = ?", (key,)
+            ).fetchone()
+            return row[0] if row else default
+
+    def set_setting(self, key: str, value: str) -> None:
+        """写入应用设置。"""
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)",
+                (key, value)
+            )

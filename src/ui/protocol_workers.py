@@ -11,7 +11,7 @@ import time
 
 from PySide6.QtCore import QThread, Signal
 
-from portcheck.protocol import (
+from src.protocol import (
     TcpServerEngine,
     WsServerEngine,
     tcp_send_and_receive,

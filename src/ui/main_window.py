@@ -23,12 +23,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from portcheck.csv_handler import export_targets_to_csv
-from portcheck.database import Database
-from portcheck.excel_handler import export_targets_to_excel
-from portcheck.ui.connectivity_panel import ConnectivityPanel
-from portcheck.ui.port_scan_dialog import PortScanDialog
-from portcheck.ui.protocol_panel import ProtocolPanel
+from src.csv_handler import export_targets_to_csv
+from src.database import Database
+from src.excel_handler import export_targets_to_excel
+from src.ui.connectivity_panel import ConnectivityPanel
+from src.ui.port_scan_dialog import PortScanDialog
+from src.ui.protocol_panel import ProtocolPanel
 
 
 class BatchDialog(QDialog):

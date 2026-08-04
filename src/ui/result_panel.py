@@ -26,9 +26,9 @@ from PySide6.QtWidgets import (
 
 from pathlib import Path
 
-from portcheck.csv_handler import export_results_to_csv
-from portcheck.database import Database
-from portcheck.excel_handler import export_results_to_excel
+from src.csv_handler import export_results_to_csv
+from src.database import Database
+from src.excel_handler import export_results_to_excel
 
 
 class ResultPanel(QWidget):
@@ -63,7 +63,6 @@ class ResultPanel(QWidget):
         self._session_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self._session_table.setAlternatingRowColors(True)
         self._session_table.verticalHeader().setVisible(False)
-        self._session_table.setMaximumHeight(200)
         self._session_table.itemSelectionChanged.connect(self._on_session_selected)
 
         hh = self._session_table.horizontalHeader()

@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from portcheck.scanner import expand_ip_range, expand_port_range
+from src.scanner import expand_ip_range, expand_port_range
 
 
 def _is_header_row(values: list[str]) -> bool:

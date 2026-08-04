@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from portcheck.scanner import expand_ip_range, expand_port_range
+from src.scanner import expand_ip_range, expand_port_range
 
 
 # ── 导入数据模型 ──────────────────────────────────────────
