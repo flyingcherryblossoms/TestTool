@@ -8,5 +8,5 @@ dependencies = [
     "pyside6==6.6.0",
     "websocket-client>=1.6.0",
     "websockets>=12.0",
-    "3.1.5"
+    "openpyxl==3.1.5"
 ]

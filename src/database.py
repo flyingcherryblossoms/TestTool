@@ -142,7 +142,7 @@ SCHEMA_SQL = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 
-CREATE TABLE IF NOT EXISTS batches (
+CREATE TABLE IF NOT EXISTS connect_batches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
     description TEXT DEFAULT '',
@@ -150,7 +150,7 @@ CREATE TABLE IF NOT EXISTS batches (
     created_at TIMESTAMP DEFAULT (datetime('now', 'localtime'))
 );
 
-CREATE TABLE IF NOT EXISTS targets (
+CREATE TABLE IF NOT EXISTS connect_targets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     batch_id INTEGER,
     ip TEXT NOT NULL,
@@ -158,12 +158,12 @@ CREATE TABLE IF NOT EXISTS targets (
     description TEXT DEFAULT '',
     sort_order INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT (datetime('now', 'localtime')),
-    FOREIGN KEY (batch_id) REFERENCES batches(id) ON DELETE SET NULL
+    FOREIGN KEY (batch_id) REFERENCES connect_batches(id) ON DELETE SET NULL
 );
 
 -- 兼容旧表: 添加排序列（新表已有则忽略）
 
-CREATE TABLE IF NOT EXISTS test_sessions (
+CREATE TABLE IF NOT EXISTS connect_test_sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     batch_id INTEGER,
     batch_name TEXT DEFAULT '',
@@ -172,10 +172,10 @@ CREATE TABLE IF NOT EXISTS test_sessions (
     total_count INTEGER DEFAULT 0,
     success_count INTEGER DEFAULT 0,
     fail_count INTEGER DEFAULT 0,
-    FOREIGN KEY (batch_id) REFERENCES batches(id) ON DELETE SET NULL
+    FOREIGN KEY (batch_id) REFERENCES connect_batches(id) ON DELETE SET NULL
 );
 
-CREATE TABLE IF NOT EXISTS test_results (
+CREATE TABLE IF NOT EXISTS connect_test_results (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id INTEGER NOT NULL,
     target_id INTEGER NOT NULL,
@@ -186,13 +186,13 @@ CREATE TABLE IF NOT EXISTS test_results (
     latency_ms REAL DEFAULT 0,
     error_msg TEXT DEFAULT '',
     tested_at TIMESTAMP DEFAULT (datetime('now', 'localtime')),
-    FOREIGN KEY (session_id) REFERENCES test_sessions(id) ON DELETE CASCADE,
-    FOREIGN KEY (target_id) REFERENCES targets(id) ON DELETE CASCADE
+    FOREIGN KEY (session_id) REFERENCES connect_test_sessions(id) ON DELETE CASCADE,
+    FOREIGN KEY (target_id) REFERENCES connect_targets(id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_targets_batch ON targets(batch_id);
-CREATE INDEX IF NOT EXISTS idx_results_session ON test_results(session_id);
-CREATE INDEX IF NOT EXISTS idx_results_status ON test_results(success);
+CREATE INDEX IF NOT EXISTS idx_targets_batch ON connect_targets(batch_id);
+CREATE INDEX IF NOT EXISTS idx_results_session ON connect_test_results(session_id);
+CREATE INDEX IF NOT EXISTS idx_results_status ON connect_test_results(success);
 
 CREATE TABLE IF NOT EXISTS protocol_collections (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -295,9 +295,22 @@ class Database:
     def _init_db(self) -> None:
         """创建数据库和表结构（含旧表兼容迁移）。"""
         with self._connect() as conn:
+            # ── 旧表重命名迁移 ──
+            old_to_new = {
+                "batches": "connect_batches",
+                "targets": "connect_targets",
+                "test_sessions": "connect_test_sessions",
+                "test_results": "connect_test_results",
+            }
+            for old, new in old_to_new.items():
+                try:
+                    conn.execute(f"ALTER TABLE {old} RENAME TO {new}")
+                except sqlite3.OperationalError:
+                    pass  # 表不存在或已迁移
+
             conn.executescript(SCHEMA_SQL)
             # 兼容旧表: 如果列不存在则添加
-            for table, col in [("batches", "sort_order"), ("targets", "sort_order")]:
+            for table, col in [("connect_batches", "sort_order"), ("connect_targets", "sort_order")]:
                 try:
                     conn.execute(
                         f"ALTER TABLE {table} ADD COLUMN {col} INTEGER DEFAULT 0"
@@ -413,8 +426,8 @@ class Database:
         with self._connect() as conn:
             rows = conn.execute("""
                 SELECT b.*, COUNT(t.id) AS target_count
-                FROM batches b
-                LEFT JOIN targets t ON t.batch_id = b.id
+                FROM connect_batches b
+                LEFT JOIN connect_targets t ON t.batch_id = b.id
                 GROUP BY b.id
                 ORDER BY b.sort_order, b.created_at DESC
             """).fetchall()
@@ -428,7 +441,7 @@ class Database:
         with self._connect() as conn:
             r = conn.execute(
                 "SELECT b.*, COUNT(t.id) AS target_count "
-                "FROM batches b LEFT JOIN targets t ON t.batch_id = b.id "
+                "FROM connect_batches b LEFT JOIN connect_targets t ON t.batch_id = b.id "
                 "WHERE b.id = ? GROUP BY b.id", (batch_id,)
             ).fetchone()
             if r:
@@ -442,7 +455,7 @@ class Database:
         """添加集合，返回新 ID。"""
         with self._connect() as conn:
             cur = conn.execute(
-                "INSERT INTO batches (name, description) VALUES (?, ?)",
+                "INSERT INTO connect_batches (name, description) VALUES (?, ?)",
                 (name, description)
             )
             return cur.lastrowid
@@ -451,14 +464,14 @@ class Database:
         """更新集合信息。"""
         with self._connect() as conn:
             conn.execute(
-                "UPDATE batches SET name = ?, description = ? WHERE id = ?",
+                "UPDATE connect_batches SET name = ?, description = ? WHERE id = ?",
                 (name, description, batch_id)
             )
 
     def delete_batch(self, batch_id: int) -> None:
         """删除集合（关联目标会因 ON DELETE SET NULL 脱离集合）。"""
         with self._connect() as conn:
-            conn.execute("DELETE FROM batches WHERE id = ?", (batch_id,))
+            conn.execute("DELETE FROM connect_batches WHERE id = ?", (batch_id,))
 
     # ── 目标操作 ───────────────────────────────────────────
 
@@ -468,23 +481,23 @@ class Database:
             if batch_id is None:
                 rows = conn.execute("""
                     SELECT t.*, b.name AS batch_name
-                    FROM targets t
-                    LEFT JOIN batches b ON t.batch_id = b.id
+                    FROM connect_targets t
+                    LEFT JOIN connect_batches b ON t.batch_id = b.id
                     ORDER BY t.sort_order, t.created_at DESC
                 """).fetchall()
             elif batch_id == 0:
                 rows = conn.execute("""
                     SELECT t.*, b.name AS batch_name
-                    FROM targets t
-                    LEFT JOIN batches b ON t.batch_id = b.id
+                    FROM connect_targets t
+                    LEFT JOIN connect_batches b ON t.batch_id = b.id
                     WHERE t.batch_id IS NULL
                     ORDER BY t.sort_order, t.created_at DESC
                 """).fetchall()
             else:
                 rows = conn.execute("""
                     SELECT t.*, b.name AS batch_name
-                    FROM targets t
-                    LEFT JOIN batches b ON t.batch_id = b.id
+                    FROM connect_targets t
+                    LEFT JOIN connect_batches b ON t.batch_id = b.id
                     WHERE t.batch_id = ?
                     ORDER BY t.sort_order, t.created_at DESC
                 """, (batch_id,)).fetchall()
@@ -499,7 +512,7 @@ class Database:
         with self._connect() as conn:
             r = conn.execute("""
                 SELECT t.*, b.name AS batch_name
-                FROM targets t LEFT JOIN batches b ON t.batch_id = b.id
+                FROM connect_targets t LEFT JOIN connect_batches b ON t.batch_id = b.id
                 WHERE t.id = ?
             """, (target_id,)).fetchone()
             if r:
@@ -515,12 +528,12 @@ class Database:
         with self._connect() as conn:
             if batch_id is not None:
                 r = conn.execute(
-                    "SELECT 1 FROM targets WHERE batch_id = ? AND ip = ? AND port = ? LIMIT 1",
+                    "SELECT 1 FROM connect_targets WHERE batch_id = ? AND ip = ? AND port = ? LIMIT 1",
                     (batch_id, ip.strip(), port)
                 ).fetchone()
             else:
                 r = conn.execute(
-                    "SELECT 1 FROM targets WHERE batch_id IS NULL AND ip = ? AND port = ? LIMIT 1",
+                    "SELECT 1 FROM connect_targets WHERE batch_id IS NULL AND ip = ? AND port = ? LIMIT 1",
                     (ip.strip(), port)
                 ).fetchone()
             return r is not None
@@ -530,12 +543,12 @@ class Database:
         with self._connect() as conn:
             if batch_id is not None:
                 r = conn.execute(
-                    "SELECT id FROM targets WHERE batch_id = ? AND ip = ? AND port = ? LIMIT 1",
+                    "SELECT id FROM connect_targets WHERE batch_id = ? AND ip = ? AND port = ? LIMIT 1",
                     (batch_id, ip.strip(), port)
                 ).fetchone()
             else:
                 r = conn.execute(
-                    "SELECT id FROM targets WHERE batch_id IS NULL AND ip = ? AND port = ? LIMIT 1",
+                    "SELECT id FROM connect_targets WHERE batch_id IS NULL AND ip = ? AND port = ? LIMIT 1",
                     (ip.strip(), port)
                 ).fetchone()
             return r["id"] if r else None
@@ -545,7 +558,7 @@ class Database:
         """添加目标，返回新 ID。"""
         with self._connect() as conn:
             cur = conn.execute(
-                "INSERT INTO targets (ip, port, description, batch_id) VALUES (?, ?, ?, ?)",
+                "INSERT INTO connect_targets (ip, port, description, batch_id) VALUES (?, ?, ?, ?)",
                 (ip.strip(), port, description, batch_id)
             )
             return cur.lastrowid
@@ -556,7 +569,7 @@ class Database:
             count = 0
             for ip, port, desc, batch_id in targets:
                 conn.execute(
-                    "INSERT INTO targets (ip, port, description, batch_id) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO connect_targets (ip, port, description, batch_id) VALUES (?, ?, ?, ?)",
                     (ip.strip(), port, desc, batch_id)
                 )
                 count += 1
@@ -567,25 +580,25 @@ class Database:
         """更新目标信息。"""
         with self._connect() as conn:
             conn.execute(
-                "UPDATE targets SET ip = ?, port = ?, description = ?, batch_id = ? WHERE id = ?",
+                "UPDATE connect_targets SET ip = ?, port = ?, description = ?, batch_id = ? WHERE id = ?",
                 (ip.strip(), port, description, batch_id, target_id)
             )
 
     def delete_target(self, target_id: int) -> None:
         """删除单个目标。"""
         with self._connect() as conn:
-            conn.execute("DELETE FROM targets WHERE id = ?", (target_id,))
+            conn.execute("DELETE FROM connect_targets WHERE id = ?", (target_id,))
 
     def delete_targets(self, target_ids: list[int]) -> None:
         """批量删除目标。"""
         with self._connect() as conn:
-            conn.executemany("DELETE FROM targets WHERE id = ?", [(tid,) for tid in target_ids])
+            conn.executemany("DELETE FROM connect_targets WHERE id = ?", [(tid,) for tid in target_ids])
 
     def move_targets_to_batch(self, target_ids: list[int], batch_id: Optional[int]) -> None:
         """将目标移动/归类到指定集合。batch_id 为 None 则取消分类。"""
         with self._connect() as conn:
             conn.executemany(
-                "UPDATE targets SET batch_id = ? WHERE id = ?",
+                "UPDATE connect_targets SET batch_id = ? WHERE id = ?",
                 [(batch_id, tid) for tid in target_ids]
             )
 
@@ -596,7 +609,7 @@ class Database:
         """创建测试会话，返回会话 ID。"""
         with self._connect() as conn:
             cur = conn.execute(
-                "INSERT INTO test_sessions (batch_id, batch_name) VALUES (?, ?)",
+                "INSERT INTO connect_test_sessions (batch_id, batch_name) VALUES (?, ?)",
                 (batch_id, batch_name)
             )
             return cur.lastrowid
@@ -606,7 +619,7 @@ class Database:
         """标记会话完成并写入统计数据。"""
         with self._connect() as conn:
             conn.execute("""
-                UPDATE test_sessions
+                UPDATE connect_test_sessions
                 SET completed_at = datetime('now', 'localtime'),
                     total_count = ?, success_count = ?, fail_count = ?
                 WHERE id = ?
@@ -616,7 +629,7 @@ class Database:
         """获取最近的测试会话列表。"""
         with self._connect() as conn:
             rows = conn.execute("""
-                SELECT * FROM test_sessions
+                SELECT * FROM connect_test_sessions
                 ORDER BY started_at DESC LIMIT ?
             """, (limit,)).fetchall()
             return [TestSession(
@@ -630,7 +643,7 @@ class Database:
         """获取单个测试会话。"""
         with self._connect() as conn:
             r = conn.execute(
-                "SELECT * FROM test_sessions WHERE id = ?", (session_id,)
+                "SELECT * FROM connect_test_sessions WHERE id = ?", (session_id,)
             ).fetchone()
             if r:
                 return TestSession(
@@ -650,7 +663,7 @@ class Database:
         """保存单条测试结果，返回结果 ID。"""
         with self._connect() as conn:
             cur = conn.execute("""
-                INSERT INTO test_results
+                INSERT INTO connect_test_results
                     (session_id, target_id, ip, port, description, success, latency_ms, error_msg)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (session_id, target_id, ip, port, description,
@@ -666,7 +679,7 @@ class Database:
             return 0
         with self._connect() as conn:
             conn.executemany("""
-                INSERT INTO test_results
+                INSERT INTO connect_test_results
                     (session_id, target_id, ip, port, description, success, latency_ms, error_msg)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, rows)
@@ -678,19 +691,19 @@ class Database:
         with self._connect() as conn:
             if status_filter == "success":
                 rows = conn.execute("""
-                    SELECT * FROM test_results
+                    SELECT * FROM connect_test_results
                     WHERE session_id = ? AND success = 1
                     ORDER BY tested_at
                 """, (session_id,)).fetchall()
             elif status_filter == "fail":
                 rows = conn.execute("""
-                    SELECT * FROM test_results
+                    SELECT * FROM connect_test_results
                     WHERE session_id = ? AND success = 0
                     ORDER BY tested_at
                 """, (session_id,)).fetchall()
             else:
                 rows = conn.execute("""
-                    SELECT * FROM test_results
+                    SELECT * FROM connect_test_results
                     WHERE session_id = ?
                     ORDER BY tested_at
                 """, (session_id,)).fetchall()
@@ -704,18 +717,18 @@ class Database:
     def delete_test_session(self, session_id: int) -> None:
         """删除测试会话及其结果。"""
         with self._connect() as conn:
-            conn.execute("DELETE FROM test_sessions WHERE id = ?", (session_id,))
+            conn.execute("DELETE FROM connect_test_sessions WHERE id = ?", (session_id,))
 
     def delete_old_sessions(self, keep_count: int = 100) -> int:
         """删除旧测试会话，仅保留最近 N 条。返回删除数量。"""
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT id FROM test_sessions ORDER BY started_at DESC LIMIT 1 OFFSET ?",
+                "SELECT id FROM connect_test_sessions ORDER BY started_at DESC LIMIT 1 OFFSET ?",
                 (keep_count - 1,)
             ).fetchone()
             if row:
                 cur = conn.execute(
-                    "DELETE FROM test_sessions WHERE id < ?", (row["id"],)
+                    "DELETE FROM connect_test_sessions WHERE id < ?", (row["id"],)
                 )
                 return cur.rowcount
             return 0
@@ -727,7 +740,7 @@ class Database:
         with self._connect() as conn:
             for idx, batch_id in enumerate(ordered_ids):
                 conn.execute(
-                    "UPDATE batches SET sort_order = ? WHERE id = ?",
+                    "UPDATE connect_batches SET sort_order = ? WHERE id = ?",
                     (idx, batch_id)
                 )
 
@@ -736,7 +749,7 @@ class Database:
         with self._connect() as conn:
             for idx, target_id in enumerate(ordered_ids):
                 conn.execute(
-                    "UPDATE targets SET sort_order = ? WHERE id = ?",
+                    "UPDATE connect_targets SET sort_order = ? WHERE id = ?",
                     (idx, target_id)
                 )
 
@@ -745,13 +758,13 @@ class Database:
     def get_total_target_count(self) -> int:
         """获取目标总数。"""
         with self._connect() as conn:
-            return conn.execute("SELECT COUNT(*) FROM targets").fetchone()[0]
+            return conn.execute("SELECT COUNT(*) FROM connect_targets").fetchone()[0]
 
     def get_last_test_time(self) -> str:
         """获取最近一次测试的时间。"""
         with self._connect() as conn:
             r = conn.execute(
-                "SELECT started_at FROM test_sessions ORDER BY started_at DESC LIMIT 1"
+                "SELECT started_at FROM connect_test_sessions ORDER BY started_at DESC LIMIT 1"
             ).fetchone()
             return r["started_at"] if r else ""
 
@@ -759,7 +772,7 @@ class Database:
         """获取某个目标最近一次的测试结果。"""
         with self._connect() as conn:
             r = conn.execute("""
-                SELECT * FROM test_results
+                SELECT * FROM connect_test_results
                 WHERE target_id = ?
                 ORDER BY tested_at DESC LIMIT 1
             """, (target_id,)).fetchone()
@@ -783,7 +796,7 @@ class Database:
         placeholders = ",".join("?" * len(target_ids))
         with self._connect() as conn:
             rows = conn.execute(f"""
-                SELECT target_id, success FROM test_results
+                SELECT target_id, success FROM connect_test_results
                 WHERE target_id IN ({placeholders})
                 ORDER BY tested_at DESC
             """, target_ids).fetchall()
