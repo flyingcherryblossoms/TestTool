@@ -105,9 +105,9 @@ class ProtocolTarget:
     """协议测试集合内的目标 IP:Port，含独立客户端参数。"""
     id: int
     collection_id: int
+    name: str = ""
     ip: str = ""
     port: int = 0
-    description: str = ""
     encoding: str = "UTF-8"
     recv_encoding: str = "UTF-8"
     head_length: int = 5              # 0=raw, >0=长度头位数
@@ -132,6 +132,7 @@ class ProtocolTestSession:
     target_port: int = 0
     started_at: str = ""
     success: bool = False
+    request: str = ""
     response: str = ""
     error_msg: str = ""
 
@@ -237,9 +238,9 @@ CREATE INDEX IF NOT EXISTS idx_protocol_servers_type
 CREATE TABLE IF NOT EXISTS protocol_targets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     collection_id INTEGER NOT NULL,
+    name TEXT DEFAULT '',
     ip TEXT NOT NULL,
     port INTEGER NOT NULL,
-    description TEXT DEFAULT '',
     encoding TEXT DEFAULT 'UTF-8',
     recv_encoding TEXT DEFAULT 'UTF-8',
     head_length INTEGER DEFAULT 5,
@@ -263,6 +264,7 @@ CREATE TABLE IF NOT EXISTS protocol_test_sessions (
     target_port INTEGER DEFAULT 0,
     started_at TIMESTAMP DEFAULT (datetime('now', 'localtime')),
     success INTEGER DEFAULT 0,
+    request TEXT DEFAULT '',
     response TEXT DEFAULT '',
     error_msg TEXT DEFAULT ''
 );
@@ -319,6 +321,13 @@ class Database:
                     )
                 except sqlite3.OperationalError:
                     pass  # 列已存在
+            # 协议测试会话新增请求报文字段
+            try:
+                conn.execute(
+                    "ALTER TABLE protocol_test_sessions ADD COLUMN request TEXT DEFAULT ''"
+                )
+            except sqlite3.OperationalError:
+                pass  # 列已存在
             # 集合不再需要描述列，旧数据库迁移时一并删除
             for table in ("connect_collections", "protocol_collections"):
                 try:
@@ -370,9 +379,12 @@ class Database:
     def add_collection(self, name: str) -> int:
         """添加集合，返回新 ID。"""
         with self._connect() as conn:
+            max_order = conn.execute(
+                "SELECT COALESCE(MAX(sort_order), -1) FROM connect_collections"
+            ).fetchone()[0]
             cur = conn.execute(
-                "INSERT INTO connect_collections (name) VALUES (?)",
-                (name.strip(),)
+                "INSERT INTO connect_collections (name, sort_order) VALUES (?, ?)",
+                (name.strip(), max_order + 1)
             )
             return cur.lastrowid
 
@@ -617,17 +629,23 @@ class Database:
             conn.execute("DELETE FROM connect_test_sessions WHERE id = ?", (session_id,))
 
     def get_last_test_time(self) -> Optional[str]:
-        """获取最近一次测试的时间。"""
+        """获取最近一次测试的时间（连通 + 协议）。"""
         with self._connect() as conn:
-            r = conn.execute(
-                "SELECT started_at FROM connect_test_sessions ORDER BY started_at DESC LIMIT 1"
-            ).fetchone()
-            return r["started_at"] if r else None
+            r = conn.execute("""
+                SELECT MAX(started_at) AS last_time FROM (
+                    SELECT started_at FROM connect_test_sessions
+                    UNION ALL
+                    SELECT started_at FROM protocol_test_sessions
+                )
+            """).fetchone()
+            return r["last_time"] if r and r["last_time"] else None
 
     def get_total_target_count(self) -> int:
-        """获取目标总数。"""
+        """获取目标总数（连通 + 协议）。"""
         with self._connect() as conn:
-            return conn.execute("SELECT COUNT(*) FROM connect_targets").fetchone()[0]
+            c1 = conn.execute("SELECT COUNT(*) FROM connect_targets").fetchone()[0]
+            c2 = conn.execute("SELECT COUNT(*) FROM protocol_targets").fetchone()[0]
+            return c1 + c2
 
     def cleanup_old_sessions(self, keep_count: int = 50) -> int:
         """清理旧测试会话，保留最近 keep_count 条。返回删除数。"""
@@ -751,10 +769,13 @@ class Database:
     def add_protocol_collection(self, name: str, protocol_type: str) -> int:
         """添加协议测试集合，返回新 ID。"""
         with self._connect() as conn:
+            max_order = conn.execute(
+                "SELECT COALESCE(MAX(sort_order), -1) FROM protocol_collections"
+            ).fetchone()[0]
             cur = conn.execute("""
-                INSERT INTO protocol_collections (name, protocol_type)
-                VALUES (?, ?)
-            """, (name, protocol_type))
+                INSERT INTO protocol_collections (name, protocol_type, sort_order)
+                VALUES (?, ?, ?)
+            """, (name, protocol_type, max_order + 1))
             return cur.lastrowid
 
     def update_protocol_collection(self, collection_id: int, name: str,
@@ -776,8 +797,18 @@ class Database:
                     (idx, collection_id)
                 )
 
+    def move_protocol_targets_to_collection(self, from_collection_id: int,
+                                             to_collection_id: int) -> int:
+        """将集合内所有目标移动到另一个集合，返回移动数量。"""
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE protocol_targets SET collection_id = ? WHERE collection_id = ?",
+                (to_collection_id, from_collection_id)
+            )
+            return cur.rowcount
+
     def delete_protocol_collection(self, collection_id: int) -> None:
-        """删除协议测试集合（关联消息会因 ON DELETE CASCADE 自动删除）。"""
+        """删除协议测试集合。先移动目标到未分类，再删除集合本身。"""
         with self._connect() as conn:
             conn.execute(
                 "DELETE FROM protocol_collections WHERE id = ?",
@@ -961,7 +992,7 @@ class Database:
             return [ProtocolTarget(
                 id=r["id"], collection_id=r["collection_id"],
                 ip=r["ip"], port=r["port"],
-                description=r["description"],
+                name=r["name"],
                 encoding=r["encoding"], recv_encoding=r["recv_encoding"],
                 head_length=r["head_length"],
                 timeout=r["timeout"], ws_path=r["ws_path"],
@@ -972,7 +1003,7 @@ class Database:
             ) for r in rows]
 
     def add_protocol_target(self, collection_id: int, ip: str, port: int,
-                            description: str = "",
+                            name: str = "",
                             encoding: str = "UTF-8",
                             recv_encoding: str = "UTF-8",
                             head_length: int = 5,
@@ -985,23 +1016,23 @@ class Database:
         with self._connect() as conn:
             cur = conn.execute("""
                 INSERT INTO protocol_targets
-                    (collection_id, ip, port, description, encoding,
+                    (collection_id, name, ip, port, encoding,
                      recv_encoding, head_length, timeout, ws_path, ws_use_ssl,
                      send_message, send_presets)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (collection_id, ip.strip(), port, description, encoding,
+            """, (collection_id, name, ip.strip(), port, encoding,
                   recv_encoding, head_length, timeout, ws_path,
                   1 if ws_use_ssl else 0, send_message, send_presets))
             return cur.lastrowid
 
     def add_protocol_targets_batch(self, targets: list[tuple]) -> int:
-        """批量添加协议目标。targets 为 [(collection_id, ip, port, desc), ...]"""
+        """批量添加协议目标。targets 为 [(collection_id, name, ip, port), ...]"""
         with self._connect() as conn:
             count = 0
-            for cid, ip, port, desc in targets:
+            for cid, name, ip, port in targets:
                 conn.execute(
-                    "INSERT INTO protocol_targets (collection_id, ip, port, description) VALUES (?, ?, ?, ?)",
-                    (cid, ip.strip(), port, desc)
+                    "INSERT INTO protocol_targets (collection_id, name, ip, port) VALUES (?, ?, ?, ?)",
+                    (cid, name, ip.strip(), port)
                 )
                 count += 1
             return count
@@ -1029,7 +1060,7 @@ class Database:
                 return ProtocolTarget(
                     id=r["id"], collection_id=r["collection_id"],
                     ip=r["ip"], port=r["port"],
-                    description=r["description"],
+                    name=r["name"],
                     encoding=r["encoding"], recv_encoding=r["recv_encoding"],
                     head_length=r["head_length"],
                     timeout=r["timeout"], ws_path=r["ws_path"],
@@ -1041,7 +1072,7 @@ class Database:
             return None
 
     def update_protocol_target(self, target_id: int, ip: str, port: int,
-                               description: str = "",
+                               name: str = "",
                                encoding: str = "UTF-8",
                                recv_encoding: str = "UTF-8",
                                head_length: int = 5,
@@ -1054,12 +1085,12 @@ class Database:
         with self._connect() as conn:
             conn.execute("""
                 UPDATE protocol_targets SET
-                    ip = ?, port = ?, description = ?,
+                    name = ?, ip = ?, port = ?,
                     encoding = ?, recv_encoding = ?, head_length = ?, timeout = ?,
                     ws_path = ?, ws_use_ssl = ?, send_message = ?,
                     send_presets = ?
                 WHERE id = ?
-            """, (ip.strip(), port, description, encoding, recv_encoding,
+            """, (name, ip.strip(), port, encoding, recv_encoding,
                   head_length, timeout, ws_path, 1 if ws_use_ssl else 0,
                   send_message, send_presets, target_id))
 
@@ -1070,17 +1101,18 @@ class Database:
                                   target_id: int | None,
                                   protocol_type: str,
                                   target_ip: str, target_port: int,
-                                  success: bool, response: str,
+                                  success: bool, request: str = "",
+                                  response: str = "",
                                   error_msg: str = "") -> int:
         """记录一次协议测试，返回会话 ID。"""
         with self._connect() as conn:
             cur = conn.execute("""
                 INSERT INTO protocol_test_sessions
                     (collection_id, collection_name, target_id, protocol_type,
-                     target_ip, target_port, success, response, error_msg)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     target_ip, target_port, success, request, response, error_msg)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (collection_id, collection_name, target_id, protocol_type,
-                  target_ip, target_port, 1 if success else 0, response, error_msg))
+                  target_ip, target_port, 1 if success else 0, request, response, error_msg))
             return cur.lastrowid
 
     def get_protocol_test_sessions(self, protocol_type: str | None = None,
@@ -1104,7 +1136,8 @@ class Database:
                 target_id=r["target_id"], protocol_type=r["protocol_type"],
                 target_ip=r["target_ip"], target_port=r["target_port"],
                 started_at=r["started_at"],
-                success=bool(r["success"]), response=r["response"],
+                success=bool(r["success"]),
+                request=r["request"], response=r["response"],
                 error_msg=r["error_msg"]
             ) for r in rows]
 
@@ -1124,7 +1157,8 @@ class Database:
                 target_id=r["target_id"], protocol_type=r["protocol_type"],
                 target_ip=r["target_ip"], target_port=r["target_port"],
                 started_at=r["started_at"],
-                success=bool(r["success"]), response=r["response"],
+                success=bool(r["success"]),
+                request=r["request"], response=r["response"],
                 error_msg=r["error_msg"]
             ) for r in rows]
 

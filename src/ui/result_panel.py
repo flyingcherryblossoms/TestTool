@@ -369,3 +369,9 @@ class ResultPanel(QWidget):
             )
         else:
             QMessageBox.critical(self, "导出失败", f"导出失败:\n{err}")
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Delete or (event.key() == Qt.Key_D and event.modifiers() == Qt.ControlModifier):
+            self._delete_sessions()
+        else:
+            super().keyPressEvent(event)

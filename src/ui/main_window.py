@@ -124,6 +124,7 @@ class MainWindow(QMainWindow):
 
         # Tab 2: 协议测试
         self._proto_panel = ProtocolPanel(self._db)
+        self._proto_panel.test_finished.connect(self._update_statusbar)
         self._tabs.addTab(self._proto_panel, "协议测试")
 
         layout.addWidget(self._tabs)
@@ -140,7 +141,9 @@ class MainWindow(QMainWindow):
 
     def _update_statusbar(self):
         total = self._db.get_total_target_count()
-        batch_count = len(self._db.get_all_collections())
+        conn_cols = len(self._db.get_all_collections())
+        proto_cols = len([c for c in self._db.get_all_protocol_collections() if c.name != "未分类"])
+        batch_count = conn_cols + proto_cols
         self._status_target_count.setText(
             f"共 {total} 个目标 / {batch_count} 个集合"
         )

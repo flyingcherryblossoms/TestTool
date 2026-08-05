@@ -269,14 +269,13 @@ class TcpServerEngine:
             with client_sock:
                 body_bytes = read_message_bytes(client_sock, self._head_len)
                 message = body_bytes.decode(self._recv_encoding)
-                self._on_status(f"收到消息 来自 {addr_str}")
                 if self._on_message_raw:
                     self._on_message_raw(addr_str, body_bytes)
                 response = self._on_message(addr_str, message)
                 write_message(
                     client_sock, response, self._encoding, self._head_len
                 )
-                self._on_status(f"已回复 来自 {addr_str}")
+                self._on_status(f"已回复:\n{response}")
         except (ConnectionError, socket.timeout, ValueError,
                 UnicodeDecodeError, OSError) as e:
             self._on_error(f"处理客户端 {addr_str} 时出错: {e}")
@@ -376,10 +375,9 @@ class WsServerEngine:
             self._on_client_event(f"客户端已连接: {client_info}")
             try:
                 async for message in websocket:
-                    self._on_status(f"收到 WS 消息 来自 {client_info}")
                     response = self._on_message(message)
                     await websocket.send(response)
-                    self._on_status(f"已回复 WS 消息 到 {client_info}")
+                    self._on_status(f"已回复:\n{response}")
             except websockets.exceptions.ConnectionClosed:
                 self._on_client_event(f"客户端已断开: {client_info}")
             except Exception as e:

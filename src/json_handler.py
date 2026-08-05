@@ -15,7 +15,7 @@ def export_collection_to_json(filepath: str | Path, collection: dict) -> tuple[b
             "name": str, "protocol_type": str,
             "targets": [
                 {
-                    "ip": str, "port": int, "description": str,
+                    "ip": str, "port": int, "name": str,
                     "encoding": str, "head_length": int, "timeout": float,
                     "ws_path": str, "ws_use_ssl": bool, "send_message": str,
                     "servers": [
@@ -47,10 +47,35 @@ def export_collection_to_json(filepath: str | Path, collection: dict) -> tuple[b
         return False, str(e)
 
 
-def import_collection_from_json(filepath: str | Path) -> tuple[dict | None, str]:
+def export_collections_to_json(filepath: str | Path, collections: list[dict]) -> tuple[bool, str]:
+    """将多个集合导出为一个 JSON 文件。
+    返回 (ok, message)。
+    """
+    data = {
+        "version": 1,
+        "type": "protocol_collections",
+        "collections": [
+            {
+                "name": c.get("name", ""),
+                "protocol_type": c.get("protocol_type", "tcp_client"),
+                "targets": c.get("targets", []),
+            }
+            for c in collections
+        ],
+    }
+    try:
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return True, ""
+    except OSError as e:
+        return False, str(e)
+
+
+def import_collection_from_json(filepath: str | Path) -> tuple:
     """从 JSON 文件导入集合配置。
 
-    返回 (collection_dict, error_message)。成功时 error_message 为空。
+    返回 (list_of_collection_dicts, error_message) 或 (None, error_message)。
+    成功时 error_message 为空，返回集合列表（单文件可能含多个集合）。
     """
     try:
         with open(filepath, "r", encoding="utf-8") as f:
@@ -67,11 +92,26 @@ def import_collection_from_json(filepath: str | Path) -> tuple[dict | None, str]
 
     data_type = data.get("type", "")
     if data_type == "protocol_collection":
-        return _parse_collection(data)
+        result, err = _parse_collection(data)
+        return ([result], "") if result else (None, err)
+    elif data_type == "protocol_collections":
+        # 多集合格式
+        raw_collections = data.get("collections", [])
+        if not isinstance(raw_collections, list) or not raw_collections:
+            return None, "collections 为空或格式错误"
+        results = []
+        for i, c in enumerate(raw_collections):
+            result, err = _parse_collection(c)
+            if err:
+                return None, f"collections[{i}]: {err}"
+            results.append(result)
+        return results, ""
     elif data_type == "protocol_client_config":
-        return _parse_client_config(data)
+        result, err = _parse_client_config(data)
+        return ([result], "") if result else (None, err)
     elif data_type == "protocol_server_config":
-        return _parse_server_config(data)
+        result, err = _parse_server_config(data)
+        return ([result], "") if result else (None, err)
     else:
         return None, f"不支持的类型: {data_type}"
 
@@ -115,7 +155,7 @@ def _parse_collection(data: dict) -> tuple[dict | None, str]:
         targets.append({
             "ip": ip,
             "port": port,
-            "description": t.get("description", ""),
+            "name": t.get("name", ""),
             "encoding": t.get("encoding", "UTF-8"),
             "recv_encoding": t.get("recv_encoding", "UTF-8"),
             "head_length": t.get("head_length", 5),

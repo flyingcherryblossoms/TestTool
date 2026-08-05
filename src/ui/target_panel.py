@@ -42,10 +42,11 @@ class TargetDialog(QDialog):
     """添加目标的对话框 —— 支持 IP 范围和端口范围。"""
 
     def __init__(self, db: Database, target_id: int | None = None,
-                 parent=None):
+                 collection_id: int | None = None, parent=None):
         super().__init__(parent)
         self._db = db
         self._target_id = target_id
+        self._default_collection_id = collection_id
         self._targets: list[dict] = []  # 展开后的目标列表
         self.setWindowTitle("编辑目标" if target_id else "添加目标")
         self.setMinimumWidth(480)
@@ -83,6 +84,11 @@ class TargetDialog(QDialog):
         self._batch_combo.addItem("(无集合)", None)
         for b in self._db.get_all_collections():
             self._batch_combo.addItem(f"{b.name} ({b.target_count})", b.id)
+        # 预选默认集合
+        if self._default_collection_id is not None:
+            idx = self._batch_combo.findData(self._default_collection_id)
+            if idx >= 0:
+                self._batch_combo.setCurrentIndex(idx)
         layout.addRow("所属集合:", self._batch_combo)
 
         # 展开预览
@@ -642,7 +648,7 @@ class TargetPanel(QWidget):
         menu.exec(self._table.viewport().mapToGlobal(pos))
 
     def _add_target(self):
-        dlg = TargetDialog(self._db, parent=self)
+        dlg = TargetDialog(self._db, collection_id=self._current_collection_id, parent=self)
         if dlg.exec() == QDialog.Accepted:
             targets = dlg.target_list
             if targets:
@@ -891,3 +897,9 @@ class TargetPanel(QWidget):
             )
         else:
             QMessageBox.critical(self, "导出失败", f"导出失败:\n{err}")
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Delete or (event.key() == Qt.Key_D and event.modifiers() == Qt.ControlModifier):
+            self._delete_targets()
+        else:
+            super().keyPressEvent(event)

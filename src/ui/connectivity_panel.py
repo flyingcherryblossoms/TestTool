@@ -35,6 +35,7 @@ class _CollectionListTab(QWidget):
     """集合列表 —— 分类树形结构：全部 / 未分类 / 自定义集合。"""
 
     collection_changed = Signal(object)  # collection_id | None
+    new_target_requested = Signal(int)    # 右键菜单 → 添加目标（携带集合 ID）
 
     def __init__(self, db: Database, parent=None):
         super().__init__(parent)
@@ -79,22 +80,42 @@ class _CollectionListTab(QWidget):
 
         self._tree.blockSignals(True)
         self._tree.clear()
+
+        # 确保"未分类"集合存在
+        uncat_coll = None
+        for c in self._db.get_all_collections():
+            if c.name == "未分类":
+                uncat_coll = c
+                break
+        if not uncat_coll:
+            cid = self._db.add_collection("未分类")
+            uncat_coll = self._db.get_collection(cid)
+
         self._all_collections = self._db.get_all_collections()
         bold_font = self._tree.font()
         bold_font.setBold(True)
 
-        # ── 一级节点：未分类（有数据才显示）──
-        uncat = self._db.get_targets(0)
-        if uncat:
-            u = QTreeWidgetItem([f"未分类 ({len(uncat)})"])
-            u.setData(0, Qt.UserRole, 0)
-            u.setFont(0, bold_font)
-            # 未分类节点不可拖拽/不可作为投放目标
-            u.setFlags(u.flags() & ~Qt.ItemIsDragEnabled & ~Qt.ItemIsDropEnabled)
-            self._tree.addTopLevelItem(u)
+        # ── 一级节点：未分类（含无集合 + 未分类集合内的目标）──
+        uncat_targets = self._db.get_targets(0)  # collection_id IS NULL 或 0
+        if uncat_coll:
+            uncat_targets.extend(self._db.get_targets(uncat_coll.id))
+        # 去重
+        seen = set()
+        uncat = []
+        for t in uncat_targets:
+            if t.id not in seen:
+                seen.add(t.id)
+                uncat.append(t)
+        u = QTreeWidgetItem([f"未分类 ({len(uncat)})"])
+        u.setData(0, Qt.UserRole, 0)
+        u.setFont(0, bold_font)
+        # 未分类节点不可拖拽/不可作为投放目标
+        u.setFlags(u.flags() & ~Qt.ItemIsDragEnabled & ~Qt.ItemIsDropEnabled)
+        self._tree.addTopLevelItem(u)
 
-        # ── 父节点：自定义集合 ──
-        custom_parent = QTreeWidgetItem([f"自定义集合 ({len(self._all_collections)})"])
+        # ── 父节点：自定义集合（排除未分类）──
+        custom_cols = [b for b in self._all_collections if b.name != "未分类"]
+        custom_parent = QTreeWidgetItem([f"自定义集合 ({len(custom_cols)})"])
         custom_parent.setData(0, Qt.UserRole, None)
         custom_parent.setFont(0, bold_font)
         custom_parent.setFlags(
@@ -104,7 +125,7 @@ class _CollectionListTab(QWidget):
 
         # ── 子节点：各集合 ──
         restored = False
-        for b in self._all_collections:
+        for b in custom_cols:
             child = QTreeWidgetItem([f"{b.name} ({b.target_count})"])
             child.setData(0, Qt.UserRole, b.id)
             custom_parent.addChild(child)
@@ -114,12 +135,9 @@ class _CollectionListTab(QWidget):
 
         custom_parent.setExpanded(True)
 
-        # 恢复选中：默认选未分类（有则选），否则选第一个集合
+        # 恢复选中：默认选未分类
         if not restored:
-            if uncat:
-                self._tree.setCurrentItem(u)
-            elif custom_parent.childCount() > 0:
-                self._tree.setCurrentItem(custom_parent.child(0))
+            self._tree.setCurrentItem(u)
 
         self._tree.blockSignals(False)
         if not self._tree.currentItem() and self._tree.topLevelItemCount() > 0:
@@ -175,11 +193,14 @@ class _CollectionListTab(QWidget):
         if item:
             bid = item.data(0, Qt.UserRole)
             if bid not in (None, 0):
-                menu.addAction("编辑", self._on_edit)
-                menu.addAction("删除", self._on_delete)
+                menu.addAction("新建目标", lambda b=bid: self.new_target_requested.emit(b))
+                menu.addSeparator()
+                menu.addAction("刷新集合", lambda: self.refresh())
+                menu.addAction("集合重命名", self._on_edit)
+                menu.addAction("删除集合", self._on_delete)
         menu.addSeparator()
         menu.addAction("导入集合", self._on_import)
-        menu.addAction("导出", self._on_export)
+        menu.addAction("导出集合", self._on_export)
         menu.exec(self._tree.mapToGlobal(pos))
 
     def _on_collections_moved(self):
@@ -205,7 +226,7 @@ class _CollectionListTab(QWidget):
 
     def _on_new(self):
         from src.ui.main_window import CollectionDialog
-        count = len(self._db.get_all_collections())
+        count = len([c for c in self._db.get_all_collections() if c.name != "未分类"])
         dlg = CollectionDialog("新建集合", name=f"连通性测试集合{count + 1}", parent=self)
         if dlg.exec() == QDialog.Accepted:
             try:
@@ -252,12 +273,14 @@ class _CollectionListTab(QWidget):
 
     def _on_import(self):
         filepath, _ = QFileDialog.getOpenFileName(
-            self, "导入目标", "", "表格文件 (*.csv *.xlsx *.xls);;所有文件 (*)")
+            self, "导入目标", "", "所有支持格式 (*.csv *.xlsx *.xls *.json);;表格文件 (*.csv *.xlsx *.xls);;JSON 文件 (*.json);;所有文件 (*)")
         if not filepath:
             return
         ext = Path(filepath).suffix.lower()
         try:
-            if ext == ".csv":
+            if ext == ".json":
+                targets, errors = _parse_connectivity_json(filepath)
+            elif ext == ".csv":
                 targets, errors = parse_targets_csv(filepath)
             else:
                 targets, errors = parse_targets_excel(filepath)
@@ -324,13 +347,15 @@ class _CollectionListTab(QWidget):
             return
         filepath, _ = QFileDialog.getSaveFileName(
             self, "导出目标", "targets.xlsx",
-            "Excel 文件 (*.xlsx);;CSV 文件 (*.csv)")
+            "Excel 文件 (*.xlsx);;CSV 文件 (*.csv);;JSON 文件 (*.json)")
         if not filepath:
             return
         data = [{"ip": t.ip, "port": t.port, "description": t.description,
                  "collection_name": t.collection_name or ""} for t in targets]
         ext = Path(filepath).suffix.lower()
-        if ext == ".csv":
+        if ext == ".json":
+            ok, err = _export_connectivity_json(filepath, data)
+        elif ext == ".csv":
             from src.csv_handler import export_targets_to_csv
             ok, err = export_targets_to_csv(filepath, data)
         else:
@@ -341,6 +366,133 @@ class _CollectionListTab(QWidget):
         else:
             QMessageBox.critical(self, "导出失败", str(err))
 
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_F5:
+            self.refresh()
+        elif event.key() == Qt.Key_Delete or (event.key() == Qt.Key_D and event.modifiers() == Qt.ControlModifier):
+            self._on_delete()
+        else:
+            super().keyPressEvent(event)
+
+
+# ── 连通测试 JSON 导入导出 ──────────────────────────────────
+
+
+def _export_connectivity_json(filepath: str, data: list[dict]) -> tuple[bool, str]:
+    """将连通测试目标数据导出为 JSON 文件。
+    data: [{"ip": str, "port": int, "description": str, "collection_name": str}, ...]
+    返回 (ok, error_message)。
+    """
+    import json
+    # 按集合分组
+    collections_map: dict[str, list[dict]] = {}
+    ungrouped = []
+    for d in data:
+        cname = d.get("collection_name", "")
+        if cname:
+            collections_map.setdefault(cname, []).append({
+                "ip": d["ip"], "port": d["port"], "description": d.get("description", ""),
+            })
+        else:
+            ungrouped.append({
+                "ip": d["ip"], "port": d["port"], "description": d.get("description", ""),
+            })
+    collections_list = []
+    for name, targets in collections_map.items():
+        collections_list.append({"name": name, "targets": targets})
+    if ungrouped:
+        collections_list.append({"name": "", "targets": ungrouped})
+    doc = {
+        "version": 1,
+        "type": "connectivity_collections",
+        "collections": collections_list,
+    }
+    try:
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(doc, f, ensure_ascii=False, indent=2)
+        return True, ""
+    except OSError as e:
+        return False, str(e)
+
+
+def _parse_connectivity_json(filepath: str) -> tuple[list[dict], list[str]]:
+    """从 JSON 文件解析连通测试目标数据。
+    返回 (targets_list, errors_list)。
+    """
+    import json
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            doc = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        return [], [f"文件读取失败: {e}"]
+
+    if not isinstance(doc, dict):
+        return [], ["JSON 格式错误：根节点应为对象"]
+
+    version = doc.get("version", 0)
+    if version != 1:
+        return [], [f"不支持的版本: {version}"]
+
+    doc_type = doc.get("type", "")
+    targets: list[dict] = []
+    errors: list[str] = []
+
+    if doc_type == "connectivity_collections":
+        raw_collections = doc.get("collections", [])
+        if not isinstance(raw_collections, list):
+            return [], ["collections 应为数组"]
+        for ci, c in enumerate(raw_collections):
+            if not isinstance(c, dict):
+                errors.append(f"collections[{ci}] 不是对象")
+                continue
+            cname = c.get("name", "")
+            raw_targets = c.get("targets", [])
+            if not isinstance(raw_targets, list):
+                errors.append(f"collections[{ci}].targets 不是数组")
+                continue
+            for ti, t in enumerate(raw_targets):
+                if not isinstance(t, dict):
+                    errors.append(f"collections[{ci}].targets[{ti}] 不是对象")
+                    continue
+                ip = t.get("ip", "").strip()
+                port = t.get("port", 0)
+                if not ip:
+                    errors.append(f"collections[{ci}].targets[{ti}] IP 为空")
+                    continue
+                if not isinstance(port, int) or port < 1 or port > 65535:
+                    errors.append(f"collections[{ci}].targets[{ti}] 端口无效: {port}")
+                    continue
+                targets.append({
+                    "ip": ip, "port": port,
+                    "description": t.get("description", ""),
+                    "collection_name": cname,
+                })
+    elif doc_type == "connectivity_targets":
+        # 简单格式：仅 targets 数组
+        raw_targets = doc.get("targets", [])
+        if not isinstance(raw_targets, list):
+            return [], ["targets 应为数组"]
+        for i, t in enumerate(raw_targets):
+            if not isinstance(t, dict):
+                errors.append(f"targets[{i}] 不是对象")
+                continue
+            ip = t.get("ip", "").strip()
+            port = t.get("port", 0)
+            if not ip:
+                errors.append(f"targets[{i}] IP 为空")
+                continue
+            if not isinstance(port, int) or port < 1 or port > 65535:
+                errors.append(f"targets[{i}] 端口无效: {port}")
+                continue
+            targets.append({
+                "ip": ip, "port": port,
+                "description": t.get("description", ""),
+                "collection_name": t.get("collection_name", ""),
+            })
+    else:
+        return [], [f"不支持的类型: {doc_type}"]
+
+    return targets, errors
 
 
 # ── 连通测试主面板 ──────────────────────────────────────────
@@ -377,6 +529,13 @@ class ConnectivityPanel(QWidget):
         self._test_panel.targets_changed.connect(self._on_targets_changed)
         self._test_panel.protocol_test_selected.connect(
             self.protocol_test_selected.emit
+        )
+        # 侧边栏右键菜单 → 添加目标（先选中集合，再打开对话框）
+        self._collection_tab.new_target_requested.connect(
+            lambda cid: (
+                self._test_panel._target_panel.set_collection(cid),
+                self._test_panel._target_panel._add_target(),
+            )
         )
         self._tabs.addTab(self._test_panel, "连通测试")
 
