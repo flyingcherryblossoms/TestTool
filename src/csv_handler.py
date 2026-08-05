@@ -1,9 +1,9 @@
 """CSV 导入/导出处理。
 
 支持格式：
-  导入目标: ip, port, description, batch_name
-  导出目标: ip, port, description, batch_name, created_at
-  导出结果: ip, port, description, batch_name, status, latency_ms, error_msg, tested_at
+  导入目标: ip, port, description, collection_name
+  导出目标: ip, port, description, collection_name, created_at
+  导出结果: ip, port, description, collection_name, status, latency_ms, error_msg, tested_at
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ class CsvTarget:
     ip: str
     port: int
     description: str = ""
-    batch_name: str = ""
+    collection_name: str = ""
 
     def validate(self) -> Optional[str]:
         """校验数据合法性，返回错误信息或 None。"""
@@ -43,7 +43,7 @@ class CsvTarget:
 def parse_targets_csv(filepath: str | Path) -> tuple[list[CsvTarget], list[str]]:
     """解析目标 CSV 文件。
 
-    CSV 列：ip, port, description, batch_name（batch_name 可选，其他必填）
+    CSV 列：ip, port, description, collection_name（collection_name 可选，其他必填）
     第一行如果是中文/英文标题头则自动跳过。
 
     Returns:
@@ -72,7 +72,7 @@ def parse_targets_csv(filepath: str | Path) -> tuple[list[CsvTarget], list[str]]
             ip_raw = row[0].strip() if len(row) > 0 else ""
             port_raw = row[1].strip() if len(row) > 1 else "0"
             desc = row[2].strip() if len(row) > 2 else ""
-            batch = row[3].strip() if len(row) > 3 else ""
+            collection = row[3].strip() if len(row) > 3 else ""
 
             # 展开 IP（换行 + CIDR/范围）
             raw_ips = [ip.strip() for ip in ip_raw.split("\n") if ip.strip()]
@@ -105,7 +105,7 @@ def parse_targets_csv(filepath: str | Path) -> tuple[list[CsvTarget], list[str]]
             # 笛卡尔积
             for ip in ips:
                 for port in ports:
-                    target = CsvTarget(ip=ip, port=port, description=desc, batch_name=batch)
+                    target = CsvTarget(ip=ip, port=port, description=desc, collection_name=collection)
                     err = target.validate()
                     if err:
                         errors.append(f"第 {i} 行: {err}")
@@ -120,7 +120,7 @@ def _is_header_row(row: list[str]) -> bool:
     first = row[0].strip().lower() if row else ""
     header_keywords = {"ip", "地址", "address", "host", "主机", "端口", "port"}
     return first in header_keywords or any(
-        kw in first for kw in ["ip", "地址", "port", "端口", "描述", "description", "集合", "batch"]
+        kw in first for kw in ["ip", "地址", "port", "端口", "描述", "description", "集合", "collection"]
     )
 
 
@@ -131,7 +131,7 @@ def export_targets_to_csv(filepath: str | Path,
                            targets: list[dict]) -> tuple[bool, str]:
     """导出目标列表到 CSV。
 
-    targets 每项需含: ip, port, description, batch_name, created_at
+    targets 每项需含: ip, port, description, collection_name, created_at
     """
     try:
         with open(filepath, "w", encoding="utf-8-sig", newline="") as f:
@@ -142,7 +142,7 @@ def export_targets_to_csv(filepath: str | Path,
                     t.get("ip", ""),
                     t.get("port", ""),
                     t.get("description", ""),
-                    t.get("batch_name", ""),
+                    t.get("collection_name", ""),
                     t.get("created_at", ""),
                 ])
         return True, ""
@@ -154,7 +154,7 @@ def export_results_to_csv(filepath: str | Path,
                            results: list[dict]) -> tuple[bool, str]:
     """导出测试结果到 CSV。
 
-    results 每项需含: ip, port, description, batch_name,
+    results 每项需含: ip, port, description, collection_name,
                      status, latency_ms, error_msg, tested_at
     """
     try:
@@ -167,7 +167,7 @@ def export_results_to_csv(filepath: str | Path,
                     r.get("ip", ""),
                     r.get("port", ""),
                     r.get("description", ""),
-                    r.get("batch_name", ""),
+                    r.get("collection_name", ""),
                     "连通" if r.get("success") else "未连通",
                     f"{r.get('latency_ms', 0):.1f}" if r.get("success") else "",
                     r.get("error_msg", ""),

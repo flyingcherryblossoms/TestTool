@@ -17,10 +17,9 @@ from typing import Optional
 
 
 @dataclass
-class Batch:
+class Collection:
     id: int
     name: str
-    description: str = ""
     created_at: str = ""
     target_count: int = 0  # 非数据库字段，查询时动态计算
 
@@ -31,16 +30,16 @@ class Target:
     ip: str
     port: int
     description: str = ""
-    batch_id: Optional[int] = None
-    batch_name: str = ""  # 非数据库字段，JOIN 时填充
+    collection_id: Optional[int] = None
+    collection_name: str = ""  # 非数据库字段，JOIN 时填充
     created_at: str = ""
 
 
 @dataclass
 class TestSession:
     id: int
-    batch_id: Optional[int] = None
-    batch_name: str = ""
+    collection_id: Optional[int] = None
+    collection_name: str = ""
     started_at: str = ""
     completed_at: str = ""
     total_count: int = 0
@@ -68,7 +67,6 @@ class ProtocolCollection:
     id: int
     name: str
     protocol_type: str = "tcp_client"  # tcp_client | ws_client
-    description: str = ""
     created_at: str = ""
 
 
@@ -92,6 +90,7 @@ class ProtocolServer:
     ip: str = "0.0.0.0"
     port: int = 0
     encoding: str = "UTF-8"
+    recv_encoding: str = "UTF-8"
     head_length: int = 0
     ws_path: str = ""
     response_mode: str = "fixed"      # "fixed" | "echo"
@@ -110,8 +109,9 @@ class ProtocolTarget:
     port: int = 0
     description: str = ""
     encoding: str = "UTF-8"
+    recv_encoding: str = "UTF-8"
     head_length: int = 5              # 0=raw, >0=长度头位数
-    timeout: float = 5.0
+    timeout: float = 30.0
     ws_path: str = ""                 # WebSocket 路径
     ws_use_ssl: bool = False
     send_message: str = ""            # 发送消息模板
@@ -142,37 +142,36 @@ SCHEMA_SQL = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 
-CREATE TABLE IF NOT EXISTS connect_batches (
+CREATE TABLE IF NOT EXISTS connect_collections (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
-    description TEXT DEFAULT '',
     sort_order INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT (datetime('now', 'localtime'))
 );
 
 CREATE TABLE IF NOT EXISTS connect_targets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    batch_id INTEGER,
+    collection_id INTEGER,
     ip TEXT NOT NULL,
     port INTEGER NOT NULL,
     description TEXT DEFAULT '',
     sort_order INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT (datetime('now', 'localtime')),
-    FOREIGN KEY (batch_id) REFERENCES connect_batches(id) ON DELETE SET NULL
+    FOREIGN KEY (collection_id) REFERENCES connect_collections(id) ON DELETE SET NULL
 );
 
 -- 兼容旧表: 添加排序列（新表已有则忽略）
 
 CREATE TABLE IF NOT EXISTS connect_test_sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    batch_id INTEGER,
-    batch_name TEXT DEFAULT '',
+    collection_id INTEGER,
+    collection_name TEXT DEFAULT '',
     started_at TIMESTAMP DEFAULT (datetime('now', 'localtime')),
     completed_at TIMESTAMP,
     total_count INTEGER DEFAULT 0,
     success_count INTEGER DEFAULT 0,
     fail_count INTEGER DEFAULT 0,
-    FOREIGN KEY (batch_id) REFERENCES connect_batches(id) ON DELETE SET NULL
+    FOREIGN KEY (collection_id) REFERENCES connect_collections(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS connect_test_results (
@@ -190,7 +189,7 @@ CREATE TABLE IF NOT EXISTS connect_test_results (
     FOREIGN KEY (target_id) REFERENCES connect_targets(id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_targets_batch ON connect_targets(batch_id);
+CREATE INDEX IF NOT EXISTS idx_targets_collection ON connect_targets(collection_id);
 CREATE INDEX IF NOT EXISTS idx_results_session ON connect_test_results(session_id);
 CREATE INDEX IF NOT EXISTS idx_results_status ON connect_test_results(success);
 
@@ -198,7 +197,7 @@ CREATE TABLE IF NOT EXISTS protocol_collections (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     protocol_type TEXT NOT NULL DEFAULT 'tcp_client',
-    description TEXT DEFAULT '',
+    sort_order INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT (datetime('now', 'localtime'))
 );
 
@@ -219,6 +218,7 @@ CREATE TABLE IF NOT EXISTS protocol_servers (
     ip TEXT DEFAULT '0.0.0.0',
     port INTEGER NOT NULL,
     encoding TEXT DEFAULT 'UTF-8',
+    recv_encoding TEXT DEFAULT 'UTF-8',
     head_length INTEGER DEFAULT 0,
     ws_path TEXT DEFAULT '',
     response_mode TEXT DEFAULT 'fixed',
@@ -241,8 +241,9 @@ CREATE TABLE IF NOT EXISTS protocol_targets (
     port INTEGER NOT NULL,
     description TEXT DEFAULT '',
     encoding TEXT DEFAULT 'UTF-8',
+    recv_encoding TEXT DEFAULT 'UTF-8',
     head_length INTEGER DEFAULT 5,
-    timeout REAL DEFAULT 5.0,
+    timeout REAL DEFAULT 30.0,
     ws_path TEXT DEFAULT '',
     ws_use_ssl INTEGER DEFAULT 0,
     send_message TEXT DEFAULT '',
@@ -293,123 +294,37 @@ class Database:
     # ── 初始化 ─────────────────────────────────────────────
 
     def _init_db(self) -> None:
-        """创建数据库和表结构（含旧表兼容迁移）。"""
+        """创建数据库和表结构。"""
         with self._connect() as conn:
-            # ── 旧表重命名迁移 ──
-            old_to_new = {
-                "batches": "connect_batches",
-                "targets": "connect_targets",
-                "test_sessions": "connect_test_sessions",
-                "test_results": "connect_test_results",
-            }
-            for old, new in old_to_new.items():
-                try:
-                    conn.execute(f"ALTER TABLE {old} RENAME TO {new}")
-                except sqlite3.OperationalError:
-                    pass  # 表不存在或已迁移
-
             conn.executescript(SCHEMA_SQL)
-            # 兼容旧表: 如果列不存在则添加
-            for table, col in [("connect_batches", "sort_order"), ("connect_targets", "sort_order")]:
+            # 列兼容
+            for tbl, old, new in [("connect_test_sessions", "batch_name", "collection_name")]:
+                try:
+                    conn.execute(f"ALTER TABLE {tbl} RENAME COLUMN {old} TO {new}")
+                except sqlite3.OperationalError:
+                    pass
+            for tbl in ("protocol_targets", "protocol_servers"):
+                try:
+                    conn.execute(f"ALTER TABLE {tbl} ADD COLUMN recv_encoding TEXT DEFAULT 'UTF-8'")
+                except sqlite3.OperationalError:
+                    pass
+            for table, col in [
+                ("connect_collections", "sort_order"),
+                ("connect_targets", "sort_order"),
+                ("protocol_collections", "sort_order"),
+            ]:
                 try:
                     conn.execute(
                         f"ALTER TABLE {table} ADD COLUMN {col} INTEGER DEFAULT 0"
                     )
                 except sqlite3.OperationalError:
                     pass  # 列已存在
-
-            # ── 协议测试 v2 迁移 ─────────────────────────
-            self._migrate_protocol_v2(conn)
-
-    def _migrate_protocol_v2(self, conn: sqlite3.Connection) -> None:
-        """协议测试 v2 迁移：目标扩展 + 服务端关联 + 集合精简。"""
-        # 1. 为目标表添加新列（已存在则跳过）
-        for col, col_type in [
-            ("encoding", "TEXT DEFAULT 'UTF-8'"),
-            ("head_length", "INTEGER DEFAULT 5"),
-            ("timeout", "REAL DEFAULT 5.0"),
-            ("ws_path", "TEXT DEFAULT ''"),
-            ("ws_use_ssl", "INTEGER DEFAULT 0"),
-            ("send_message", "TEXT DEFAULT ''"),
-            ("send_presets", "TEXT DEFAULT '[]'"),
-        ]:
-            try:
-                conn.execute(
-                    f"ALTER TABLE protocol_targets ADD COLUMN {col} {col_type}"
-                )
-            except sqlite3.OperationalError:
-                pass
-
-        # 2. 为服务端表添加 target_id 列
-        try:
-            conn.execute(
-                "ALTER TABLE protocol_servers ADD COLUMN target_id INTEGER "
-                "REFERENCES protocol_targets(id) ON DELETE SET NULL"
-            )
-        except sqlite3.OperationalError:
-            pass
-
-        # 3. 检测是否需要数据迁移（集合表是否还有 target_ip 列）
-        cols = [r[1] for r in conn.execute(
-            "PRAGMA table_info(protocol_collections)"
-        ).fetchall()]
-        if "target_ip" not in cols:
-            return  # 已迁移过
-
-        # 4. 将集合的客户端参数复制到其下的每个目标
-        collections = conn.execute(
-            "SELECT * FROM protocol_collections"
-        ).fetchall()
-        for coll in collections:
-            cid = coll["id"]
-            targets = conn.execute(
-                "SELECT id FROM protocol_targets WHERE collection_id = ?",
-                (cid,)
-            ).fetchall()
-            if not targets:
-                continue
-            for t in targets:
-                conn.execute("""
-                    UPDATE protocol_targets SET
-                        encoding = ?, head_length = ?, timeout = ?,
-                        ws_path = ?, ws_use_ssl = ?
-                    WHERE id = ?
-                """, (coll["encoding"], coll["head_length"], coll["timeout"],
-                      coll["ws_path"], coll["ws_use_ssl"], t["id"]))
-            # 复制第一条 send 消息到每个目标的 send_message
-            send_msg = conn.execute(
-                "SELECT message FROM protocol_messages "
-                "WHERE collection_id = ? AND direction = 'send' "
-                "ORDER BY sort_order LIMIT 1",
-                (cid,)
-            ).fetchone()
-            if send_msg and send_msg["message"]:
-                for t in targets:
-                    conn.execute(
-                        "UPDATE protocol_targets SET send_message = ? WHERE id = ?",
-                        (send_msg["message"], t["id"])
-                    )
-
-        # 5. 用重建方式移除集合表的客户端参数字段
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS protocol_collections_v2 (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                protocol_type TEXT NOT NULL DEFAULT 'tcp_client',
-                description TEXT DEFAULT '',
-                created_at TIMESTAMP DEFAULT (datetime('now', 'localtime'))
-            )
-        """)
-        conn.execute("""
-            INSERT INTO protocol_collections_v2
-                (id, name, protocol_type, description, created_at)
-            SELECT id, name, protocol_type, description, created_at
-            FROM protocol_collections
-        """)
-        conn.execute("DROP TABLE protocol_collections")
-        conn.execute(
-            "ALTER TABLE protocol_collections_v2 RENAME TO protocol_collections"
-        )
+            # 集合不再需要描述列，旧数据库迁移时一并删除
+            for table in ("connect_collections", "protocol_collections"):
+                try:
+                    conn.execute(f"ALTER TABLE {table} DROP COLUMN description")
+                except sqlite3.OperationalError:
+                    pass  # 列不存在
 
     def _connect(self) -> sqlite3.Connection:
         """获取数据库连接（启用 WAL 和外键）。"""
@@ -419,169 +334,170 @@ class Database:
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
 
-    # ── 集合操作 ───────────────────────────────────────────
+    # ── 连通测试集合操作 ──────────────────────────────────────
 
-    def get_all_batches(self) -> list[Batch]:
+    def get_all_collections(self) -> list[Collection]:
         """获取所有集合，含目标计数。"""
         with self._connect() as conn:
             rows = conn.execute("""
                 SELECT b.*, COUNT(t.id) AS target_count
-                FROM connect_batches b
-                LEFT JOIN connect_targets t ON t.batch_id = b.id
+                FROM connect_collections b
+                LEFT JOIN connect_targets t ON t.collection_id = b.id
                 GROUP BY b.id
                 ORDER BY b.sort_order, b.created_at DESC
             """).fetchall()
-            return [Batch(
-                id=r["id"], name=r["name"], description=r["description"],
-                created_at=r["created_at"], target_count=r["target_count"]
+            return [Collection(
+                id=r["id"], name=r["name"],
+                target_count=r["target_count"], created_at=r["created_at"]
             ) for r in rows]
 
-    def get_batch(self, batch_id: int) -> Optional[Batch]:
+    def get_collection(self, collection_id: int) -> Optional[Collection]:
         """获取单个集合。"""
         with self._connect() as conn:
-            r = conn.execute(
-                "SELECT b.*, COUNT(t.id) AS target_count "
-                "FROM connect_batches b LEFT JOIN connect_targets t ON t.batch_id = b.id "
-                "WHERE b.id = ? GROUP BY b.id", (batch_id,)
-            ).fetchone()
+            r = conn.execute("""
+                SELECT b.*, COUNT(t.id) AS target_count
+                FROM connect_collections b
+                LEFT JOIN connect_targets t ON t.collection_id = b.id
+                WHERE b.id = ? GROUP BY b.id
+            """, (collection_id,)).fetchone()
             if r:
-                return Batch(
-                    id=r["id"], name=r["name"], description=r["description"],
-                    created_at=r["created_at"], target_count=r["target_count"]
+                return Collection(
+                    id=r["id"], name=r["name"],
+                    target_count=r["target_count"], created_at=r["created_at"]
                 )
             return None
 
-    def add_batch(self, name: str, description: str = "") -> int:
+    def add_collection(self, name: str) -> int:
         """添加集合，返回新 ID。"""
         with self._connect() as conn:
             cur = conn.execute(
-                "INSERT INTO connect_batches (name, description) VALUES (?, ?)",
-                (name, description)
+                "INSERT INTO connect_collections (name) VALUES (?)",
+                (name.strip(),)
             )
             return cur.lastrowid
 
-    def update_batch(self, batch_id: int, name: str, description: str = "") -> None:
-        """更新集合信息。"""
+    def update_collection(self, collection_id: int, name: str) -> None:
+        """更新集合名称。"""
         with self._connect() as conn:
             conn.execute(
-                "UPDATE connect_batches SET name = ?, description = ? WHERE id = ?",
-                (name, description, batch_id)
+                "UPDATE connect_collections SET name = ? WHERE id = ?",
+                (name.strip(), collection_id)
             )
 
-    def delete_batch(self, batch_id: int) -> None:
-        """删除集合（关联目标会因 ON DELETE SET NULL 脱离集合）。"""
+    def delete_collection(self, collection_id: int) -> None:
+        """删除集合（目标外键 ON DELETE SET NULL 保留不删）。"""
         with self._connect() as conn:
-            conn.execute("DELETE FROM connect_batches WHERE id = ?", (batch_id,))
+            conn.execute("DELETE FROM connect_collections WHERE id = ?", (collection_id,))
 
-    # ── 目标操作 ───────────────────────────────────────────
+    # ── 目标操作 ────────────────────────────────────────────
 
-    def get_targets(self, batch_id: Optional[int] = None) -> list[Target]:
-        """获取目标列表。`batch_id=None` 获取全部，`batch_id=0` 获取未分类。"""
+    def get_targets(self, collection_id: Optional[int] = None) -> list[Target]:
+        """获取目标列表。`collection_id=None` 获取全部，`collection_id=0` 获取未分类。"""
         with self._connect() as conn:
-            if batch_id is None:
+            if collection_id is None:
                 rows = conn.execute("""
-                    SELECT t.*, b.name AS batch_name
+                    SELECT t.*, b.name AS collection_name
                     FROM connect_targets t
-                    LEFT JOIN connect_batches b ON t.batch_id = b.id
+                    LEFT JOIN connect_collections b ON t.collection_id = b.id
                     ORDER BY t.sort_order, t.created_at DESC
                 """).fetchall()
-            elif batch_id == 0:
+            elif collection_id == 0:
                 rows = conn.execute("""
-                    SELECT t.*, b.name AS batch_name
+                    SELECT t.*, b.name AS collection_name
                     FROM connect_targets t
-                    LEFT JOIN connect_batches b ON t.batch_id = b.id
-                    WHERE t.batch_id IS NULL
+                    LEFT JOIN connect_collections b ON t.collection_id = b.id
+                    WHERE t.collection_id IS NULL
                     ORDER BY t.sort_order, t.created_at DESC
                 """).fetchall()
             else:
                 rows = conn.execute("""
-                    SELECT t.*, b.name AS batch_name
+                    SELECT t.*, b.name AS collection_name
                     FROM connect_targets t
-                    LEFT JOIN connect_batches b ON t.batch_id = b.id
-                    WHERE t.batch_id = ?
+                    LEFT JOIN connect_collections b ON t.collection_id = b.id
+                    WHERE t.collection_id = ?
                     ORDER BY t.sort_order, t.created_at DESC
-                """, (batch_id,)).fetchall()
+                """, (collection_id,)).fetchall()
             return [Target(
                 id=r["id"], ip=r["ip"], port=r["port"],
-                description=r["description"], batch_id=r["batch_id"],
-                batch_name=r["batch_name"] or "", created_at=r["created_at"]
+                description=r["description"], collection_id=r["collection_id"],
+                collection_name=r["collection_name"] or "", created_at=r["created_at"]
             ) for r in rows]
 
     def get_target(self, target_id: int) -> Optional[Target]:
         """获取单个目标。"""
         with self._connect() as conn:
             r = conn.execute("""
-                SELECT t.*, b.name AS batch_name
-                FROM connect_targets t LEFT JOIN connect_batches b ON t.batch_id = b.id
+                SELECT t.*, b.name AS collection_name
+                FROM connect_targets t LEFT JOIN connect_collections b ON t.collection_id = b.id
                 WHERE t.id = ?
             """, (target_id,)).fetchone()
             if r:
                 return Target(
                     id=r["id"], ip=r["ip"], port=r["port"],
-                    description=r["description"], batch_id=r["batch_id"],
-                    batch_name=r["batch_name"] or "", created_at=r["created_at"]
+                    description=r["description"], collection_id=r["collection_id"],
+                    collection_name=r["collection_name"] or "", created_at=r["created_at"]
                 )
             return None
 
-    def target_exists(self, ip: str, port: int, batch_id: Optional[int] = None) -> bool:
-        """检查指定 (集合, IP, 端口) 组合是否已存在。"""
+    def target_exists(self, ip: str, port: int, collection_id: Optional[int] = None) -> bool:
+        """检查目标是否已存在。"""
         with self._connect() as conn:
-            if batch_id is not None:
+            if collection_id is not None:
                 r = conn.execute(
-                    "SELECT 1 FROM connect_targets WHERE batch_id = ? AND ip = ? AND port = ? LIMIT 1",
-                    (batch_id, ip.strip(), port)
+                    "SELECT 1 FROM connect_targets WHERE collection_id = ? AND ip = ? AND port = ? LIMIT 1",
+                    (collection_id, ip.strip(), port)
                 ).fetchone()
             else:
                 r = conn.execute(
-                    "SELECT 1 FROM connect_targets WHERE batch_id IS NULL AND ip = ? AND port = ? LIMIT 1",
+                    "SELECT 1 FROM connect_targets WHERE collection_id IS NULL AND ip = ? AND port = ? LIMIT 1",
                     (ip.strip(), port)
                 ).fetchone()
             return r is not None
 
-    def find_target_id(self, ip: str, port: int, batch_id: Optional[int] = None) -> Optional[int]:
-        """查找指定 (集合, IP, 端口) 的目标 ID，不存在返回 None。"""
+    def find_target_id(self, ip: str, port: int, collection_id: Optional[int] = None) -> Optional[int]:
+        """查找目标 ID，用于防重。"""
         with self._connect() as conn:
-            if batch_id is not None:
+            if collection_id is not None:
                 r = conn.execute(
-                    "SELECT id FROM connect_targets WHERE batch_id = ? AND ip = ? AND port = ? LIMIT 1",
-                    (batch_id, ip.strip(), port)
+                    "SELECT id FROM connect_targets WHERE collection_id = ? AND ip = ? AND port = ? LIMIT 1",
+                    (collection_id, ip.strip(), port)
                 ).fetchone()
             else:
                 r = conn.execute(
-                    "SELECT id FROM connect_targets WHERE batch_id IS NULL AND ip = ? AND port = ? LIMIT 1",
+                    "SELECT id FROM connect_targets WHERE collection_id IS NULL AND ip = ? AND port = ? LIMIT 1",
                     (ip.strip(), port)
                 ).fetchone()
             return r["id"] if r else None
 
     def add_target(self, ip: str, port: int, description: str = "",
-                   batch_id: Optional[int] = None) -> int:
+                   collection_id: Optional[int] = None) -> int:
         """添加目标，返回新 ID。"""
         with self._connect() as conn:
             cur = conn.execute(
-                "INSERT INTO connect_targets (ip, port, description, batch_id) VALUES (?, ?, ?, ?)",
-                (ip.strip(), port, description, batch_id)
+                "INSERT INTO connect_targets (ip, port, description, collection_id) VALUES (?, ?, ?, ?)",
+                (ip.strip(), port, description, collection_id)
             )
             return cur.lastrowid
 
     def add_targets_batch(self, targets: list[tuple[str, int, str, Optional[int]]]) -> int:
-        """批量添加目标，返回成功数量。`targets` 为 [(ip, port, desc, batch_id), ...]"""
+        """批量添加目标，返回成功数量。`targets` 为 [(ip, port, desc, collection_id), ...]"""
         with self._connect() as conn:
             count = 0
-            for ip, port, desc, batch_id in targets:
+            for ip, port, desc, collection_id in targets:
                 conn.execute(
-                    "INSERT INTO connect_targets (ip, port, description, batch_id) VALUES (?, ?, ?, ?)",
-                    (ip.strip(), port, desc, batch_id)
+                    "INSERT INTO connect_targets (ip, port, description, collection_id) VALUES (?, ?, ?, ?)",
+                    (ip.strip(), port, desc, collection_id)
                 )
                 count += 1
             return count
 
     def update_target(self, target_id: int, ip: str, port: int,
-                      description: str = "", batch_id: Optional[int] = None) -> None:
-        """更新目标信息。"""
+                      description: str = "", collection_id: Optional[int] = None) -> None:
+        """更新目标。"""
         with self._connect() as conn:
             conn.execute(
-                "UPDATE connect_targets SET ip = ?, port = ?, description = ?, batch_id = ? WHERE id = ?",
-                (ip.strip(), port, description, batch_id, target_id)
+                "UPDATE connect_targets SET ip = ?, port = ?, description = ?, collection_id = ? WHERE id = ?",
+                (ip.strip(), port, description, collection_id, target_id)
             )
 
     def delete_target(self, target_id: int) -> None:
@@ -594,29 +510,28 @@ class Database:
         with self._connect() as conn:
             conn.executemany("DELETE FROM connect_targets WHERE id = ?", [(tid,) for tid in target_ids])
 
-    def move_targets_to_batch(self, target_ids: list[int], batch_id: Optional[int]) -> None:
-        """将目标移动/归类到指定集合。batch_id 为 None 则取消分类。"""
+    def move_targets_to_collection(self, target_ids: list[int], collection_id: Optional[int]) -> None:
+        """将目标移动/归类到指定集合。collection_id 为 None 则取消分类。"""
         with self._connect() as conn:
             conn.executemany(
-                "UPDATE connect_targets SET batch_id = ? WHERE id = ?",
-                [(batch_id, tid) for tid in target_ids]
+                "UPDATE connect_targets SET collection_id = ? WHERE id = ?",
+                [(collection_id, tid) for tid in target_ids]
             )
 
     # ── 测试会话操作 ───────────────────────────────────────
 
-    def create_test_session(self, batch_id: Optional[int] = None,
-                            batch_name: str = "") -> int:
-        """创建测试会话，返回会话 ID。"""
+    def create_test_session(self, collection_id: Optional[int] = None,
+                            collection_name: str = "") -> int:
+        """创建测试会话，返回 session_id。"""
         with self._connect() as conn:
             cur = conn.execute(
-                "INSERT INTO connect_test_sessions (batch_id, batch_name) VALUES (?, ?)",
-                (batch_id, batch_name)
+                "INSERT INTO connect_test_sessions (collection_id, collection_name) VALUES (?, ?)",
+                (collection_id, collection_name)
             )
             return cur.lastrowid
 
-    def complete_test_session(self, session_id: int, total: int,
-                               success: int, fail: int) -> None:
-        """标记会话完成并写入统计数据。"""
+    def complete_test_session(self, session_id: int, total: int, success: int, fail: int) -> None:
+        """标记测试会话完成。"""
         with self._connect() as conn:
             conn.execute("""
                 UPDATE connect_test_sessions
@@ -626,14 +541,15 @@ class Database:
             """, (total, success, fail, session_id))
 
     def get_test_sessions(self, limit: int = 100) -> list[TestSession]:
-        """获取最近的测试会话列表。"""
+        """获取测试会话列表，按时间倒序。"""
         with self._connect() as conn:
             rows = conn.execute("""
                 SELECT * FROM connect_test_sessions
                 ORDER BY started_at DESC LIMIT ?
             """, (limit,)).fetchall()
             return [TestSession(
-                id=r["id"], batch_id=r["batch_id"], batch_name=r["batch_name"],
+                id=r["id"], collection_id=r["collection_id"],
+                collection_name=r["collection_name"] or "",
                 started_at=r["started_at"], completed_at=r["completed_at"] or "",
                 total_count=r["total_count"], success_count=r["success_count"],
                 fail_count=r["fail_count"]
@@ -647,7 +563,8 @@ class Database:
             ).fetchone()
             if r:
                 return TestSession(
-                    id=r["id"], batch_id=r["batch_id"], batch_name=r["batch_name"],
+                    id=r["id"], collection_id=r["collection_id"],
+                    collection_name=r["collection_name"] or "",
                     started_at=r["started_at"], completed_at=r["completed_at"] or "",
                     total_count=r["total_count"], success_count=r["success_count"],
                     fail_count=r["fail_count"]
@@ -656,38 +573,18 @@ class Database:
 
     # ── 测试结果操作 ───────────────────────────────────────
 
-    def save_test_result(self, session_id: int, target_id: int,
-                          ip: str, port: int, description: str,
-                          success: bool, latency_ms: float,
-                          error_msg: str = "") -> int:
-        """保存单条测试结果，返回结果 ID。"""
-        with self._connect() as conn:
-            cur = conn.execute("""
-                INSERT INTO connect_test_results
-                    (session_id, target_id, ip, port, description, success, latency_ms, error_msg)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (session_id, target_id, ip, port, description,
-                  1 if success else 0, latency_ms, error_msg))
-            return cur.lastrowid
-
-    def save_test_results_batch(self, rows: list[tuple]) -> int:
-        """批量保存测试结果（使用事务，避免逐条写入的开销和锁竞争）。
-
-        rows 中每条为 (session_id, target_id, ip, port, description, success, latency_ms, error_msg)
-        """
-        if not rows:
-            return 0
+    def save_test_results_batch(self, rows: list[tuple]) -> None:
+        """批量保存测试结果（单事务，避免锁竞争）。"""
         with self._connect() as conn:
             conn.executemany("""
                 INSERT INTO connect_test_results
                     (session_id, target_id, ip, port, description, success, latency_ms, error_msg)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, rows)
-            return len(rows)
 
     def get_test_results(self, session_id: int,
                          status_filter: Optional[str] = None) -> list[TestResult]:
-        """获取某次会话的测试结果。`status_filter` 为 'success'/'fail'/None(全部)。"""
+        """获取指定会话的测试结果，可选筛选状态。"""
         with self._connect() as conn:
             if status_filter == "success":
                 rows = conn.execute("""
@@ -715,16 +612,30 @@ class Database:
             ) for r in rows]
 
     def delete_test_session(self, session_id: int) -> None:
-        """删除测试会话及其结果。"""
+        """删除测试会话及其结果（CASCADE）。"""
         with self._connect() as conn:
             conn.execute("DELETE FROM connect_test_sessions WHERE id = ?", (session_id,))
 
-    def delete_old_sessions(self, keep_count: int = 100) -> int:
-        """删除旧测试会话，仅保留最近 N 条。返回删除数量。"""
+    def get_last_test_time(self) -> Optional[str]:
+        """获取最近一次测试的时间。"""
         with self._connect() as conn:
+            r = conn.execute(
+                "SELECT started_at FROM connect_test_sessions ORDER BY started_at DESC LIMIT 1"
+            ).fetchone()
+            return r["started_at"] if r else None
+
+    def get_total_target_count(self) -> int:
+        """获取目标总数。"""
+        with self._connect() as conn:
+            return conn.execute("SELECT COUNT(*) FROM connect_targets").fetchone()[0]
+
+    def cleanup_old_sessions(self, keep_count: int = 50) -> int:
+        """清理旧测试会话，保留最近 keep_count 条。返回删除数。"""
+        with self._connect() as conn:
+            # 先查出第 keep_count 条的时间
             row = conn.execute(
                 "SELECT id FROM connect_test_sessions ORDER BY started_at DESC LIMIT 1 OFFSET ?",
-                (keep_count - 1,)
+                (keep_count,)
             ).fetchone()
             if row:
                 cur = conn.execute(
@@ -733,40 +644,36 @@ class Database:
                 return cur.rowcount
             return 0
 
+    def get_test_statistics(self) -> list[dict]:
+        """获取各目标的测试统计（最近一次结果）。"""
+        with self._connect() as conn:
+            return [dict(r) for r in conn.execute("""
+                SELECT target_id, MAX(tested_at) AS last_test,
+                       SUM(CASE WHEN success THEN 1 ELSE 0 END) AS ok_count,
+                       COUNT(*) AS total
+                FROM connect_test_results
+                GROUP BY target_id
+            """).fetchall()]
+
     # ── 排序操作 ───────────────────────────────────────────
 
-    def update_batches_sort_order(self, ordered_ids: list[int]) -> None:
+    def update_collections_order(self, ordered_ids: list[int]) -> None:
         """按传入的 ID 顺序更新集合排序。"""
         with self._connect() as conn:
-            for idx, batch_id in enumerate(ordered_ids):
+            for idx, collection_id in enumerate(ordered_ids):
                 conn.execute(
-                    "UPDATE connect_batches SET sort_order = ? WHERE id = ?",
-                    (idx, batch_id)
+                    "UPDATE connect_collections SET sort_order = ? WHERE id = ?",
+                    (idx, collection_id)
                 )
 
-    def update_targets_sort_order(self, ordered_ids: list[int]) -> None:
+    def update_targets_order(self, ordered_ids: list[int]) -> None:
         """按传入的 ID 顺序更新目标排序。"""
         with self._connect() as conn:
-            for idx, target_id in enumerate(ordered_ids):
+            for idx, tid in enumerate(ordered_ids):
                 conn.execute(
                     "UPDATE connect_targets SET sort_order = ? WHERE id = ?",
-                    (idx, target_id)
+                    (idx, tid)
                 )
-
-    # ── 统计查询 ───────────────────────────────────────────
-
-    def get_total_target_count(self) -> int:
-        """获取目标总数。"""
-        with self._connect() as conn:
-            return conn.execute("SELECT COUNT(*) FROM connect_targets").fetchone()[0]
-
-    def get_last_test_time(self) -> str:
-        """获取最近一次测试的时间。"""
-        with self._connect() as conn:
-            r = conn.execute(
-                "SELECT started_at FROM connect_test_sessions ORDER BY started_at DESC LIMIT 1"
-            ).fetchone()
-            return r["started_at"] if r else ""
 
     def get_target_last_result(self, target_id: int) -> Optional[TestResult]:
         """获取某个目标最近一次的测试结果。"""
@@ -786,11 +693,7 @@ class Database:
             return None
 
     def get_targets_last_results(self, target_ids: list[int]) -> dict[int, bool]:
-        """批量获取多个目标的最新测试结果（一次查询）。
-
-        Returns:
-            {target_id: success_bool, ...}  — 仅包含有测试记录的目标
-        """
+        """批量获取多个目标的最新测试结果。返回 {target_id: success_bool, ...}"""
         if not target_ids:
             return {}
         placeholders = ",".join("?" * len(target_ids))
@@ -800,7 +703,6 @@ class Database:
                 WHERE target_id IN ({placeholders})
                 ORDER BY tested_at DESC
             """, target_ids).fetchall()
-        # 按 tested_at DESC 排序，第一条遇到的就是最新的
         result = {}
         for r in rows:
             tid = r["target_id"]
@@ -819,17 +721,16 @@ class Database:
                 rows = conn.execute("""
                     SELECT * FROM protocol_collections
                     WHERE protocol_type = ?
-                    ORDER BY created_at DESC
+                    ORDER BY sort_order, created_at DESC
                 """, (protocol_type,)).fetchall()
             else:
                 rows = conn.execute("""
                     SELECT * FROM protocol_collections
-                    ORDER BY created_at DESC
+                    ORDER BY sort_order, created_at DESC
                 """).fetchall()
             return [ProtocolCollection(
                 id=r["id"], name=r["name"],
-                protocol_type=r["protocol_type"],
-                description=r["description"], created_at=r["created_at"]
+                protocol_type=r["protocol_type"], created_at=r["created_at"]
             ) for r in rows]
 
     def get_protocol_collection(self, collection_id: int
@@ -843,31 +744,37 @@ class Database:
             if r:
                 return ProtocolCollection(
                     id=r["id"], name=r["name"],
-                    protocol_type=r["protocol_type"],
-                    description=r["description"], created_at=r["created_at"]
+                    protocol_type=r["protocol_type"], created_at=r["created_at"]
                 )
             return None
 
-    def add_protocol_collection(self, name: str, protocol_type: str,
-                                description: str = "") -> int:
+    def add_protocol_collection(self, name: str, protocol_type: str) -> int:
         """添加协议测试集合，返回新 ID。"""
         with self._connect() as conn:
             cur = conn.execute("""
-                INSERT INTO protocol_collections (name, protocol_type, description)
-                VALUES (?, ?, ?)
-            """, (name, protocol_type, description))
+                INSERT INTO protocol_collections (name, protocol_type)
+                VALUES (?, ?)
+            """, (name, protocol_type))
             return cur.lastrowid
 
     def update_protocol_collection(self, collection_id: int, name: str,
-                                   protocol_type: str,
-                                   description: str = "") -> None:
+                                   protocol_type: str) -> None:
         """更新协议测试集合。"""
         with self._connect() as conn:
             conn.execute("""
                 UPDATE protocol_collections SET
-                    name = ?, protocol_type = ?, description = ?
+                    name = ?, protocol_type = ?
                 WHERE id = ?
-            """, (name, protocol_type, description, collection_id))
+            """, (name, protocol_type, collection_id))
+
+    def update_protocol_collections_order(self, ordered_ids: list[int]) -> None:
+        """按传入的 ID 顺序更新协议测试集合排序。"""
+        with self._connect() as conn:
+            for idx, collection_id in enumerate(ordered_ids):
+                conn.execute(
+                    "UPDATE protocol_collections SET sort_order = ? WHERE id = ?",
+                    (idx, collection_id)
+                )
 
     def delete_protocol_collection(self, collection_id: int) -> None:
         """删除协议测试集合（关联消息会因 ON DELETE CASCADE 自动删除）。"""
@@ -954,6 +861,7 @@ class Database:
             return [ProtocolServer(
                 id=r["id"], name=r["name"], server_type=r["server_type"],
                 ip=r["ip"], port=r["port"], encoding=r["encoding"],
+                recv_encoding=r["recv_encoding"],
                 head_length=r["head_length"], ws_path=r["ws_path"],
                 response_mode=r["response_mode"],
                 response_message=r["response_message"],
@@ -974,6 +882,7 @@ class Database:
                     id=r["id"], name=r["name"],
                     server_type=r["server_type"],
                     ip=r["ip"], port=r["port"], encoding=r["encoding"],
+                    recv_encoding=r["recv_encoding"],
                     head_length=r["head_length"], ws_path=r["ws_path"],
                     response_mode=r["response_mode"],
                     response_message=r["response_message"],
@@ -985,6 +894,7 @@ class Database:
     def add_protocol_server(self, name: str, server_type: str,
                             ip: str = "0.0.0.0", port: int = 0,
                             encoding: str = "UTF-8",
+                            recv_encoding: str = "UTF-8",
                             head_length: int = 0,
                             ws_path: str = "",
                             response_mode: str = "fixed",
@@ -994,16 +904,19 @@ class Database:
         with self._connect() as conn:
             cur = conn.execute("""
                 INSERT INTO protocol_servers
-                    (name, server_type, ip, port, encoding, head_length,
-                     ws_path, response_mode, response_message, target_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (name, server_type, ip, port, encoding, head_length,
-                  ws_path, response_mode, response_message, target_id))
+                    (name, server_type, ip, port, encoding, recv_encoding,
+                     head_length, ws_path, response_mode, response_message,
+                     target_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (name, server_type, ip, port, encoding, recv_encoding,
+                  head_length, ws_path, response_mode, response_message,
+                  target_id))
             return cur.lastrowid
 
     def update_protocol_server(self, server_id: int, name: str,
                                server_type: str, ip: str = "0.0.0.0",
                                port: int = 0, encoding: str = "UTF-8",
+                               recv_encoding: str = "UTF-8",
                                head_length: int = 0,
                                ws_path: str = "",
                                response_mode: str = "fixed",
@@ -1014,13 +927,13 @@ class Database:
             conn.execute("""
                 UPDATE protocol_servers SET
                     name = ?, server_type = ?, ip = ?, port = ?,
-                    encoding = ?, head_length = ?, ws_path = ?,
-                    response_mode = ?, response_message = ?,
+                    encoding = ?, recv_encoding = ?, head_length = ?,
+                    ws_path = ?, response_mode = ?, response_message = ?,
                     target_id = ?
                 WHERE id = ?
-            """, (name, server_type, ip, port, encoding, head_length,
-                  ws_path, response_mode, response_message, target_id,
-                  server_id))
+            """, (name, server_type, ip, port, encoding, recv_encoding,
+                  head_length, ws_path, response_mode, response_message,
+                  target_id, server_id))
 
     def delete_protocol_server(self, server_id: int) -> None:
         """删除协议服务端配置。"""
@@ -1049,7 +962,8 @@ class Database:
                 id=r["id"], collection_id=r["collection_id"],
                 ip=r["ip"], port=r["port"],
                 description=r["description"],
-                encoding=r["encoding"], head_length=r["head_length"],
+                encoding=r["encoding"], recv_encoding=r["recv_encoding"],
+                head_length=r["head_length"],
                 timeout=r["timeout"], ws_path=r["ws_path"],
                 ws_use_ssl=bool(r["ws_use_ssl"]),
                 send_message=r["send_message"],
@@ -1060,8 +974,9 @@ class Database:
     def add_protocol_target(self, collection_id: int, ip: str, port: int,
                             description: str = "",
                             encoding: str = "UTF-8",
+                            recv_encoding: str = "UTF-8",
                             head_length: int = 5,
-                            timeout: float = 5.0,
+                            timeout: float = 30.0,
                             ws_path: str = "",
                             ws_use_ssl: bool = False,
                             send_message: str = "",
@@ -1071,12 +986,12 @@ class Database:
             cur = conn.execute("""
                 INSERT INTO protocol_targets
                     (collection_id, ip, port, description, encoding,
-                     head_length, timeout, ws_path, ws_use_ssl,
+                     recv_encoding, head_length, timeout, ws_path, ws_use_ssl,
                      send_message, send_presets)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (collection_id, ip.strip(), port, description, encoding,
-                  head_length, timeout, ws_path, 1 if ws_use_ssl else 0,
-                  send_message, send_presets))
+                  recv_encoding, head_length, timeout, ws_path,
+                  1 if ws_use_ssl else 0, send_message, send_presets))
             return cur.lastrowid
 
     def add_protocol_targets_batch(self, targets: list[tuple]) -> int:
@@ -1115,7 +1030,8 @@ class Database:
                     id=r["id"], collection_id=r["collection_id"],
                     ip=r["ip"], port=r["port"],
                     description=r["description"],
-                    encoding=r["encoding"], head_length=r["head_length"],
+                    encoding=r["encoding"], recv_encoding=r["recv_encoding"],
+                    head_length=r["head_length"],
                     timeout=r["timeout"], ws_path=r["ws_path"],
                     ws_use_ssl=bool(r["ws_use_ssl"]),
                     send_message=r["send_message"],
@@ -1127,8 +1043,9 @@ class Database:
     def update_protocol_target(self, target_id: int, ip: str, port: int,
                                description: str = "",
                                encoding: str = "UTF-8",
+                               recv_encoding: str = "UTF-8",
                                head_length: int = 5,
-                               timeout: float = 5.0,
+                               timeout: float = 30.0,
                                ws_path: str = "",
                                ws_use_ssl: bool = False,
                                send_message: str = "",
@@ -1138,11 +1055,11 @@ class Database:
             conn.execute("""
                 UPDATE protocol_targets SET
                     ip = ?, port = ?, description = ?,
-                    encoding = ?, head_length = ?, timeout = ?,
+                    encoding = ?, recv_encoding = ?, head_length = ?, timeout = ?,
                     ws_path = ?, ws_use_ssl = ?, send_message = ?,
                     send_presets = ?
                 WHERE id = ?
-            """, (ip.strip(), port, description, encoding,
+            """, (ip.strip(), port, description, encoding, recv_encoding,
                   head_length, timeout, ws_path, 1 if ws_use_ssl else 0,
                   send_message, send_presets, target_id))
 
@@ -1218,6 +1135,21 @@ class Database:
                 "DELETE FROM protocol_test_sessions WHERE id = ?",
                 (session_id,)
             )
+
+    def delete_protocol_test_sessions(self, session_ids: list[int]) -> None:
+        """批量删除协议测试会话记录。"""
+        if not session_ids:
+            return
+        with self._connect() as conn:
+            conn.executemany(
+                "DELETE FROM protocol_test_sessions WHERE id = ?",
+                [(sid,) for sid in session_ids]
+            )
+
+    def clear_protocol_test_sessions(self) -> None:
+        """清空全部协议测试会话记录。"""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM protocol_test_sessions")
 
     def update_protocol_servers_sort_order(self,
                                            ordered_ids: list[int]) -> None:

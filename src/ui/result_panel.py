@@ -12,7 +12,6 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
-    QHeaderView,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -29,6 +28,7 @@ from pathlib import Path
 from src.csv_handler import export_results_to_csv
 from src.database import Database
 from src.excel_handler import export_results_to_excel
+from src.ui.table_utils import enable_stretch_fill, refresh_tooltips
 
 
 class ResultPanel(QWidget):
@@ -40,17 +40,20 @@ class ResultPanel(QWidget):
         self._cached_results: list = []
         self._sort_col: int = -1
         self._sort_asc: bool = True
+        self._session_sort_col: int = 0
+        self._session_sort_asc: bool = False
         self._setup_ui()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
 
-        # 水平分割: 上面是会话列表，下面是结果详情
-        splitter = QSplitter(Qt.Vertical)
+        # 垂直分割: 左边是会话列表，右边是结果详情
+        splitter = QSplitter(Qt.Horizontal)
 
-        # ── 上半部分: 会话列表 ──────────────────────────────
+        # ── 左半部分: 会话列表 ──────────────────────────────
         session_group = QGroupBox("测试历史")
+        session_group.setMinimumWidth(160)
         session_layout = QVBoxLayout(session_group)
 
         self._session_table = QTableWidget()
@@ -61,16 +64,13 @@ class ResultPanel(QWidget):
         self._session_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._session_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._session_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self._session_table.setAlternatingRowColors(True)
+        self._session_table.setAlternatingRowColors(False)
         self._session_table.verticalHeader().setVisible(False)
         self._session_table.itemSelectionChanged.connect(self._on_session_selected)
+        self._session_table.horizontalHeader().setSectionsClickable(True)
+        self._session_table.horizontalHeader().sectionClicked.connect(self._on_session_header_clicked)
 
-        hh = self._session_table.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.Stretch)
-        hh.setSectionResizeMode(1, QHeaderView.Stretch)
-        for i in range(2, 5):
-            hh.setSectionResizeMode(i, QHeaderView.Fixed)
-            self._session_table.setColumnWidth(i, 70)
+        enable_stretch_fill(self._session_table)
 
         session_layout.addWidget(self._session_table)
 
@@ -83,8 +83,9 @@ class ResultPanel(QWidget):
 
         splitter.addWidget(session_group)
 
-        # ── 下半部分: 结果详情 ──────────────────────────────
+        # ── 右半部分: 结果详情 ──────────────────────────────
         result_group = QGroupBox("结果详情")
+        result_group.setMinimumWidth(260)
         result_layout = QVBoxLayout(result_group)
 
         # 筛选栏
@@ -122,27 +123,19 @@ class ResultPanel(QWidget):
         ])
         self._result_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._result_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self._result_table.setAlternatingRowColors(True)
+        self._result_table.setAlternatingRowColors(False)
         self._result_table.verticalHeader().setVisible(False)
-        self._result_table.horizontalHeader().setStretchLastSection(True)
         self._result_table.horizontalHeader().setSectionsClickable(True)
         self._result_table.horizontalHeader().sectionClicked.connect(self._on_result_header_clicked)
 
-        hh2 = self._result_table.horizontalHeader()
-        hh2.setSectionResizeMode(0, QHeaderView.Fixed)
-        self._result_table.setColumnWidth(0, 70)
-        hh2.setSectionResizeMode(1, QHeaderView.Stretch)
-        hh2.setSectionResizeMode(2, QHeaderView.Fixed)
-        self._result_table.setColumnWidth(2, 70)
-        hh2.setSectionResizeMode(3, QHeaderView.Stretch)
-        hh2.setSectionResizeMode(4, QHeaderView.Fixed)
-        self._result_table.setColumnWidth(4, 80)
+        enable_stretch_fill(self._result_table)
 
         result_layout.addWidget(self._result_table)
 
         splitter.addWidget(result_group)
         splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 3)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([380, 380])
 
         layout.addWidget(splitter)
 
@@ -151,11 +144,24 @@ class ResultPanel(QWidget):
     def refresh(self) -> None:
         """刷新会话列表。"""
         sessions = self._db.get_test_sessions()
+        # 会话列表字段排序
+        if self._session_sort_col >= 0:
+            key_map = {
+                0: lambda s: s.started_at,
+                1: lambda s: (s.collection_name or "").lower(),
+                2: lambda s: s.total_count,
+                3: lambda s: s.success_count,
+                4: lambda s: s.fail_count,
+            }
+            key_fn = key_map.get(self._session_sort_col)
+            if key_fn:
+                sessions.sort(key=key_fn, reverse=not self._session_sort_asc)
+        self._update_session_sort_indicator()
         self._session_table.setRowCount(len(sessions))
         for row, s in enumerate(sessions):
             self._session_table.setItem(row, 0, QTableWidgetItem(s.started_at))
             self._session_table.setItem(row, 1, QTableWidgetItem(
-                s.batch_name if s.batch_name else "(全部)"
+                s.collection_name if s.collection_name else "(全部)"
             ))
 
             total_item = QTableWidgetItem(str(s.total_count))
@@ -174,6 +180,7 @@ class ResultPanel(QWidget):
 
             # 存储 session_id
             self._session_table.item(row, 0).setData(Qt.UserRole, s.id)
+        refresh_tooltips(self._session_table)
 
         # 清空结果表格
         self._result_table.setRowCount(0)
@@ -184,6 +191,23 @@ class ResultPanel(QWidget):
     def _on_session_selected(self):
         """选中某个会话，加载其结果。"""
         self._load_results()
+
+    def _on_session_header_clicked(self, col: int):
+        if self._session_sort_col == col:
+            self._session_sort_asc = not self._session_sort_asc
+        else:
+            self._session_sort_col = col
+            self._session_sort_asc = True
+        self.refresh()
+
+    def _update_session_sort_indicator(self):
+        headers = {0: "测试时间", 1: "集合", 2: "总数", 3: "连通", 4: "未连通"}
+        for c, label in headers.items():
+            item = self._session_table.horizontalHeaderItem(c)
+            if item:
+                arrow = " ▲" if (c == self._session_sort_col and self._session_sort_asc) else \
+                        " ▼" if c == self._session_sort_col else ""
+                item.setText(label + arrow)
 
     def _apply_filter(self):
         """筛选条件改变，重新加载。"""
@@ -244,6 +268,7 @@ class ResultPanel(QWidget):
 
         self._result_count_label.setText(f"({len(results)} 条)")
         self._update_result_sort_indicator()
+        refresh_tooltips(self._result_table)
 
     def _on_result_header_clicked(self, col: int):
         if col not in (1, 2, 4):
@@ -316,13 +341,13 @@ class ResultPanel(QWidget):
             return
 
         session = self._db.get_test_session(session_id)
-        batch_name = session.batch_name if session else ""
+        collection_name = session.collection_name if session else ""
 
         data = [{
             "ip": r.ip,
             "port": r.port,
             "description": r.description,
-            "batch_name": batch_name,
+            "collection_name": collection_name,
             "success": r.success,
             "latency_ms": r.latency_ms,
             "error_msg": r.error_msg,

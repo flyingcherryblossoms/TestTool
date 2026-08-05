@@ -16,7 +16,7 @@ from pathlib import Path
 # 确保项目根目录在 Python 路径中
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import QApplication
 
 from src.ui.main_window import MainWindow
@@ -50,6 +50,11 @@ def run_gui(db_path: str) -> None:
 
     # 设置全局样式
     app.setStyle("Fusion")
+
+    # 显式设置默认字体：中文 Windows 下避免 Qt 探测遗留的 Fixedsys 字体
+    # （DirectWrite 无法加载 Fixedsys 时会打印一条无害警告并自动回退）
+    if sys.platform == "win32":
+        app.setFont(QFont("Microsoft YaHei UI", 9))
 
     window = MainWindow(db_path)
     if icon_path:

@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
-    QHeaderView,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -26,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.database import Database
+from src.ui.table_utils import enable_stretch_fill, refresh_tooltips
 from src.scanner import (
     ScanResult,
     ScanTarget,
@@ -126,19 +126,12 @@ class PortScanDialog(QDialog):
         ])
         self._result_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._result_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self._result_table.setAlternatingRowColors(True)
+        self._result_table.setAlternatingRowColors(False)
         self._result_table.verticalHeader().setVisible(False)
 
-        hh = self._result_table.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.Fixed)
+        # 复选框列保持窄宽，其余列 Stretch 填满表格宽度
+        enable_stretch_fill(self._result_table, fixed_cols=[0])
         self._result_table.setColumnWidth(0, 30)
-        hh.setSectionResizeMode(1, QHeaderView.Stretch)
-        hh.setSectionResizeMode(2, QHeaderView.Fixed)
-        self._result_table.setColumnWidth(2, 80)
-        hh.setSectionResizeMode(3, QHeaderView.Fixed)
-        self._result_table.setColumnWidth(3, 80)
-        hh.setSectionResizeMode(4, QHeaderView.Fixed)
-        self._result_table.setColumnWidth(4, 80)
 
         result_layout.addWidget(self._result_table)
 
@@ -169,10 +162,10 @@ class PortScanDialog(QDialog):
         import_layout.addWidget(self._new_batch_edit)
 
         # 在控件都创建好后再填充选项（触发信号时 _new_batch_edit 已存在）
-        self._batch_combo.currentIndexChanged.connect(self._on_batch_changed)
+        self._batch_combo.currentIndexChanged.connect(self._on_collection_changed)
         self._batch_combo.addItem("(新建集合...)", -1)
         self._batch_combo.addItem("(无集合)", None)
-        for b in self._db.get_all_batches():
+        for b in self._db.get_all_collections():
             self._batch_combo.addItem(f"{b.name} ({b.target_count})", b.id)
 
         self._import_btn = QPushButton("导入开放端口 →")
@@ -203,7 +196,7 @@ class PortScanDialog(QDialog):
         except ValueError as e:
             self._preview_label.setText(f"⚠ {e}")
 
-    def _on_batch_changed(self, idx):
+    def _on_collection_changed(self, idx):
         self._new_batch_edit.setVisible(
             self._batch_combo.currentData() == -1
         )
@@ -301,6 +294,7 @@ class PortScanDialog(QDialog):
             self._result_table.setItem(row, 4, latency_item)
 
             self._result_table.scrollToBottom()
+            refresh_tooltips(self._result_table)
 
         # 只显示开放端口，但计数全部
         open_count = sum(1 for r in self._results if r.success)
@@ -340,16 +334,16 @@ class PortScanDialog(QDialog):
             return
 
         # 确定目标集合
-        batch_id = self._batch_combo.currentData()
-        if batch_id == -1:
+        collection_id = self._batch_combo.currentData()
+        if collection_id == -1:
             # 新建集合
             name = self._new_batch_edit.text().strip()
             if not name:
                 QMessageBox.warning(self, "验证失败", "请输入新集合名称。")
                 return
-            batch_id = self._db.add_batch(name, "")
+            collection_id = self._db.add_collection(name)
             self._batch_combo.blockSignals(True)
-            self._batch_combo.insertItem(2, f"{name} (0)", batch_id)
+            self._batch_combo.insertItem(2, f"{name} (0)", collection_id)
             self._batch_combo.setCurrentIndex(2)
             self._batch_combo.blockSignals(False)
             self._new_batch_edit.setVisible(False)
@@ -358,10 +352,10 @@ class PortScanDialog(QDialog):
         added = 0
         skipped = 0
         for ip, port in selected:
-            if self._db.target_exists(ip, port, batch_id):
+            if self._db.target_exists(ip, port, collection_id):
                 skipped += 1
                 continue
-            self._db.add_target(ip, port, f"{ip}:{port}", batch_id)
+            self._db.add_target(ip, port, f"{ip}:{port}", collection_id)
             added += 1
 
         msg = f"已将 {added} 个开放端口添加到集合。"

@@ -114,16 +114,20 @@ def expand_port_range(port_spec: str) -> list[int]:
             continue
         if "-" in part:
             range_parts = part.split("-")
-            if len(range_parts) == 2:
-                try:
-                    start, end = int(range_parts[0]), int(range_parts[1])
-                    if start > end:
-                        start, end = end, start
-                    for p in range(start, end + 1):
-                        if 1 <= p <= 65535:
-                            ports.add(p)
-                except ValueError:
-                    raise ValueError(f"无效的端口范围: {part}")
+            if len(range_parts) != 2:
+                raise ValueError(f"无效的端口范围: {part}")
+            try:
+                start = int(range_parts[0])
+                end = int(range_parts[1])
+            except ValueError:
+                raise ValueError(f"无效的端口范围: {part}")
+            if start > end:
+                start, end = end, start
+            if end - start + 1 > 65536:
+                raise ValueError(f"端口范围过大: {part}")
+            for p in range(start, end + 1):
+                if 1 <= p <= 65535:
+                    ports.add(p)
         else:
             try:
                 p = int(part)

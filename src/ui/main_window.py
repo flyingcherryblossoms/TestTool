@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
-    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QLabel,
@@ -23,33 +20,26 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.csv_handler import export_targets_to_csv
 from src.database import Database
-from src.excel_handler import export_targets_to_excel
 from src.ui.connectivity_panel import ConnectivityPanel
 from src.ui.port_scan_dialog import PortScanDialog
 from src.ui.protocol_panel import ProtocolPanel
 
 
-class BatchDialog(QDialog):
+class CollectionDialog(QDialog):
     """新建/编辑集合的对话框。"""
 
-    def __init__(self, title: str, name: str = "", description: str = "",
-                 parent=None):
+    def __init__(self, title: str, name: str = "",
+                 name_placeholder: str = "例如: 生产环境服务器", parent=None):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setMinimumWidth(380)
         layout = QFormLayout(self)
 
         self._name_edit = QLineEdit(name)
-        self._name_edit.setPlaceholderText("例如: 生产环境服务器")
+        self._name_edit.setPlaceholderText(name_placeholder)
         self._name_edit.setMinimumWidth(280)
         layout.addRow("集合名称:", self._name_edit)
-
-        self._desc_edit = QLineEdit(description)
-        self._desc_edit.setPlaceholderText("可选描述")
-        self._desc_edit.setMinimumWidth(280)
-        layout.addRow("描述:", self._desc_edit)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.Ok | QDialogButtonBox.Cancel
@@ -68,10 +58,6 @@ class BatchDialog(QDialog):
     def name(self) -> str:
         return self._name_edit.text().strip()
 
-    @property
-    def description(self) -> str:
-        return self._desc_edit.text().strip()
-
 
 class MainWindow(QMainWindow):
     """TestTool 主窗口。"""
@@ -79,10 +65,20 @@ class MainWindow(QMainWindow):
     def __init__(self, db_path: str = ""):
         super().__init__()
         self._db = Database(db_path)
-        self.setWindowTitle("TestTool - 网络测试工具")
+        self.setWindowTitle("测试工具")
         self.setMinimumSize(1100, 700)
         self.resize(1300, 850)
 
+        self.setStyleSheet("""
+            QTableWidget::item:selected, QTreeWidget::item:selected,
+            QListWidget::item:selected {
+                background-color: #3498db; color: white;
+            }
+            QTableWidget::item:selected:!active, QTreeWidget::item:selected:!active,
+            QListWidget::item:selected:!active {
+                background-color: #5dade2; color: white;
+            }
+        """)
         self._setup_menu()
         self._setup_ui()
         self._setup_statusbar()
@@ -93,24 +89,15 @@ class MainWindow(QMainWindow):
     def _setup_menu(self):
         menubar = self.menuBar()
 
-        file_menu = menubar.addMenu("文件(&F)")
-        import_action = QAction("导入目标...", self)
-        import_action.triggered.connect(self._import_targets_file)
-        file_menu.addAction(import_action)
-
-        export_action = QAction("导出目标...", self)
-        export_action.triggered.connect(self._export_all_targets)
-        file_menu.addAction(export_action)
-        file_menu.addSeparator()
-
+        tools_menu = menubar.addMenu("其他工具(&T)")
         port_scan_action = QAction("端口扫描...", self)
         port_scan_action.triggered.connect(self._open_port_scan)
-        file_menu.addAction(port_scan_action)
-        file_menu.addSeparator()
+        tools_menu.addAction(port_scan_action)
+        tools_menu.addSeparator()
 
         exit_action = QAction("退出(&X)", self)
         exit_action.triggered.connect(self.close)
-        file_menu.addAction(exit_action)
+        tools_menu.addAction(exit_action)
 
         help_menu = menubar.addMenu("帮助(&H)")
         about_action = QAction("关于", self)
@@ -153,7 +140,7 @@ class MainWindow(QMainWindow):
 
     def _update_statusbar(self):
         total = self._db.get_total_target_count()
-        batch_count = len(self._db.get_all_batches())
+        batch_count = len(self._db.get_all_collections())
         self._status_target_count.setText(
             f"共 {total} 个目标 / {batch_count} 个集合"
         )
@@ -164,50 +151,20 @@ class MainWindow(QMainWindow):
 
     # ── 菜单操作 ───────────────────────────────────────────
 
-    def _import_targets_file(self):
-        self._conn_panel._target_panel._import_file()
-
-    def _export_all_targets(self):
-        filepath, _ = QFileDialog.getSaveFileName(
-            self, "导出目标", "targets.xlsx",
-            "Excel 文件 (*.xlsx);;CSV 文件 (*.csv);;所有文件 (*)"
-        )
-        if not filepath:
-            return
-        targets = self._db.get_targets(None)
-        data = [{
-            "ip": t.ip, "port": t.port,
-            "description": t.description,
-            "batch_name": t.batch_name,
-            "created_at": t.created_at,
-        } for t in targets]
-        ext = Path(filepath).suffix.lower()
-        if ext == ".csv":
-            ok, err = export_targets_to_csv(filepath, data)
-        else:
-            if ext not in (".xlsx", ".xls"):
-                filepath = str(Path(filepath).with_suffix(".xlsx"))
-            ok, err = export_targets_to_excel(filepath, data)
-        if ok:
-            QMessageBox.information(
-                self, "导出完成",
-                f"成功导出 {len(data)} 条目标到:\n{filepath}"
-            )
-        else:
-            QMessageBox.critical(self, "导出失败", f"导出失败:\n{err}")
-
     def _show_about(self):
         QMessageBox.about(
             self, "关于 TestTool",
             "<h3>TestTool v1.0</h3>"
-            "<p>网络测试工具</p>"
+            "<p>网络测试工具 —— 连通性检测 & 协议测试</p>"
             "<p>基于 Python + PySide6 + SQLite 构建</p>"
+            "<p><a href='https://github.com/flyingcherryblossoms/TestTool'>"
+            "github.com/flyingcherryblossoms/TestTool</a></p>"
         )
 
     def _open_port_scan(self):
         dlg = PortScanDialog(self._db, parent=self)
         if dlg.exec() == QDialog.Accepted:
-            self._conn_panel.refresh_batch_list()
+            self._conn_panel.refresh_collection_list()
 
     def _on_protocol_test_selected(self, ip: str, port: int):
         self._tabs.setCurrentIndex(1)  # 协议测试

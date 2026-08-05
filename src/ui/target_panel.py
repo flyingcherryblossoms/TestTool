@@ -10,17 +10,15 @@ from PySide6.QtCore import Qt, QSettings, QThread, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
     QFormLayout,
-    QGroupBox,
     QHBoxLayout,
-    QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QProgressDialog,
     QPushButton,
@@ -32,11 +30,12 @@ from PySide6.QtWidgets import (
 
 from src.csv_handler import export_targets_to_csv, parse_targets_csv
 from src.database import Database
+from src.ui.table_utils import enable_stretch_fill, refresh_tooltips
 from src.excel_handler import (
     export_targets_to_excel,
     parse_targets_excel,
 )
-from src.scanner import build_scan_targets, expand_ip_range, expand_port_range
+from src.scanner import expand_ip_range, expand_port_range
 
 
 class TargetDialog(QDialog):
@@ -82,7 +81,7 @@ class TargetDialog(QDialog):
         # 集合选择
         self._batch_combo = QComboBox()
         self._batch_combo.addItem("(无集合)", None)
-        for b in self._db.get_all_batches():
+        for b in self._db.get_all_collections():
             self._batch_combo.addItem(f"{b.name} ({b.target_count})", b.id)
         layout.addRow("所属集合:", self._batch_combo)
 
@@ -133,7 +132,7 @@ class TargetDialog(QDialog):
             self._ip_edit.setText(t.ip)
             self._port_edit.setText(str(t.port))
             self._desc_edit.setText(t.description)
-            idx = self._batch_combo.findData(t.batch_id)
+            idx = self._batch_combo.findData(t.collection_id)
             if idx >= 0:
                 self._batch_combo.setCurrentIndex(idx)
 
@@ -159,7 +158,7 @@ class TargetDialog(QDialog):
             return
 
         desc_template = self._desc_edit.text().strip()
-        batch_id = self._batch_combo.currentData()
+        collection_id = self._batch_combo.currentData()
         total = len(ips) * len(ports)
 
         # 范围较大时确认
@@ -180,7 +179,7 @@ class TargetDialog(QDialog):
                 else:
                     desc = f"{ip}:{port}"
                 self._targets.append({
-                    "ip": ip, "port": port, "description": desc, "batch_id": batch_id
+                    "ip": ip, "port": port, "description": desc, "collection_id": collection_id
                 })
         self.accept()
 
@@ -217,33 +216,33 @@ class ImportWorker(QThread):
         db = Database(self._db_path)
 
         # 预解析集合名称 → ID
-        batch_cache = {}
-        for b in db.get_all_batches():
-            batch_cache[b.name] = b.id
+        collection_cache = {}
+        for b in db.get_all_collections():
+            collection_cache[b.name] = b.id
 
         import_count = skip_count = update_count = 0
         total = len(self._targets)
 
         for i, t in enumerate(self._targets):
-            batch_name = t.get("batch_name", "")
-            batch_id = None
-            if batch_name:
-                if batch_name in batch_cache:
-                    batch_id = batch_cache[batch_name]
+            collection_name = t.get("collection_name", "")
+            collection_id = None
+            if collection_name:
+                if collection_name in collection_cache:
+                    collection_id = collection_cache[collection_name]
                 else:
-                    batch_id = db.add_batch(batch_name, "")
-                    batch_cache[batch_name] = batch_id
+                    collection_id = db.add_collection(collection_name)
+                    collection_cache[collection_name] = collection_id
 
-            existing_id = db.find_target_id(t["ip"], t["port"], batch_id)
+            existing_id = db.find_target_id(t["ip"], t["port"], collection_id)
             if existing_id is not None:
                 if self._overwrite:
                     db.update_target(existing_id, t["ip"], t["port"],
-                                     t.get("description", ""), batch_id)
+                                     t.get("description", ""), collection_id)
                     update_count += 1
                 else:
                     skip_count += 1
             else:
-                db.add_target(t["ip"], t["port"], t.get("description", ""), batch_id)
+                db.add_target(t["ip"], t["port"], t.get("description", ""), collection_id)
                 import_count += 1
 
             if i % 20 == 0 or i == total - 1:
@@ -257,17 +256,20 @@ class TargetPanel(QWidget):
 
     Signals:
         targets_changed:    目标数据发生变更时触发。
-        test_selected:      携带勾选的目标 ID 列表，通知主窗口切换到测试页。
+        selection_changed:  表格选中变化时触发，携带选中的目标 ID 列表。
+        connectivity_test:  请求对指定目标进行连通测试（双击行触发），携带 ID 列表。
+        protocol_test_selected: 通知协议测试面板，携带目标 IP/端口。
     """
 
     targets_changed = Signal()
-    test_selected = Signal(list)          # list[target_id]
+    selection_changed = Signal(list)      # list[target_id]
+    connectivity_test = Signal(list)      # list[target_id]
     protocol_test_selected = Signal(str, int)  # ip, port
 
     def __init__(self, db: Database, parent=None):
         super().__init__(parent)
         self._db = db
-        self._current_batch_id: int | None = None  # None=全部, 0=未分类
+        self._current_collection_id: int | None = None  # None=全部, 0=未分类
         self._all_targets: list = []  # 缓存当前全部目标用于筛选
         self._sort_col: int = -1  # 当前排序列（-1 为按 sort_order）
         self._sort_asc: bool = True
@@ -284,7 +286,7 @@ class TargetPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
 
-        # ── 第一行: 标题 + 筛选 ──────────────────────────────
+        # ── 第一行: 标题 + 筛选 + 全选/反选/刷新 ──────────────
         top_layout = QHBoxLayout()
         self._info_label = QLabel("全部目标")
         top_layout.addWidget(self._info_label)
@@ -292,7 +294,7 @@ class TargetPanel(QWidget):
         self._filter_edit = QLineEdit()
         self._filter_edit.setPlaceholderText("筛选 IP/端口/描述...")
         self._filter_edit.setClearButtonEnabled(True)
-        self._filter_edit.setMinimumWidth(200)
+        self._filter_edit.setMinimumWidth(120)
         self._filter_edit.textChanged.connect(self._apply_filter)
         top_layout.addWidget(self._filter_edit)
 
@@ -305,72 +307,60 @@ class TargetPanel(QWidget):
         top_layout.addWidget(self._status_filter)
 
         top_layout.addStretch()
-        self._select_all_cb = QCheckBox("全选")
-        self._select_all_cb.stateChanged.connect(self._on_select_all)
-        top_layout.addWidget(self._select_all_cb)
+        # 全选/反选放在筛选行行尾，随后是刷新按钮（紧凑样式，避免挤压主分栏）
+        btn_style = "QPushButton { padding: 2px 6px; }"
+        sel_all_btn = QPushButton("全选")
+        sel_all_btn.setStyleSheet(btn_style)
+        sel_all_btn.clicked.connect(self._select_all_rows)
+        top_layout.addWidget(sel_all_btn)
+        invert_btn = QPushButton("反选")
+        invert_btn.setStyleSheet(btn_style)
+        invert_btn.clicked.connect(self._invert_selection)
+        top_layout.addWidget(invert_btn)
+        self._refresh_btn = QPushButton("刷新")
+        self._refresh_btn.setStyleSheet(btn_style)
+        self._refresh_btn.clicked.connect(self.refresh)
+        top_layout.addWidget(self._refresh_btn)
         layout.addLayout(top_layout)
 
         # ── 表格 ─────────────────────────────────────────────
         self._table = QTableWidget()
-        self._table.setColumnCount(7)
+        self._table.setColumnCount(4)
         self._table.setHorizontalHeaderLabels([
-            "#", "", "IP 地址", "端口", "描述", "集合", "最近状态"
+            "IP 地址", "端口", "描述", "最近状态"
         ])
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self._table.setAlternatingRowColors(True)
+        self._table.setAlternatingRowColors(False)
         self._table.verticalHeader().setVisible(False)
-        self._table.setDragEnabled(True)
-        self._table.setAcceptDrops(True)
-        self._table.setDragDropOverwriteMode(False)
-        self._table.setDragDropMode(QAbstractItemView.InternalMove)
-        self._table.setDropIndicatorShown(True)
-        # 拖拽后的 debounce 重建（防止拖出列表外丢数据）
-        self._table.model().rowsMoved.connect(self._schedule_drag_rebuild)
-        self._table.model().rowsRemoved.connect(self._schedule_drag_rebuild)
-        self._drag_rebuild_timer = QTimer(self)
-        self._drag_rebuild_timer.setSingleShot(True)
-        self._drag_rebuild_timer.timeout.connect(self._rebuild_after_drag)
         self._table.doubleClicked.connect(self._on_double_click)
-        self._table.cellClicked.connect(self._on_cell_clicked)
+        self._table.itemSelectionChanged.connect(self._emit_selection_changed)
+        # 编辑/删除等操作集成到表格右键菜单
+        self._table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._on_table_menu)
 
         hh = self._table.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # 序号
-        hh.setSectionResizeMode(1, QHeaderView.ResizeToContents)  # 复选框
-        hh.setSectionResizeMode(2, QHeaderView.Stretch)           # IP
-        hh.setSectionResizeMode(3, QHeaderView.ResizeToContents)  # 端口
-        hh.setSectionResizeMode(4, QHeaderView.Stretch)           # 描述
-        hh.setSectionResizeMode(5, QHeaderView.Stretch)           # 集合
-        hh.setSectionResizeMode(6, QHeaderView.ResizeToContents)  # 状态
-        hh.setStretchLastSection(False)
         hh.setSectionsClickable(True)
         hh.sectionClicked.connect(self._on_header_clicked)
+        # 列填满可用宽度：IP/描述 吸收剩余空间，端口/最近状态 可拖动调整
+        enable_stretch_fill(self._table)
 
         layout.addWidget(self._table)
 
-        # ── 按钮栏 ───────────────────────────────────────────
-        btn_layout = QHBoxLayout()
+        action_layout = QHBoxLayout()
 
-        self._add_btn = QPushButton("添加目标")
+        self._add_btn = QPushButton("添加")
         self._add_btn.clicked.connect(self._add_target)
-        btn_layout.addWidget(self._add_btn)
+        action_layout.addWidget(self._add_btn)
 
         self._edit_btn = QPushButton("编辑")
         self._edit_btn.clicked.connect(self._edit_target)
-        btn_layout.addWidget(self._edit_btn)
+        action_layout.addWidget(self._edit_btn)
 
         self._delete_btn = QPushButton("删除")
         self._delete_btn.clicked.connect(self._delete_targets)
-        btn_layout.addWidget(self._delete_btn)
-
-        self._test_selected_btn = QPushButton("▶ 测试选中")
-        self._test_selected_btn.setStyleSheet(
-            "QPushButton { color: #fff; background-color: #2980b9; padding: 4px 12px; }"
-            "QPushButton:hover { background-color: #3498db; }"
-        )
-        self._test_selected_btn.clicked.connect(self._on_test_selected)
-        btn_layout.addWidget(self._test_selected_btn)
+        action_layout.addWidget(self._delete_btn)
 
         self._proto_test_btn = QPushButton("协议测试")
         self._proto_test_btn.setStyleSheet(
@@ -378,39 +368,31 @@ class TargetPanel(QWidget):
             "QPushButton:hover { background-color: #9b59b6; }"
         )
         self._proto_test_btn.clicked.connect(self._on_protocol_test_selected)
-        btn_layout.addWidget(self._proto_test_btn)
+        action_layout.addWidget(self._proto_test_btn)
 
-        btn_layout.addStretch()
+        action_layout.addStretch()
 
-        self._import_btn = QPushButton("导入文件")
-        self._import_btn.clicked.connect(self._import_file)
-        btn_layout.addWidget(self._import_btn)
-
-        self._export_btn = QPushButton("导出文件")
-        self._export_btn.clicked.connect(self._export_file)
-        btn_layout.addWidget(self._export_btn)
-
-        layout.addLayout(btn_layout)
+        layout.addLayout(action_layout)
 
     # ── 公开接口 ───────────────────────────────────────────
 
-    def set_batch(self, batch_id: int | None) -> None:
+    def set_collection(self, collection_id: int | None) -> None:
         """切换到指定集合。None=全部, 0=未分类。"""
-        self._current_batch_id = batch_id
+        self._current_collection_id = collection_id
         self.refresh()
 
     def refresh(self) -> None:
         """刷新目标列表（集合切换/增删改时调用，立即执行不防抖）。"""
-        self._all_targets = self._db.get_targets(self._current_batch_id)
+        self._all_targets = self._db.get_targets(self._current_collection_id)
 
         # 更新标题
-        if self._current_batch_id is None:
+        if self._current_collection_id is None:
             self._info_label.setText(f"全部目标 ({len(self._all_targets)})")
-        elif self._current_batch_id == 0:
+        elif self._current_collection_id == 0:
             self._info_label.setText(f"未分类目标 ({len(self._all_targets)})")
         else:
-            batch = self._db.get_batch(self._current_batch_id)
-            name = batch.name if batch else "未知"
+            collection = self._db.get_collection(self._current_collection_id)
+            name = collection.name if collection else "未知"
             self._info_label.setText(f"{name} ({len(self._all_targets)})")
 
         # 取消防抖定时器，立即执行
@@ -439,7 +421,7 @@ class TargetPanel(QWidget):
                        filter_text in t.ip.lower()
                        or filter_text in str(t.port)
                        or filter_text in t.description.lower()
-                       or filter_text in t.batch_name.lower()]
+                       or filter_text in t.collection_name.lower()]
 
         # 批量获取最近测试结果（一次查询替代逐条查询）
         all_ids = [t.id for t in targets]
@@ -478,10 +460,9 @@ class TargetPanel(QWidget):
                 return (0, 0, 0, 0)
 
         key_map = {
-            2: lambda t: _ip_key(t),              # IP - 按数字段自然排序
-            3: lambda t: t.port,                  # 端口 - 按数值
-            4: lambda t: t.description.lower(),   # 描述 - 按字母
-            5: lambda t: t.batch_name.lower(),    # 集合 - 按字母
+            0: lambda t: _ip_key(t),
+            1: lambda t: t.port,
+            2: lambda t: t.description.lower(),
         }
 
         key_func = key_map.get(self._sort_col)
@@ -490,19 +471,19 @@ class TargetPanel(QWidget):
         return targets
 
     def _on_header_clicked(self, col: int):
-        """点击表头切换排序。仅 IP(2)、端口(3)、描述(4)、集合(5) 可排序。"""
-        if col not in (2, 3, 4, 5):
+        """点击表头切换排序。IP(1)、端口(2)、描述(3)、集合(4) 可排序。"""
+        if col not in (0, 1, 2):
             return
         if self._sort_col == col:
-            self._sort_asc = not self._sort_asc  # 切换升降序
+            self._sort_asc = not self._sort_asc
         else:
             self._sort_col = col
-            self._sort_asc = True  # 新列默认升序
+            self._sort_asc = True
         self._apply_filter()
 
     def _update_sort_indicator(self):
         """在列标题上显示排序箭头。"""
-        headers = {2: "IP 地址", 3: "端口", 4: "描述", 5: "集合"}
+        headers = {0: "IP 地址", 1: "端口", 2: "描述"}
         for c, label in headers.items():
             if c == self._sort_col:
                 arrow = " ▲" if self._sort_asc else " ▼"
@@ -511,41 +492,22 @@ class TargetPanel(QWidget):
             self._table.horizontalHeaderItem(c).setText(label + arrow)
 
     def _populate_table(self, targets, last_results: dict | None = None):
-        """填充表格数据（一次性完成，外层 setUpdatesEnabled 阻止中间重绘）。"""
+        """填充表格数据。"""
         self._populating = True
         self._table.setUpdatesEnabled(False)
         self._table.setRowCount(len(targets))
 
         for row, t in enumerate(targets):
-            # 序号 (col 0)
-            num_item = QTableWidgetItem(str(row + 1))
-            num_item.setTextAlignment(Qt.AlignCenter)
-            num_item.setFlags(Qt.ItemIsEnabled)
-            self._table.setItem(row, 0, num_item)
-
-            # 复选框 (col 1)
-            cb = QTableWidgetItem()
-            cb.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
-            cb.setCheckState(Qt.Unchecked)
-            self._table.setItem(row, 1, cb)
-
-            # IP (col 2)
             ip_item = QTableWidgetItem(t.ip)
             ip_item.setData(Qt.UserRole, t.id)
-            self._table.setItem(row, 2, ip_item)
+            self._table.setItem(row, 0, ip_item)
 
-            # Port (col 3)
             port_item = QTableWidgetItem(str(t.port))
             port_item.setTextAlignment(Qt.AlignCenter)
-            self._table.setItem(row, 3, port_item)
+            self._table.setItem(row, 1, port_item)
 
-            # 描述 (col 4)
-            self._table.setItem(row, 4, QTableWidgetItem(t.description))
+            self._table.setItem(row, 2, QTableWidgetItem(t.description))
 
-            # 集合 (col 5)
-            self._table.setItem(row, 5, QTableWidgetItem(t.batch_name))
-
-            # 最近状态 (col 6)
             if last_results is not None:
                 last_ok = last_results.get(t.id)
             else:
@@ -561,43 +523,67 @@ class TargetPanel(QWidget):
             else:
                 status_item = QTableWidgetItem("-")
                 status_item.setForeground(QBrush(QColor("#999")))
-            self._table.setItem(row, 6, status_item)
+            self._table.setItem(row, 3, status_item)
 
         self._table.setUpdatesEnabled(True)
-        if self._select_all_cb.isChecked():
-            self._select_all_cb.setChecked(False)
+        refresh_tooltips(self._table)
         self._populating = False
 
-    def get_selected_target_ids(self) -> list[int]:
-        """获取当前勾选/选中的目标 ID 列表。"""
+    def get_visible_target_ids(self) -> list[int]:
+        """获取当前表格中可见（未被筛选掉）的目标 ID 列表。"""
         ids = []
         for row in range(self._table.rowCount()):
-            cb = self._table.item(row, 1)  # 复选框在 col 1
-            if cb and cb.checkState() == Qt.Checked:
-                item = self._table.item(row, 2)  # ID 在 col 2
-                if item:
-                    ids.append(item.data(Qt.UserRole))
-        if not ids:
-            for row in set(idx.row() for idx in self._table.selectedIndexes()):
-                item = self._table.item(row, 2)
-                if item:
-                    ids.append(item.data(Qt.UserRole))
+            item = self._table.item(row, 0)
+            if item:
+                tid = item.data(Qt.UserRole)
+                if tid:
+                    ids.append(tid)
         return ids
+
+    def get_selected_target_ids(self) -> list[int]:
+        """获取当前选中的目标 ID 列表。"""
+        ids = []
+        for row in set(idx.row() for idx in self._table.selectedIndexes()):
+            item = self._table.item(row, 0)  # ID 在 col 1
+            if item:
+                ids.append(item.data(Qt.UserRole))
+        return ids
+
+    def _emit_selection_changed(self):
+        """表格选中变化时通知外部（用于控制栏显示选中数量）。"""
+        self.selection_changed.emit(self.get_selected_target_ids())
 
     # ── 槽函数 ─────────────────────────────────────────────
 
     def _save_column_widths(self):
         """保存用户调整后的列宽到 QSettings。"""
         settings = QSettings("TestTool", "TestTool")
-        for col in [2, 3, 4, 5]:  # IP, 端口, 描述, 集合
+        for col in [1, 2, 3, 4]:  # IP, 端口, 描述, 集合
             settings.setValue(f"target_col_{col}", self._table.columnWidth(col))
 
-    def _on_select_all(self, state):
-        check_state = Qt.Checked if state else Qt.Unchecked
-        for row in range(self._table.rowCount()):
-            cb = self._table.item(row, 1)  # 复选框在 col 1
-            if cb:
-                cb.setCheckState(check_state)
+    def _select_all_rows(self):
+        self._table.selectAll()
+
+    def _invert_selection(self):
+        model = self._table.model()
+        rows = self._table.rowCount()
+        if rows == 0:
+            return
+        sm = self._table.selectionModel()
+        sel_rows = set()
+        for r in range(rows):
+            if sm.isSelected(model.index(r, 0)):
+                sel_rows.add(r)
+        if not sel_rows:
+            self._table.selectAll()
+            return
+        from PySide6.QtCore import QItemSelection, QItemSelectionModel
+        new_sel = QItemSelection()
+        for r in range(rows):
+            if r not in sel_rows:
+                new_sel.select(model.index(r, 0), model.index(r, self._table.columnCount() - 1))
+        sm.select(new_sel, QItemSelectionModel.ClearAndSelect)
+        self._table.setFocus()
 
     def _schedule_drag_rebuild(self, *args):
         """拖拽操作后延迟重建（debounce 50ms，合并多次信号）。
@@ -610,7 +596,7 @@ class TargetPanel(QWidget):
         """拖拽完成：读取当前顺序 → 保存 → 完整重建表格。"""
         ordered_ids = []
         for row in range(self._table.rowCount()):
-            item = self._table.item(row, 2)  # ID 在 col 2
+            item = self._table.item(row, 0)  # ID 在 col 1
             if item:
                 tid = item.data(Qt.UserRole)
                 if tid:
@@ -630,10 +616,30 @@ class TargetPanel(QWidget):
             cb.setCheckState(new_state)
 
     def _on_double_click(self, index):
+        """双击目标行 → 测试该条目标的连通性。"""
         row = index.row()
-        item = self._table.item(row, 2)  # ID 在 col 2
+        item = self._table.item(row, 0)  # ID 在 col 0
         if item:
-            self._edit_target_by_id(item.data(Qt.UserRole))
+            tid = item.data(Qt.UserRole)
+            if tid:
+                self.connectivity_test.emit([tid])
+
+    def _on_table_menu(self, pos):
+        """目标列表右键菜单：测试连通性 / 协议测试 / 编辑 / 删除 / 添加目标。"""
+        item = self._table.itemAt(pos)
+        menu = QMenu(self)
+        menu.addAction("添加", self._add_target)
+        if item:
+            row = item.row()
+            model = self._table.model()
+            if not self._table.selectionModel().isSelected(model.index(row, 0)):
+                self._table.selectRow(row)
+            menu.addAction("测试连通性", lambda: self._on_double_click(model.index(row, 0)))
+            menu.addAction("协议测试", self._on_protocol_test_selected)
+            menu.addSeparator()
+            menu.addAction("编辑", self._edit_target)
+            menu.addAction("删除", self._delete_targets)
+        menu.exec(self._table.viewport().mapToGlobal(pos))
 
     def _add_target(self):
         dlg = TargetDialog(self._db, parent=self)
@@ -642,7 +648,7 @@ class TargetPanel(QWidget):
             if targets:
                 for t in targets:
                     self._db.add_target(
-                        t["ip"], t["port"], t["description"], t["batch_id"]
+                        t["ip"], t["port"], t["description"], t["collection_id"]
                     )
                 self.refresh()
                 self.targets_changed.emit()
@@ -652,7 +658,7 @@ class TargetPanel(QWidget):
                 )
             elif dlg.target_data:
                 r = dlg.target_data
-                self._db.add_target(r["ip"], r["port"], r["description"], r["batch_id"])
+                self._db.add_target(r["ip"], r["port"], r["description"], r["collection_id"])
                 self.refresh()
                 self.targets_changed.emit()
 
@@ -661,14 +667,35 @@ class TargetPanel(QWidget):
         if not ids:
             QMessageBox.information(self, "提示", "请先选择要编辑的目标。")
             return
-        self._edit_target_by_id(ids[0])
+        if len(ids) == 1:
+            self._edit_target_by_id(ids[0])
+        else:
+            # 多选：批量修改集合
+            dlg = QDialog(self)
+            dlg.setWindowTitle(f"批量修改集合 ({len(ids)} 个目标)")
+            dlg.setMinimumWidth(300)
+            dl = QFormLayout(dlg)
+            combo = QComboBox()
+            combo.addItem("(无集合)", None)
+            for c in self._db.get_all_collections():
+                combo.addItem(f"{c.name} ({c.target_count})", c.id)
+            dl.addRow("移动到集合:", combo)
+            bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            bb.accepted.connect(dlg.accept)
+            bb.rejected.connect(dlg.reject)
+            dl.addRow(bb)
+            if dlg.exec() == QDialog.Accepted:
+                cid = combo.currentData()
+                self._db.move_targets_to_collection(ids, cid)
+                self.refresh()
+                self.targets_changed.emit()
 
     def _edit_target_by_id(self, target_id: int):
         dlg = TargetDialog(self._db, target_id, parent=self)
         if dlg.exec() == QDialog.Accepted and dlg.target_data:
             r = dlg.target_data
             self._db.update_target(
-                target_id, r["ip"], r["port"], r["description"], r["batch_id"]
+                target_id, r["ip"], r["port"], r["description"], r["collection_id"]
             )
             self.refresh()
             self.targets_changed.emit()
@@ -688,27 +715,11 @@ class TargetPanel(QWidget):
             self.refresh()
             self.targets_changed.emit()
 
-    def _on_test_selected(self):
-        """将勾选的目标 ID 发送出去用于测试。"""
-        ids = self.get_selected_target_ids()
-        if not ids:
-            # 没有勾选 → 测试当前筛选结果的全部
-            ids = []
-            for row in range(self._table.rowCount()):
-                item = self._table.item(row, 2)  # ID 在 col 2
-                if item:
-                    ids.append(item.data(Qt.UserRole))
-        if not ids:
-            QMessageBox.information(self, "提示", "当前没有可测试的目标。")
-            return
-        self.test_selected.emit(ids)
-
     def _on_protocol_test_selected(self):
         """将第一个勾选目标的 IP/端口发送到协议测试面板。"""
         ids = self.get_selected_target_ids()
         if not ids:
-            # 没有勾选 → 取表格第一个
-            item = self._table.item(0, 2)
+            item = self._table.item(0, 0)
             if item:
                 ids = [item.data(Qt.UserRole)]
         if not ids:
@@ -741,7 +752,7 @@ class TargetPanel(QWidget):
                 targets.append({
                     "ip": t.ip, "port": t.port,
                     "description": t.description,
-                    "batch_name": t.batch_name,
+                    "collection_name": t.collection_name,
                 })
 
         if not targets:
@@ -754,13 +765,13 @@ class TargetPanel(QWidget):
         # 检测重复
         dup_count = 0
         for t in targets:
-            batch_id = self._resolve_batch(t.get("batch_name", ""))
-            if self._db.target_exists(t["ip"], t["port"], batch_id):
+            collection_id = self._resolve_batch(t.get("collection_name", ""))
+            if self._db.target_exists(t["ip"], t["port"], collection_id):
                 dup_count += 1
 
         preview_lines = []
         for t in targets[:10]:
-            preview_lines.append(f"  {t['ip']}:{t['port']}  {t.get('description', '')}  [{t.get('batch_name', '')}]")
+            preview_lines.append(f"  {t['ip']}:{t['port']}  {t.get('description', '')}  [{t.get('collection_name', '')}]")
         if len(targets) > 10:
             preview_lines.append(f"  ... 等共 {len(targets)} 条")
         preview = "\n".join(preview_lines)
@@ -840,14 +851,14 @@ class TargetPanel(QWidget):
             parts.append(f"{len(errors)} 条格式错误")
         QMessageBox.information(self, "导入完成", "，".join(parts))
 
-    def _resolve_batch(self, batch_name: str) -> int | None:
-        """根据集合名称获取 batch_id，不存在则创建。"""
-        if not batch_name:
+    def _resolve_batch(self, collection_name: str) -> int | None:
+        """根据集合名称获取 collection_id，不存在则创建。"""
+        if not collection_name:
             return None
-        for b in self._db.get_all_batches():
-            if b.name == batch_name:
+        for b in self._db.get_all_collections():
+            if b.name == collection_name:
                 return b.id
-        return self._db.add_batch(batch_name, "")
+        return self._db.add_collection(collection_name)
 
     def _export_file(self):
         filepath, _ = QFileDialog.getSaveFileName(
@@ -857,11 +868,11 @@ class TargetPanel(QWidget):
         if not filepath:
             return
 
-        targets = self._db.get_targets(self._current_batch_id)
+        targets = self._db.get_targets(self._current_collection_id)
         data = [{
             "ip": t.ip, "port": t.port,
             "description": t.description,
-            "batch_name": t.batch_name,
+            "collection_name": t.collection_name,
             "created_at": t.created_at,
         } for t in targets]
 

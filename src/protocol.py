@@ -63,9 +63,9 @@ def _read_exactly(sock: socket.socket, n: int,
     return bytes(buf)
 
 
-def read_message(sock: socket.socket, encoding: str, head_len: int,
-                 timeout: Optional[float] = None) -> str:
-    """从 socket 读取一条帧封装的消息。
+def read_message_bytes(sock: socket.socket, head_len: int,
+                       timeout: Optional[float] = None) -> bytes:
+    """从 socket 读取一条帧封装的原始报文体字节。
 
     - head_len > 0: 读取 head_len 字节作为长度头，解析后读取报文体
     - head_len == 0: 读取直到 EOF
@@ -102,6 +102,13 @@ def read_message(sock: socket.socket, encoding: str, head_len: int,
                 raise ValueError(f"消息体过大 (>{MAX_MESSAGE_BYTES} 字节)")
         body_bytes = bytes(buf)
 
+    return body_bytes
+
+
+def read_message(sock: socket.socket, encoding: str, head_len: int,
+                 timeout: Optional[float] = None) -> str:
+    """从 socket 读取一条帧封装的消息并解码。"""
+    body_bytes = read_message_bytes(sock, head_len, timeout)
     return body_bytes.decode(encoding)
 
 
@@ -173,14 +180,18 @@ class TcpServerEngine:
         on_message: Callable[[str, str], str],
         on_status: Callable[[str], None],
         on_error: Callable[[str], None],
+        recv_encoding: Optional[str] = None,
+        on_message_raw: Optional[Callable[[str, bytes], None]] = None,
     ):
         self._ip = ip
         self._port = port
         self._encoding = encoding
+        self._recv_encoding = recv_encoding or encoding
         self._head_len = head_len
         self._on_message = on_message
         self._on_status = on_status
         self._on_error = on_error
+        self._on_message_raw = on_message_raw
 
         self._server_sock: Optional[socket.socket] = None
         self._stop_event = threading.Event()
@@ -243,16 +254,24 @@ class TcpServerEngine:
     def is_running(self) -> bool:
         return self._running
 
+    def set_encodings(self, encoding: str,
+                      recv_encoding: Optional[str] = None) -> None:
+        """运行时更新发送/接收编码（供主线程在服务端运行中调整）。"""
+        self._encoding = encoding
+        if recv_encoding:
+            self._recv_encoding = recv_encoding
+
     def _handle_client(self, client_sock: socket.socket,
                        client_addr: tuple) -> None:
         """处理单个客户端连接（同步）。"""
         addr_str = f"{client_addr[0]}:{client_addr[1]}"
         try:
             with client_sock:
-                message = read_message(
-                    client_sock, self._encoding, self._head_len
-                )
+                body_bytes = read_message_bytes(client_sock, self._head_len)
+                message = body_bytes.decode(self._recv_encoding)
                 self._on_status(f"收到消息 来自 {addr_str}")
+                if self._on_message_raw:
+                    self._on_message_raw(addr_str, body_bytes)
                 response = self._on_message(addr_str, message)
                 write_message(
                     client_sock, response, self._encoding, self._head_len

@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QGroupBox,
     QHBoxLayout,
-    QHeaderView,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -28,6 +27,8 @@ from PySide6.QtWidgets import (
 )
 
 from src.database import Database
+from src.ui.table_utils import enable_stretch_fill, refresh_tooltips
+from src.ui.target_panel import TargetPanel
 from src.scanner import ScanResult, ScanTarget, ScannerWorker
 
 
@@ -39,6 +40,8 @@ class TestPanel(QWidget):
     """
 
     test_finished = Signal()
+    targets_changed = Signal()
+    protocol_test_selected = Signal(str, int)
 
     def __init__(self, db: Database, parent=None):
         super().__init__(parent)
@@ -48,9 +51,7 @@ class TestPanel(QWidget):
         self._total = 0
         self._success_count = 0
         self._fail_count = 0
-        self._current_batch_id: int | None = None
-        self._selected_target_ids: list[int] = []   # 从目标管理传入的选中目标 ID
-        self._selected_label: str = ""              # 选中目标的显示标签
+        self._current_collection_id: int | None = None
         self._all_results: list[ScanResult] = []  # 缓存全部结果用于筛选
         self._db_pending: list[ScanResult] = []   # 批量写 DB 的暂存
         self._db_batch_size = 50                   # 每攒够 N 条 flush 一次
@@ -66,8 +67,8 @@ class TestPanel(QWidget):
         ctrl_group = QGroupBox("测试控制")
         ctrl_layout = QHBoxLayout(ctrl_group)
 
-        self._batch_label = QLabel("待测目标: 全部")
-        ctrl_layout.addWidget(self._batch_label)
+        self._collection_label = QLabel("待测目标: 全部")
+        ctrl_layout.addWidget(self._collection_label)
 
         ctrl_layout.addStretch()
 
@@ -107,39 +108,22 @@ class TestPanel(QWidget):
 
         layout.addWidget(ctrl_group)
 
-        # ── 主分栏：选中目标列表 + 测试结果（横向排列）──
+        # ── 主分栏：目标列表 + 测试结果（横向排列）──
         main_splitter = QSplitter(Qt.Horizontal)
 
-        self._selected_group = QGroupBox("选中目标列表")
-        self._selected_group.setVisible(False)
-        selected_layout = QVBoxLayout(self._selected_group)
-        selected_layout.setContentsMargins(4, 4, 4, 4)
-
-        sel_btn_layout = QHBoxLayout()
-        sel_btn_layout.addWidget(QPushButton("全选", clicked=self._select_all))
-        sel_btn_layout.addWidget(QPushButton("取消", clicked=self._deselect_all))
-        sel_btn_layout.addWidget(QPushButton("反选", clicked=self._invert_selection))
-        sel_btn_layout.addStretch()
-        selected_layout.addLayout(sel_btn_layout)
-
-        self._selected_table = QTableWidget()
-        self._selected_table.setColumnCount(5)
-        self._selected_table.setHorizontalHeaderLabels(["", "IP", "端口", "描述", "集合"])
-        self._selected_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self._selected_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self._selected_table.setAlternatingRowColors(True)
-        self._selected_table.verticalHeader().setVisible(False)
-        sel_hh = self._selected_table.horizontalHeader()
-        sel_hh.setSectionResizeMode(0, QHeaderView.Fixed)
-        self._selected_table.setColumnWidth(0, 26)
-        sel_hh.setSectionResizeMode(1, QHeaderView.Stretch)
-        sel_hh.setSectionResizeMode(2, QHeaderView.Fixed)
-        self._selected_table.setColumnWidth(2, 60)
-        sel_hh.setSectionResizeMode(3, QHeaderView.Stretch)
-        sel_hh.setSectionResizeMode(4, QHeaderView.Interactive)
-        self._selected_table.setColumnWidth(4, 100)
-        selected_layout.addWidget(self._selected_table)
-        main_splitter.addWidget(self._selected_group)
+        # 目标列表：集成目标管理的筛选/增删改/勾选测试
+        self._target_group = QGroupBox("目标列表")
+        target_group_layout = QVBoxLayout(self._target_group)
+        target_group_layout.setContentsMargins(4, 4, 4, 4)
+        self._target_panel = TargetPanel(self._db)
+        self._target_panel.targets_changed.connect(self._on_targets_changed)
+        self._target_panel.selection_changed.connect(self._on_target_selection_changed)
+        self._target_panel.connectivity_test.connect(self._run_test_ids)
+        self._target_panel.protocol_test_selected.connect(
+            self.protocol_test_selected.emit
+        )
+        target_group_layout.addWidget(self._target_panel)
+        main_splitter.addWidget(self._target_group)
 
         result_group = QGroupBox("测试结果")
         result_layout = QVBoxLayout(result_group)
@@ -166,33 +150,25 @@ class TestPanel(QWidget):
         ])
         self._result_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._result_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self._result_table.setAlternatingRowColors(True)
+        self._result_table.setAlternatingRowColors(False)
         self._result_table.verticalHeader().setVisible(False)
-        self._result_table.horizontalHeader().setStretchLastSection(True)
 
         hh = self._result_table.horizontalHeader()
-        hh.setSectionResizeMode(0, QHeaderView.Fixed)
-        self._result_table.setColumnWidth(0, 70)
-        hh.setSectionResizeMode(1, QHeaderView.Interactive)
-        self._result_table.setColumnWidth(1, 140)
-        hh.setSectionResizeMode(2, QHeaderView.Interactive)
-        self._result_table.setColumnWidth(2, 70)
-        hh.setSectionResizeMode(3, QHeaderView.Stretch)
-        hh.setSectionResizeMode(4, QHeaderView.Interactive)
-        self._result_table.setColumnWidth(4, 80)
         hh.setSectionsClickable(True)
         hh.sectionClicked.connect(self._on_result_header_clicked)
+        # 列填满可用宽度：IP地址/描述/错误信息 Stretch，状态/端口/延迟 可拖动调整
+        enable_stretch_fill(self._result_table)
 
         result_layout.addWidget(self._result_table)
 
         main_splitter.addWidget(result_group)
         main_splitter.setStretchFactor(0, 1)
-        main_splitter.setStretchFactor(1, 4)
-        main_splitter.setSizes([200, 800])
+        main_splitter.setStretchFactor(1, 1)
+        main_splitter.setSizes([500, 500])
         layout.addWidget(main_splitter)
 
         # ── 底部状态栏（固定高度）──
-        self._status_label = QLabel("选择一个集合后点击「开始测试」，或在目标管理中勾选后点击「测试选中」")
+        self._status_label = QLabel("在目标列表中勾选目标后点击「开始测试」或「测试选中」")
         self._status_label.setMaximumHeight(24)
         self._status_label.setWordWrap(False)
         layout.addWidget(self._status_label)
@@ -204,29 +180,62 @@ class TestPanel(QWidget):
 
     # ── 公开接口 ───────────────────────────────────────────
 
-    def set_batch(self, batch_id: int | None) -> None:
-        """设置当前集合，更新控制栏标签和选中目标列表。"""
-        self._current_batch_id = batch_id
-        self._selected_target_ids = []  # 清除选中目标，让 _start_test 按集合测试
-        self._selected_label = ""
-        targets = self._db.get_targets(batch_id)
-        if batch_id is None:
-            self._batch_label.setText(f"待测目标: 全部 ({len(targets)})")
-        elif batch_id == 0:
-            self._batch_label.setText(f"待测目标: 未分类 ({len(targets)})")
-        else:
-            batch = self._db.get_batch(batch_id)
-            name = batch.name if batch else "未知"
-            self._batch_label.setText(f"待测目标: {name} ({len(targets)})")
+    def set_collection(self, collection_id: int | None) -> None:
+        """设置当前集合，更新控制栏标签和目标列表。"""
+        self._current_collection_id = collection_id
+        self._target_panel.set_collection(collection_id)
+        targets = self._db.get_targets(collection_id)
+        self._update_collection_label(targets)
 
-        # 更新选中目标列表（展示集合中的目标，默认全选）
-        self._populate_target_table(targets)
+    def _update_collection_label(self, targets: list) -> None:
+        """更新"待测目标"标签的集合名称和数量。"""
+        if self._current_collection_id is None:
+            self._collection_label.setText(f"待测目标: 全部 ({len(targets)})")
+        elif self._current_collection_id == 0:
+            self._collection_label.setText(f"待测目标: 未分类 ({len(targets)})")
+        else:
+            collection = self._db.get_collection(self._current_collection_id)
+            name = collection.name if collection else "未知"
+            self._collection_label.setText(f"待测目标: {name} ({len(targets)})")
+
+    def _on_targets_changed(self):
+        """目标增删改后刷新标签并通知外部刷新集合列表/状态栏。"""
+        targets = self._db.get_targets(self._current_collection_id)
+        self._update_collection_label(targets)
+        self.targets_changed.emit()
+
+    def _on_target_selection_changed(self, ids: list) -> None:
+        """目标列表选中变化时，在控制栏显示选中数量。"""
+        if ids:
+            self._collection_label.setText(f"已选中: {len(ids)} 个目标")
+        else:
+            targets = self._db.get_targets(self._current_collection_id)
+            self._update_collection_label(targets)
 
     def is_running(self) -> bool:
         return self._worker is not None and self._worker.isRunning()
 
-    def start_test_with_ids(self, target_ids: list[int], label: str = "选中目标") -> None:
-        """使用指定目标 ID 列表启动测试（供外部调用）。存储选中 ID 以便后续「开始测试」复用。"""
+    # ── 槽函数 ─────────────────────────────────────────────
+
+    def _toggle_test(self):
+        if self.is_running():
+            self._cancel_test()
+        else:
+            self._start_test()
+
+    def _start_test(self):
+        """启动连通性检测。从目标列表收集目标进行测试。"""
+        # 收集目标列表中勾选的目标；未勾选时测试当前可见（筛选后）的全部目标
+        checked_ids = self._target_panel.get_selected_target_ids()
+        if not checked_ids:
+            checked_ids = self._target_panel.get_visible_target_ids()
+        if not checked_ids:
+            QMessageBox.information(self, "提示", "当前没有可测试的目标。")
+            return
+        self._run_test_ids(checked_ids)
+
+    def _run_test_ids(self, target_ids: list[int]) -> None:
+        """对指定目标 ID 列表启动连通测试（双击目标行/右键测试连通性触发）。"""
         if self.is_running():
             QMessageBox.information(self, "提示", "有测试正在进行中，请等待完成。")
             return
@@ -241,120 +250,17 @@ class TestPanel(QWidget):
             QMessageBox.information(self, "提示", "没有找到有效的目标。")
             return
 
-        # 存储选中目标以便后续「开始测试」复用
-        self._selected_target_ids = target_ids
-        self._selected_label = label
-
-        # 更新选中目标列表显示（含集合信息，默认全选）
-        self._populate_target_table(targets)
-
         scan_targets = [
             ScanTarget(id=t.id, ip=t.ip, port=t.port, description=t.description)
             for t in targets
         ]
 
-        self._batch_label.setText(f"待测目标: {label} ({len(scan_targets)})")
-        self._session_id = self._db.create_test_session(None, label)
-        self._run_test(scan_targets)
-
-    # ── 槽函数 ─────────────────────────────────────────────
-
-    def _toggle_test(self):
-        if self.is_running():
-            self._cancel_test()
-        else:
-            self._start_test()
-
-    # ── 选中目标表格操作 ───────────────────────────────────
-
-    def _populate_target_table(self, targets: list) -> None:
-        """填充选中目标表格，默认全选。"""
-        self._selected_table.setRowCount(0)
-        if not targets:
-            self._selected_group.setVisible(False)
-            return
-        self._selected_group.setVisible(True)
-        self._selected_table.setRowCount(len(targets))
-        for row, t in enumerate(targets):
-            chk = QTableWidgetItem("")
-            chk.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            chk.setCheckState(Qt.Checked)
-            chk.setData(Qt.UserRole, t.id)
-            self._selected_table.setItem(row, 0, chk)
-
-            ip_item = QTableWidgetItem(t.ip)
-            ip_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            self._selected_table.setItem(row, 1, ip_item)
-
-            port_item = QTableWidgetItem(str(t.port))
-            port_item.setTextAlignment(Qt.AlignCenter)
-            port_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            self._selected_table.setItem(row, 2, port_item)
-
-            self._selected_table.setItem(row, 3, QTableWidgetItem(t.description))
-
-            batch = t.batch_name if t.batch_name else "-"
-            self._selected_table.setItem(row, 4, QTableWidgetItem(batch))
-
-    def _get_checked_ids(self) -> list[int]:
-        """收集表格中勾选的目标 ID。"""
-        ids = []
-        for row in range(self._selected_table.rowCount()):
-            item = self._selected_table.item(row, 0)
-            if item and item.checkState() == Qt.Checked:
-                tid = item.data(Qt.UserRole)
-                if tid is not None:
-                    ids.append(tid)
-        return ids
-
-    def _select_all(self):
-        for row in range(self._selected_table.rowCount()):
-            item = self._selected_table.item(row, 0)
-            if item:
-                item.setCheckState(Qt.Checked)
-
-    def _deselect_all(self):
-        for row in range(self._selected_table.rowCount()):
-            item = self._selected_table.item(row, 0)
-            if item:
-                item.setCheckState(Qt.Unchecked)
-
-    def _invert_selection(self):
-        for row in range(self._selected_table.rowCount()):
-            item = self._selected_table.item(row, 0)
-            if item:
-                new_state = Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked
-                item.setCheckState(new_state)
-
-    def _start_test(self):
-        """启动连通性检测。从勾选列表收集目标进行测试。"""
-        # 收集表格中勾选的目标
-        checked_ids = self._get_checked_ids()
-        if not checked_ids:
-            QMessageBox.information(self, "提示", "没有勾选目标。请勾选要测试的目标后再开始。")
-            return
-
-        targets = []
-        for tid in checked_ids:
-            t = self._db.get_target(tid)
-            if t:
-                targets.append(t)
-
-        if not targets:
-            QMessageBox.information(self, "提示", "没有找到有效的目标。")
-            return
-
-        scan_targets = [
-            ScanTarget(id=t.id, ip=t.ip, port=t.port, description=t.description)
-            for t in targets
-        ]
-
-        batch_name = ""
-        if self._current_batch_id is not None and self._current_batch_id > 0:
-            batch = self._db.get_batch(self._current_batch_id)
-            batch_name = batch.name if batch else ""
+        collection_name = ""
+        if self._current_collection_id is not None and self._current_collection_id > 0:
+            collection = self._db.get_collection(self._current_collection_id)
+            collection_name = collection.name if collection else ""
         self._session_id = self._db.create_test_session(
-            self._current_batch_id if self._current_batch_id else None, batch_name
+            self._current_collection_id if self._current_collection_id else None, collection_name
         )
         self._run_test(scan_targets)
 
@@ -436,6 +342,8 @@ class TestPanel(QWidget):
             f"测试完成 | 共计 {self._total} | "
             f"连通 {self._success_count} | 未连通 {self._fail_count}"
         )
+        # 测试完成后自动刷新目标列表，更新「最近状态」
+        self._target_panel.refresh()
         self.test_finished.emit()
 
     def _on_error(self, error_msg: str):
@@ -466,6 +374,7 @@ class TestPanel(QWidget):
         self._result_table.setItem(row, 4, latency_item)
         self._result_table.setItem(row, 5, QTableWidgetItem(result.error_msg))
         self._result_table.scrollToBottom()
+        refresh_tooltips(self._result_table)
 
     def _result_matches_filter(self, result: ScanResult) -> bool:
         """检查结果是否匹配当前筛选条件（文本 + 状态）。"""

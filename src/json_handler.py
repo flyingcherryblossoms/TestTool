@@ -12,7 +12,7 @@ def export_collection_to_json(filepath: str | Path, collection: dict) -> tuple[b
 
     collection 格式:
         {
-            "name": str, "protocol_type": str, "description": str,
+            "name": str, "protocol_type": str,
             "targets": [
                 {
                     "ip": str, "port": int, "description": str,
@@ -37,7 +37,6 @@ def export_collection_to_json(filepath: str | Path, collection: dict) -> tuple[b
         "type": "protocol_collection",
         "name": collection.get("name", ""),
         "protocol_type": collection.get("protocol_type", "tcp_client"),
-        "description": collection.get("description", ""),
         "targets": collection.get("targets", []),
     }
     try:
@@ -118,6 +117,7 @@ def _parse_collection(data: dict) -> tuple[dict | None, str]:
             "port": port,
             "description": t.get("description", ""),
             "encoding": t.get("encoding", "UTF-8"),
+            "recv_encoding": t.get("recv_encoding", "UTF-8"),
             "head_length": t.get("head_length", 5),
             "timeout": t.get("timeout", 5.0),
             "ws_path": t.get("ws_path", ""),
@@ -129,7 +129,6 @@ def _parse_collection(data: dict) -> tuple[dict | None, str]:
     return {
         "name": name,
         "protocol_type": data.get("protocol_type", "tcp_client"),
-        "description": data.get("description", ""),
         "targets": targets,
     }, ""
 
@@ -141,11 +140,13 @@ def _parse_client_config(data: dict) -> tuple[dict | None, str]:
         "ip": data.get("ip", ""),
         "port": data.get("port", 0),
         "encoding": data.get("encoding", "UTF-8"),
+        "recv_encoding": data.get("recv_encoding", "UTF-8"),
         "head_length": data.get("head_length", 5),
         "timeout": data.get("timeout", 5.0),
         "ws_url": data.get("ws_url", ""),
         "ws_use_ssl": data.get("ws_use_ssl", False),
         "send_message": data.get("send_message", ""),
+        "send_presets": data.get("send_presets", []),
     }
     return cfg, ""
 
