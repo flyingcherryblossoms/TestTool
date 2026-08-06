@@ -22,6 +22,7 @@ jobs:
       - name: Generate icon
         shell: python
         run: |
+          import os; os.makedirs('portcheck', exist_ok=True)
           from PIL import Image, ImageDraw
           s=256;m=s/2
           img=Image.new('RGBA',(s,s),(0,0,0,0))
@@ -83,6 +84,7 @@ jobs:
       - name: Generate icon
         shell: python
         run: |
+          import os; os.makedirs('portcheck', exist_ok=True)
           from PIL import Image, ImageDraw
           s=256;m=s/2
           img=Image.new('RGBA',(s,s),(0,0,0,0))
@@ -146,6 +148,7 @@ jobs:
       - name: Generate icon
         run: |
           python3.8 -c "
+          import os; os.makedirs('portcheck', exist_ok=True)
           from PIL import Image, ImageDraw
           s=256;m=s/2
           img=Image.new('RGBA',(s,s),(0,0,0,0))
@@ -207,6 +210,7 @@ jobs:
       - name: Generate icon
         shell: python
         run: |
+          import os; os.makedirs('portcheck', exist_ok=True)
           from PIL import Image, ImageDraw
           s=256;m=s/2
           img=Image.new('RGBA',(s,s),(0,0,0,0))
@@ -270,6 +274,7 @@ jobs:
       - name: Generate icon
         run: |
           python3.8 -c "
+          import os; os.makedirs('portcheck', exist_ok=True)
           from PIL import Image, ImageDraw
           s=256;m=s/2
           img=Image.new('RGBA',(s,s),(0,0,0,0))
@@ -326,6 +331,7 @@ jobs:
       - name: Generate icon
         shell: python
         run: |
+          import os; os.makedirs('portcheck', exist_ok=True)
           from PIL import Image, ImageDraw
           s=256;m=s/2
           img=Image.new('RGBA',(s,s),(0,0,0,0))
