@@ -12,3 +12,7 @@ dist/
 .idea/
 *.egg-info/
 package-lock.json
+*.json
+*.xlsx
+!requirements*.json
+!package.json
