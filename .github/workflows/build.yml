@@ -17,7 +17,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install PySide6 openpyxl xlrd Pillow pyinstaller
+        run: pip install PySide6 openpyxl xlrd Pillow websocket-client websockets pyinstaller
 
       - name: Generate icon
         shell: python
@@ -78,7 +78,7 @@ jobs:
           sudo apt-get install -y -qq libegl1 libgl1 libopengl0 libxkbcommon0
 
       - name: Install Python deps
-        run: pip install PySide6 openpyxl xlrd Pillow pyinstaller
+        run: pip install PySide6 openpyxl xlrd Pillow websocket-client websockets pyinstaller
 
       - name: Generate icon
         shell: python
@@ -141,7 +141,7 @@ jobs:
           python3.8 /tmp/get-pip.py -q
 
       - name: Install Python deps
-        run: python3.8 -m pip install PySide6 openpyxl xlrd Pillow pyinstaller
+        run: python3.8 -m pip install PySide6 openpyxl xlrd Pillow websocket-client websockets pyinstaller
 
       - name: Generate icon
         run: |
@@ -202,7 +202,7 @@ jobs:
           sudo apt-get install -y -qq libegl1 libgl1 libopengl0 libxkbcommon0
 
       - name: Install Python deps
-        run: pip install PySide6 openpyxl xlrd Pillow pyinstaller
+        run: pip install PySide6 openpyxl xlrd Pillow websocket-client websockets pyinstaller
 
       - name: Generate icon
         shell: python
@@ -265,7 +265,7 @@ jobs:
           python3.8 /tmp/get-pip.py -q
 
       - name: Install Python deps
-        run: python3.8 -m pip install PySide6 openpyxl xlrd Pillow pyinstaller
+        run: python3.8 -m pip install PySide6 openpyxl xlrd Pillow websocket-client websockets pyinstaller
 
       - name: Generate icon
         run: |
@@ -321,7 +321,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install Python deps
-        run: pip install PySide6 openpyxl xlrd Pillow pyinstaller
+        run: pip install PySide6 openpyxl xlrd Pillow websocket-client websockets pyinstaller
 
       - name: Generate icon
         shell: python
