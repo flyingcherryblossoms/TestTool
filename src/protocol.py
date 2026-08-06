@@ -294,9 +294,13 @@ def ws_send_and_receive(
         (success, response_or_error_message)
     """
     try:
-        from websocket import create_connection, WebSocketTimeoutError
-    except ImportError:
-        return False, "请安装 websocket-client: pip install websocket-client"
+        from websocket import create_connection
+        try:
+            from websocket import WebSocketTimeoutException as WebSocketTimeoutError
+        except ImportError:
+            from websocket import WebSocketTimeoutError  # 旧版
+    except ImportError as e:
+        return False, f"缺少 websocket-client 库 ({e})\npip install websocket-client"
 
     ws = None
     start = time.perf_counter()

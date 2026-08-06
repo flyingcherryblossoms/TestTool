@@ -337,6 +337,7 @@ class ClientPanelBase(QWidget):
         right_splitter = QSplitter(Qt.Vertical)
 
         self._send_group = QGroupBox("发送报文")
+        self._send_group.setMinimumHeight(160)
         sl = QVBoxLayout(self._send_group)
         self._send_edit = QPlainTextEdit()
         self._send_edit.setPlaceholderText("输入要发送的报文...")
@@ -365,7 +366,9 @@ class ClientPanelBase(QWidget):
         sh.addWidget(QPushButton("保存", clicked=self._save_preset))
         sh.addWidget(QPushButton("清空", clicked=self._send_edit.clear))
         # 连通性测试：直接检测当前 IP:端口并显示结果，不跳转页面
-        sh.addWidget(QPushButton("连通性测试", clicked=self._run_connectivity_test))
+        conn_btn = QPushButton("连通测试", clicked=self._run_connectivity_test)
+        conn_btn.setStyleSheet("background-color: #3498db; color: white; font-weight: bold;")
+        sh.addWidget(conn_btn)
         sh.addStretch()
         sl.addLayout(sh)
         right_splitter.addWidget(self._send_group)
@@ -465,12 +468,16 @@ class ClientPanelBase(QWidget):
         self._update_preset_stars()
 
     def _mark_msg_dirty(self):
+        self._msg_dirty = True
         self._sync_current_draft()
         self._update_send_label()
         self._update_preset_stars()
 
     def _update_send_label(self):
-        self._send_group.setTitle("发送报文" + (" *" if self._current_is_dirty() else ""))
+        dirty = self._current_is_dirty() or (
+            self._selected_preset_idx is None and self._msg_dirty
+        )
+        self._send_group.setTitle("发送报文" + (" *" if dirty else ""))
 
     def _current_is_dirty(self) -> bool:
         idx = self._selected_preset_idx
@@ -506,8 +513,13 @@ class ClientPanelBase(QWidget):
             item.setText(f"{name} *" if idx in self._dirty else name)
 
     def has_unsaved_presets(self) -> bool:
-        """是否有预设报文存在未保存的修改。"""
-        return bool(self._dirty)
+        """是否有预设报文存在未保存的修改（含未关联预设的发送框内容）。"""
+        if self._dirty:
+            return True
+        # 未选中预设时，发送框被修改过
+        if self._selected_preset_idx is None and self._msg_dirty:
+            return True
+        return False
 
     def save_all_drafts(self) -> None:
         """保存所有有未保存修改的预设报文。"""
@@ -886,8 +898,21 @@ class ClientPanelBase(QWidget):
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_F5:
             self._refresh_preset_list()
+        elif event.key() == Qt.Key_Delete or (
+            event.key() == Qt.Key_D and event.modifiers() == Qt.ControlModifier
+        ):
+            self._delete_preset()
+        elif event.key() == Qt.Key_S and event.modifiers() == Qt.ControlModifier:
+            if self._send_edit.hasFocus():
+                self._save_preset()
+            else:
+                self._on_ctrl_s_no_focus()
         else:
             super().keyPressEvent(event)
+
+    def _on_ctrl_s_no_focus(self):
+        """Ctrl+S 无焦点时的行为，子类可覆盖。"""
+        pass
 
 
 # ── 服务端公共组件 ────────────────────────────────────────────

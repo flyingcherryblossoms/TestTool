@@ -643,13 +643,18 @@ class TargetPanel(QWidget):
             if cid is None:
                 cid = self._db.add_target(t.ip, t.port, t.description, uncat_id)
             self._temp_real_ids[t.id] = cid
+        # 持久化后切换为非临时模式，后续按真实 DB 目标操作
+        self._temporary_mode = False
+        self._temporary_targets = []
+        self._current_collection_id = uncat_id
+        self.refresh()
 
     def get_real_id(self, fake_id: int) -> int:
         """临时目标的真实 connect_target id；未持久化时返回原值。"""
         return self._temp_real_ids.get(fake_id, fake_id)
 
     def _save_temporary_to_collection(self):
-        """把临时目标保存到连通测试集合（先持久化到未分类，再移动到所选集合）。"""
+        """把临时目标直接保存到用户选择的连通测试集合。"""
         if not self._temporary_targets:
             return
         collections = self._db.get_all_collections()
@@ -661,11 +666,17 @@ class TargetPanel(QWidget):
         if not ok:
             return
         coll = collections[names.index(name)]
-        self.persist_temporary_targets()
-        ids = [self._temp_real_ids.get(t.id, t.id) for t in self._temporary_targets]
-        if ids:
-            self._db.move_targets_to_collection(ids, coll.id)
-        QMessageBox.information(self, "保存完成", f"已保存 {len(ids)} 个目标到 [{coll.name}]")
+        count = 0
+        for t in self._temporary_targets:
+            if not self._db.target_exists(t.ip, t.port, coll.id):
+                self._db.add_target(t.ip, t.port, t.description, coll.id)
+                count += 1
+        # 退出临时模式，切换到目标集合
+        self._temporary_mode = False
+        self._temporary_targets = []
+        self.set_collection(coll.id)
+        QMessageBox.information(self, "保存完成", f"已保存 {count} 个目标到 [{coll.name}]")
+        self.targets_changed.emit()
         self.targets_changed.emit()
 
     def _emit_selection_changed(self):
@@ -852,7 +863,12 @@ class TargetPanel(QWidget):
         if not ids:
             QMessageBox.information(self, "提示", "当前没有可测试的目标。")
             return
-        target = self._db.get_target(ids[0])
+        # 临时模式：从内存列表查找
+        if self._temporary_mode:
+            by_id = {t.id: t for t in self._temporary_targets}
+            target = by_id.get(ids[0])
+        else:
+            target = self._db.get_target(ids[0])
         if target:
             self.protocol_test_selected.emit(target.ip, target.port)
 

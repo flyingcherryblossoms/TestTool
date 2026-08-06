@@ -163,6 +163,7 @@ def _parse_collection(data: dict) -> tuple[dict | None, str]:
             "ws_path": t.get("ws_path", ""),
             "ws_use_ssl": t.get("ws_use_ssl", False),
             "send_message": t.get("send_message", ""),
+            "send_presets": t.get("send_presets", []),
             "servers": servers,
         })
 

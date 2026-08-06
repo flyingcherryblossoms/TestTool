@@ -1,0 +1,81 @@
+{
+  "version": 1,
+  "type": "protocol_collections",
+  "collections": [
+    {
+      "name": "协议测试集合1",
+      "protocol_type": "tcp_client",
+      "targets": [
+        {
+          "ip": "127.0.0.1",
+          "port": 80,
+          "name": "测试1",
+          "encoding": "UTF-8",
+          "recv_encoding": "UTF-8",
+          "head_length": 5,
+          "timeout": 30.0,
+          "ws_path": "",
+          "ws_use_ssl": false,
+          "send_message": "",
+          "send_presets": [
+            {
+              "name": "报文1",
+              "message": "11111"
+            },
+            {
+              "name": "报文2",
+              "message": "2222"
+            },
+            {
+              "name": "报文3",
+              "message": "33333"
+            },
+            {
+              "name": "报文4",
+              "message": "333333331"
+            }
+          ],
+          "servers": [
+            {
+              "name": "1",
+              "server_type": "tcp_server",
+              "ip": "0.0.0.0",
+              "port": 80,
+              "encoding": "UTF-8",
+              "recv_encoding": "UTF-8",
+              "head_length": 5,
+              "ws_path": "/",
+              "response_mode": "fixed",
+              "response_message": "啊aaa"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "协议测试集合2",
+      "protocol_type": "tcp_client",
+      "targets": [
+        {
+          "ip": "192.168.31.1",
+          "port": 80,
+          "name": "2",
+          "encoding": "UTF-8",
+          "recv_encoding": "UTF-8",
+          "head_length": 5,
+          "timeout": 30.0,
+          "ws_path": "",
+          "ws_use_ssl": false,
+          "send_message": "",
+          "send_presets": [
+            {
+              "name": "报文1",
+              "message": "1111"
+            }
+          ],
+          "servers": []
+        }
+      ]
+    }
+  ]
+}

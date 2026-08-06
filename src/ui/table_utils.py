@@ -16,8 +16,8 @@ from __future__ import annotations
 import json
 from functools import partial
 
-from PySide6.QtCore import Qt, QMimeData, Signal
-from PySide6.QtGui import QDrag
+from PySide6.QtCore import Qt, QMimeData, QPoint, Signal
+from PySide6.QtGui import QColor, QDrag, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHeaderView,
@@ -28,6 +28,23 @@ from PySide6.QtWidgets import (
 
 # 拖动目标到集合时传递目标 ID 的自定义 MIME 类型
 TARGETS_MIME = "application/x-testtool-target-ids"
+
+
+def _make_drag_pixmap(text: str) -> QPixmap:
+    """渲染一段文本为拖拽缩略图，避免 QPixmap::scaled 空图警告。"""
+    from PySide6.QtGui import QFont, QFontMetrics, QPainter
+    font = QFont("Arial", 11)
+    fm = QFontMetrics(font)
+    w = max(fm.horizontalAdvance(text) + 20, 60)
+    h = fm.height() + 8
+    pixmap = QPixmap(w, h)
+    pixmap.fill(QColor("#3498db"))
+    painter = QPainter(pixmap)
+    painter.setPen(QColor("white"))
+    painter.setFont(font)
+    painter.drawText(pixmap.rect(), Qt.AlignCenter, text)
+    painter.end()
+    return pixmap
 
 
 class ReorderableTree(QTreeWidget):
@@ -49,6 +66,22 @@ class ReorderableTree(QTreeWidget):
         self.setDragEnabled(True)
         self.setDropIndicatorShown(True)
         self.setAcceptDrops(True)
+
+    def startDrag(self, supported_actions):
+        """自定义拖拽：用 QPixmap 渲染项目文本，避免空图警告。"""
+        items = self.selectedItems()
+        if not items:
+            return
+        mime = self.mimeData(items)
+        if mime is None:
+            return
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        text = items[0].text(0) if items else ""
+        pixmap = _make_drag_pixmap(text)
+        drag.setPixmap(pixmap)
+        drag.setHotSpot(QPoint(10, 5))
+        drag.exec(supported_actions, Qt.MoveAction)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasFormat(TARGETS_MIME):
@@ -116,16 +149,21 @@ class TargetDragTable(QTableWidget):
 
     def startDrag(self, supported_actions):
         ids = []
+        names = []
         for idx in self.selectionModel().selectedRows(0):
             item = self.item(idx.row(), 0)
             if item is not None and item.data(Qt.UserRole) is not None:
                 ids.append(item.data(Qt.UserRole))
+                names.append(item.text())
         if not ids:
             return
         mime = QMimeData()
         mime.setData(TARGETS_MIME, json.dumps(ids).encode("utf-8"))
         drag = QDrag(self)
         drag.setMimeData(mime)
+        label = ", ".join(names[:3]) + ("…" if len(names) > 3 else "")
+        drag.setPixmap(_make_drag_pixmap(label))
+        drag.setHotSpot(QPoint(10, 5))
         drag.exec(Qt.MoveAction)
 
 

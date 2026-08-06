@@ -185,11 +185,21 @@ class MainWindow(QMainWindow):
     # ── 窗口关闭 ───────────────────────────────────────────
 
     def closeEvent(self, event):
-        # 未保存的预设报文：先提示是否保存
-        if self._proto_panel.has_unsaved_presets():
+        # 未保存的预设报文/参数修改：先提示是否保存
+        has_dirty_config = any(
+            detail._client_panel._config_dirty
+            for _, detail in self._proto_panel._target_tabs.values()
+        )
+        unsaved = self._proto_panel.has_unsaved_presets() or has_dirty_config
+        if unsaved:
+            parts = []
+            if self._proto_panel.has_unsaved_presets():
+                parts.append("预设报文")
+            if has_dirty_config:
+                parts.append("参数修改")
             reply = QMessageBox.question(
-                self, "未保存的预设报文",
-                "有预设报文未保存，是否保存？",
+                self, "未保存的内容",
+                f"有{'、'.join(parts)}未保存，是否保存？",
                 QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel, QMessageBox.No
             )
             if reply == QMessageBox.Cancel:
@@ -197,6 +207,9 @@ class MainWindow(QMainWindow):
                 return
             if reply == QMessageBox.Yes:
                 self._proto_panel.save_unsaved_presets()
+                for _, detail in self._proto_panel._target_tabs.values():
+                    if detail._client_panel._config_dirty:
+                        detail._save_params()
         active = self._conn_panel.is_test_running()
         active = active or self._proto_panel.has_active_servers()
         if active:

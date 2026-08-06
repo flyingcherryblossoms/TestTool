@@ -396,9 +396,17 @@ class TargetClientPanel(ClientPanelBase):
         proto_row.addWidget(QPushButton("保存参数", clicked=self._owner._save_params))
         proto_row.addWidget(QPushButton("导出配置", clicked=self._owner._export_target))
         proto_row.addWidget(QPushButton("导入配置", clicked=self._owner._import_target_config))
+        # 服务端展开/收起按钮
+        self._server_toggle_btn = QPushButton("服务端")
+        self._server_toggle_btn.setCheckable(True)
+        self._server_toggle_btn.clicked.connect(self._owner._toggle_server_panel)
+        proto_row.addWidget(self._server_toggle_btn)
 
     def _on_param_changed(self):
         self._mark_config_dirty()
+
+    def _on_ctrl_s_no_focus(self):
+        self._owner._save_params()
 
     def _can_send(self) -> bool:
         return bool(self._owner._target)
@@ -414,25 +422,23 @@ class TargetClientPanel(ClientPanelBase):
         self._owner._save_presets_to_target(presets)
 
     def _build_client_worker(self, msg, proto):
-        t = self._owner._target
         if proto == "tcp_client":
-            return TcpClientWorker(ip=t.ip, port=t.port, message=msg,
-                                   encoding=t.encoding, head_len=t.head_length,
-                                   timeout=t.timeout)
-        url = t.ws_path if t.ws_path else f"ws://{t.ip}:{t.port}/ws"
-        return WsClientWorker(url=url, message=msg, timeout=t.timeout)
+            return TcpClientWorker(
+                ip=self._param_ip.text().strip(), port=self._param_port.value(),
+                message=msg, encoding=self._param_enc.currentText(),
+                head_len=self._param_hl.value(), timeout=self._param_timeout.value(),
+            )
+        url = self._param_ws_url.text().strip() or f"ws://{self._param_ip.text().strip()}:{self._param_port.value()}/ws"
+        return WsClientWorker(url=url, message=msg, timeout=self._param_ws_timeout.value())
 
     def _response_encoding(self):
-        t = self._owner._target
-        return t.recv_encoding if t else "UTF-8"
+        return self._resp_enc_combo.currentText() or "UTF-8"
 
     def _client_ip_label(self):
-        t = self._owner._target
-        return t.ip if t else "?"
+        return self._param_ip.text().strip() or "?"
 
     def _client_endpoint(self):
-        t = self._owner._target
-        return (t.ip, t.port) if t else ("", 0)
+        return (self._param_ip.text().strip(), self._param_port.value())
 
     def _record_session(self, success: bool, response: str, request: str):
         owner = self._owner
@@ -440,19 +446,19 @@ class TargetClientPanel(ClientPanelBase):
             owner._db.add_protocol_test_session(
                 collection_id=owner._coll.id, collection_name=owner._coll.name,
                 target_id=owner._target.id, protocol_type=owner._coll.protocol_type,
-                target_ip=owner._target.ip, target_port=owner._target.port,
+                target_ip=self._param_ip.text().strip(),
+                target_port=self._param_port.value(),
                 success=success, request=request,
                 response=response, error_msg="" if success else response,
             )
             owner._refresh_history()
 
     def _update_len_label(self):
-        t = self._owner._target
-        if not t:
+        if not self._owner._target:
             return
         msg = self._send_edit.toPlainText()
-        enc = t.encoding
-        hl = t.head_length
+        enc = self._param_enc.currentText()
+        hl = self._param_hl.value()
         try:
             nb = len(msg.encode(enc))
             hdr = compute_length_header(msg, enc, hl)
@@ -606,22 +612,28 @@ class _TargetDetailPanel(QWidget):
         # 左右并排：客户端(左) | Mock服务端(右)，可拖动分隔条调整比例、可收起/展开服务端
         self._split_h = QSplitter(Qt.Horizontal)
         self._split_h.setChildrenCollapsible(True)
+        self._split_h.splitterMoved.connect(self._on_splitter_moved)
         # 忽略面板自身的宽度 sizeHint，允许自由调整两半比例
         self._client_panel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+        self._client_panel.setMinimumWidth(0)
         self._server_panel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+        self._server_panel.setMinimumWidth(0)
         self._split_h.addWidget(self._client_panel)
         self._split_h.addWidget(self._server_panel)
-        self._split_h.setSizes([450, 450])
+        self._split_h.setSizes([900, 0])
+        self._server_collapsed = True
+        self._client_collapsed = False
+        self._size_check_timer = QTimer(self)
+        self._size_check_timer.setSingleShot(True)
+        self._size_check_timer.timeout.connect(self._check_splitter_sizes)
+        # 服务端默认关闭，按钮同步
+        if hasattr(self._client_panel, '_server_toggle_btn'):
+            self._client_panel._server_toggle_btn.setChecked(False)
 
         self._split_page = QWidget()
         sp_layout = QVBoxLayout(self._split_page)
         sp_layout.setContentsMargins(0, 0, 0, 0)
-        # 顶栏：开合服务端
         top_bar = QHBoxLayout()
-        self._collapse_btn = QPushButton("收起服务端")
-        self._collapse_btn.setToolTip("收起/展开右侧的 Mock服务端 面板")
-        self._collapse_btn.clicked.connect(self.toggle_server_collapsed)
-        top_bar.addWidget(self._collapse_btn)
         top_bar.addStretch()
         sp_layout.addLayout(top_bar)
         sp_layout.addWidget(self._split_h)
@@ -636,6 +648,22 @@ class _TargetDetailPanel(QWidget):
         fw = QApplication.focusWidget()
         return fw is not None and widget.isAncestorOf(fw)
 
+    def _on_splitter_moved(self, pos, index):
+        """拖拽分隔条后延迟检查尺寸。"""
+        self._size_check_timer.start(50)
+
+    def _check_splitter_sizes(self):
+        """拖拽结束：客户端低于 80px 阈值时自动隐藏。"""
+        sizes = self._split_h.sizes()
+        if len(sizes) < 2:
+            return
+        total = sum(sizes)
+        if sizes[0] <= 80 and sizes[0] > 0 and not self._client_collapsed:
+            self._client_collapsed = True
+            self._split_h.setSizes([0, total])
+        elif sizes[0] > 80 and self._client_collapsed:
+            self._client_collapsed = False
+
     def toggle_server_collapsed(self):
         """收起/展开右侧的 Mock服务端 面板。"""
         sizes = self._split_h.sizes()
@@ -643,12 +671,14 @@ class _TargetDetailPanel(QWidget):
         if not self._server_collapsed:
             self._server_collapsed = True
             self._split_h.setSizes([total, 0])
-            self._collapse_btn.setText("展开服务端")
         else:
             self._server_collapsed = False
+            self._client_collapsed = False
             self._split_h.setSizes([total // 2, total // 2])
-            self._collapse_btn.setText("收起服务端")
         self._split_h.updateGeometry()
+        # 更新按钮选中状态
+        if hasattr(self._client_panel, '_server_toggle_btn'):
+            self._client_panel._server_toggle_btn.setChecked(not self._server_collapsed)
 
     # ── 预设辅助 ────────────────────────────────────────────
 
@@ -764,6 +794,10 @@ class _TargetDetailPanel(QWidget):
         self._target = self._db.get_protocol_target(self._target.id)
         self.target_updated.emit()
         QMessageBox.information(self, "导入完成", "目标配置已更新。")
+
+    def _toggle_server_panel(self):
+        """从客户端按钮行切换服务端面板显示/隐藏。"""
+        self.toggle_server_collapsed()
 
     # ── 测试历史 ─────────────────────────────────────────
 
@@ -1073,7 +1107,9 @@ class _CollectionDetailTab(QWidget):
         tbl.addWidget(QPushButton("编辑", clicked=self._on_edit_target))
         tbl.addWidget(QPushButton("删除", clicked=self._on_delete_target))
         tbl.addWidget(QPushButton("测试", clicked=self._on_test_target))
-        tbl.addWidget(QPushButton("连通性测试", clicked=self._on_connectivity_test_requested))
+        conn_btn = QPushButton("连通测试", clicked=self._on_connectivity_test_requested)
+        conn_btn.setStyleSheet("background-color: #3498db; color: white; font-weight: bold;")
+        tbl.addWidget(conn_btn)
         tbl.addStretch()
         layout.addLayout(tbl)
 
@@ -1264,7 +1300,7 @@ class _CollectionDetailTab(QWidget):
         if row >= 0:
             menu.addAction("测试", self._on_test_target)
             menu.addAction("编辑", self._on_edit_target)
-            menu.addAction("连通性测试", self._on_connectivity_test_requested)
+            menu.addAction("连通测试", self._on_connectivity_test_requested)
         if self._target_table.selectedIndexes():
             menu.addAction("删除", self._on_delete_target)
         menu.addSeparator()
@@ -1729,6 +1765,9 @@ class _StandaloneClientTab(ClientPanelBase):
     def _build_action_buttons(self, proto_row):
         proto_row.addWidget(QPushButton("保存到集合", clicked=self._save_to_collection))
 
+    def _on_ctrl_s_no_focus(self):
+        self._save_to_collection()
+
     def _on_param_changed(self):
         self._save_config()
 
@@ -1797,17 +1836,6 @@ class _StandaloneClientTab(ClientPanelBase):
         )
         QMessageBox.information(self, "保存完成", f"已保存到集合 [{coll.name}]")
         self.target_saved.emit()
-
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Delete or (event.key() == Qt.Key_D and event.modifiers() == Qt.ControlModifier):
-            self._delete_preset()
-        elif event.key() == Qt.Key_S and event.modifiers() == Qt.ControlModifier:
-            if self._send_edit.hasFocus():
-                self._save_preset()
-            else:
-                self._save_to_collection()
-        else:
-            super().keyPressEvent(event)
 
 # ── 协议测试主面板 ──────────────────────────────────────────
 
@@ -1948,10 +1976,39 @@ class ProtocolPanel(QWidget):
         for tid, (tw, _) in list(self._target_tabs.items()):
             if tw == tab_w:
                 detail = self._target_tabs[tid][1]
+                client = detail._client_panel
+                unsaved = client.has_unsaved_presets() or (
+                    client._selected_preset_idx is None
+                    and client._send_edit.toPlainText().strip()
+                )
+                unsaved = unsaved or client._config_dirty
+                if unsaved:
+                    msg_parts = []
+                    if client._config_dirty:
+                        msg_parts.append("参数修改")
+                    if client.has_unsaved_presets() or (
+                        client._selected_preset_idx is None
+                        and client._send_edit.toPlainText().strip()
+                    ):
+                        msg_parts.append("报文内容")
+                    reply = QMessageBox.question(
+                        self, "未保存的内容",
+                        f"该目标有未保存的{'、'.join(msg_parts)}，关闭后将会丢失。\n是否保存后再关闭？",
+                        QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+                        QMessageBox.No,
+                    )
+                    if reply == QMessageBox.Cancel:
+                        return
+                    if reply == QMessageBox.Yes:
+                        client.save_all_drafts()
+                        if client._config_dirty:
+                            detail._save_params()
                 detail.stop_all_servers()
                 del self._target_tabs[tid]
                 break
         self._tabs.removeTab(idx)
+        # 关闭后切回集合详情
+        self._tabs.setCurrentIndex(0)
 
     def _on_tab_changed(self, idx: int):
         widget = self._tabs.widget(idx)

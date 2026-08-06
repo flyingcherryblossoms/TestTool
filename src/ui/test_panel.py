@@ -250,9 +250,6 @@ class TestPanel(QWidget):
             QMessageBox.information(self, "提示", "有测试正在进行中，请等待完成。")
             return
 
-        if self._target_panel.is_temporary():
-            # 临时列表：先持久化为未分类下的真实目标，保证测试结果可写入历史
-            self._target_panel.persist_temporary_targets()
         targets = self._target_panel.get_targets_by_ids(target_ids)
 
         if not targets:

@@ -245,8 +245,11 @@ class CollectionSidebarBase(QWidget):
 
     def _on_context_menu(self, pos):
         item = self._tree.itemAt(pos)
-        # 右键集合时先选中，保证后续操作默认作用于该集合
+        # 右键集合时：若未多选或点击了未选中的项，则单选该项
         if item is not None and item.data(0, Qt.UserRole) is not None:
+            selected = self._tree.selectedItems()
+            if item not in selected:
+                self._tree.clearSelection()
             self._tree.setCurrentItem(item)
         cid = item.data(0, Qt.UserRole) if item else None
         is_custom = cid is not None and cid != self._uncat_node_id()
