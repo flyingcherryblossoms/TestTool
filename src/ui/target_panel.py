@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMenu,
@@ -29,8 +30,8 @@ from PySide6.QtWidgets import (
 )
 
 from src.csv_handler import export_targets_to_csv, parse_targets_csv
-from src.database import Database
-from src.ui.table_utils import enable_stretch_fill, refresh_tooltips
+from src.database import Database, Target
+from src.ui.table_utils import TargetDragTable, enable_stretch_fill, refresh_tooltips
 from src.excel_handler import (
     export_targets_to_excel,
     parse_targets_excel,
@@ -79,16 +80,20 @@ class TargetDialog(QDialog):
         self._desc_edit.setMinimumWidth(350)
         layout.addRow("描述:", self._desc_edit)
 
-        # 集合选择
+        # 集合选择（"无集合"由"未分类"承担，不单列选项）
         self._batch_combo = QComboBox()
-        self._batch_combo.addItem("(无集合)", None)
+        self._uncat_collection_id = None
         for b in self._db.get_all_collections():
+            if b.name == "未分类":
+                self._uncat_collection_id = b.id
             self._batch_combo.addItem(f"{b.name} ({b.target_count})", b.id)
-        # 预选默认集合
-        if self._default_collection_id is not None:
-            idx = self._batch_combo.findData(self._default_collection_id)
-            if idx >= 0:
-                self._batch_combo.setCurrentIndex(idx)
+        # 预选默认集合：无集合（None/0）一律归入"未分类"
+        default_cid = self._default_collection_id
+        if default_cid in (None, 0):
+            default_cid = self._uncat_collection_id
+        idx = self._batch_combo.findData(default_cid)
+        if idx >= 0:
+            self._batch_combo.setCurrentIndex(idx)
         layout.addRow("所属集合:", self._batch_combo)
 
         # 展开预览
@@ -138,7 +143,11 @@ class TargetDialog(QDialog):
             self._ip_edit.setText(t.ip)
             self._port_edit.setText(str(t.port))
             self._desc_edit.setText(t.description)
-            idx = self._batch_combo.findData(t.collection_id)
+            # 无集合目标（collection_id 为空）展示为"未分类"
+            cid = t.collection_id
+            if cid in (None, 0):
+                cid = self._uncat_collection_id
+            idx = self._batch_combo.findData(cid)
             if idx >= 0:
                 self._batch_combo.setCurrentIndex(idx)
 
@@ -277,6 +286,10 @@ class TargetPanel(QWidget):
         self._db = db
         self._current_collection_id: int | None = None  # None=全部, 0=未分类
         self._all_targets: list = []  # 缓存当前全部目标用于筛选
+        self._temporary_mode = False  # 临时列表（协议测试转来，不入库）
+        self._temporary_targets: list = []
+        self._temp_last_results: dict[int, bool] = {}  # 临时目标 fake_id → 最近是否连通
+        self._temp_real_ids: dict[int, int] = {}  # 临时目标 fake_id → 真实 connect_target id
         self._sort_col: int = -1  # 当前排序列（-1 为按 sort_order）
         self._sort_asc: bool = True
         # 筛选防抖（仅用于文本框输入 + 状态下拉）
@@ -330,7 +343,8 @@ class TargetPanel(QWidget):
         layout.addLayout(top_layout)
 
         # ── 表格 ─────────────────────────────────────────────
-        self._table = QTableWidget()
+        # 支持拖拽目标到左侧集合树归集
+        self._table = TargetDragTable()
         self._table.setColumnCount(4)
         self._table.setHorizontalHeaderLabels([
             "IP 地址", "端口", "描述", "最近状态"
@@ -376,6 +390,12 @@ class TargetPanel(QWidget):
         self._proto_test_btn.clicked.connect(self._on_protocol_test_selected)
         action_layout.addWidget(self._proto_test_btn)
 
+        # 临时列表：显示"保存"按钮，把临时目标存入连通测试集合
+        self._save_temp_btn = QPushButton("保存")
+        self._save_temp_btn.setVisible(False)
+        self._save_temp_btn.clicked.connect(self._save_temporary_to_collection)
+        action_layout.addWidget(self._save_temp_btn)
+
         action_layout.addStretch()
 
         layout.addLayout(action_layout)
@@ -385,11 +405,23 @@ class TargetPanel(QWidget):
     def set_collection(self, collection_id: int | None) -> None:
         """切换到指定集合。None=全部, 0=未分类。"""
         self._current_collection_id = collection_id
+        self._temporary_mode = False
         self.refresh()
 
     def refresh(self) -> None:
         """刷新目标列表（集合切换/增删改时调用，立即执行不防抖）。"""
+        # 临时列表：显示内存中的临时目标，不查库
+        if self._temporary_mode:
+            self._all_targets = self._temporary_targets
+            self._info_label.setText(f"临时列表 ({len(self._all_targets)})")
+            self._save_temp_btn.setVisible(True)
+            self._filter_timer.stop()
+            self._filter_dirty = False
+            self._do_apply_filter()
+            return
+
         self._all_targets = self._db.get_targets(self._current_collection_id)
+        self._save_temp_btn.setVisible(False)
 
         # 更新标题
         if self._current_collection_id is None:
@@ -430,8 +462,15 @@ class TargetPanel(QWidget):
                        or filter_text in t.collection_name.lower()]
 
         # 批量获取最近测试结果（一次查询替代逐条查询）
-        all_ids = [t.id for t in targets]
-        last_results = self._db.get_targets_last_results(all_ids) if all_ids else {}
+        if self._temporary_mode:
+            # 结果按真实 target_id 记录，这里转成以 fake_id 为键的查找表
+            last_results = {}
+            for t in targets:
+                key = self._temp_real_ids.get(t.id, t.id)
+                last_results[t.id] = self._temp_last_results.get(key)
+        else:
+            all_ids = [t.id for t in targets]
+            last_results = self._db.get_targets_last_results(all_ids) if all_ids else {}
 
         # 状态筛选
         if status_val is not None:
@@ -555,6 +594,80 @@ class TargetPanel(QWidget):
                 ids.append(item.data(Qt.UserRole))
         return ids
 
+    # ── 临时列表（协议测试转来，不入库）─────────────────────
+
+    def is_temporary(self) -> bool:
+        return self._temporary_mode
+
+    def load_temporary_targets(self, targets: list[dict]) -> None:
+        """加载临时目标列表（ip/port/description），不写入数据库。"""
+        self._temporary_mode = True
+        self._temporary_targets = []
+        self._temp_last_results = {}
+        self._temp_real_ids = {}
+        for i, t in enumerate(targets):
+            self._temporary_targets.append(Target(
+                id=-(i + 1), ip=str(t["ip"]), port=int(t["port"]),
+                description=t.get("description", ""),
+                collection_id=None, collection_name="", created_at="",
+            ))
+        self.refresh()
+
+    def get_targets_by_ids(self, target_ids: list[int]) -> list:
+        """按 id 获取目标对象；临时模式返回内存对象，否则查库。"""
+        if self._temporary_mode:
+            by_id = {t.id: t for t in self._temporary_targets}
+            return [by_id[tid] for tid in target_ids if tid in by_id]
+        return [t for t in (self._db.get_target(tid) for tid in target_ids) if t]
+
+    def set_temporary_results(self, results: dict) -> None:
+        """记录临时目标最近的连通测试结果（真实 target_id → success）。"""
+        self._temp_last_results = dict(results)
+
+    def _ensure_uncat_collection(self) -> int:
+        """查找或创建连通测试「未分类」集合，返回其 id。"""
+        for c in self._db.get_all_collections():
+            if c.name == "未分类":
+                return c.id
+        return self._db.add_collection("未分类")
+
+    def persist_temporary_targets(self) -> None:
+        """把临时目标持久化为「未分类」下的真实目标（测试前调用，保证结果可写库）。"""
+        if not self._temporary_mode:
+            return
+        uncat_id = self._ensure_uncat_collection()
+        for t in self._temporary_targets:
+            if t.id in self._temp_real_ids:
+                continue  # 已持久化
+            cid = self._db.find_target_id(t.ip, t.port, uncat_id)
+            if cid is None:
+                cid = self._db.add_target(t.ip, t.port, t.description, uncat_id)
+            self._temp_real_ids[t.id] = cid
+
+    def get_real_id(self, fake_id: int) -> int:
+        """临时目标的真实 connect_target id；未持久化时返回原值。"""
+        return self._temp_real_ids.get(fake_id, fake_id)
+
+    def _save_temporary_to_collection(self):
+        """把临时目标保存到连通测试集合（先持久化到未分类，再移动到所选集合）。"""
+        if not self._temporary_targets:
+            return
+        collections = self._db.get_all_collections()
+        if not collections:
+            QMessageBox.information(self, "提示", "请先创建连通测试集合。")
+            return
+        names = [c.name for c in collections]
+        name, ok = QInputDialog.getItem(self, "保存到集合", "选择目标集合:", names, 0, False)
+        if not ok:
+            return
+        coll = collections[names.index(name)]
+        self.persist_temporary_targets()
+        ids = [self._temp_real_ids.get(t.id, t.id) for t in self._temporary_targets]
+        if ids:
+            self._db.move_targets_to_collection(ids, coll.id)
+        QMessageBox.information(self, "保存完成", f"已保存 {len(ids)} 个目标到 [{coll.name}]")
+        self.targets_changed.emit()
+
     def _emit_selection_changed(self):
         """表格选中变化时通知外部（用于控制栏显示选中数量）。"""
         self.selection_changed.emit(self.get_selected_target_ids())
@@ -648,7 +761,9 @@ class TargetPanel(QWidget):
         menu.exec(self._table.viewport().mapToGlobal(pos))
 
     def _add_target(self):
-        dlg = TargetDialog(self._db, collection_id=self._current_collection_id, parent=self)
+        # 临时列表下"添加"的目标默认归入未分类（临时列表本身不入库）
+        target_cid = None if self._temporary_mode else self._current_collection_id
+        dlg = TargetDialog(self._db, collection_id=target_cid, parent=self)
         if dlg.exec() == QDialog.Accepted:
             targets = dlg.target_list
             if targets:
@@ -682,9 +797,15 @@ class TargetPanel(QWidget):
             dlg.setMinimumWidth(300)
             dl = QFormLayout(dlg)
             combo = QComboBox()
-            combo.addItem("(无集合)", None)
+            uncat_id = None
             for c in self._db.get_all_collections():
+                if c.name == "未分类":
+                    uncat_id = c.id
                 combo.addItem(f"{c.name} ({c.target_count})", c.id)
+            # 默认选中"未分类"，无集合即归入未分类
+            idx = combo.findData(uncat_id) if uncat_id is not None else -1
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
             dl.addRow("移动到集合:", combo)
             bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
             bb.accepted.connect(dlg.accept)

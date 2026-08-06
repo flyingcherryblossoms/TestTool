@@ -187,8 +187,18 @@ class TestPanel(QWidget):
         targets = self._db.get_targets(collection_id)
         self._update_collection_label(targets)
 
+    def set_temporary_targets(self, targets: list[dict]) -> None:
+        """加载临时目标列表（协议测试转来，不写入数据库）。"""
+        self._current_collection_id = -1  # 临时列表哨兵
+        self._target_panel.load_temporary_targets(targets)
+        self._collection_label.setText(f"待测目标: 临时列表 ({len(targets)})")
+
     def _update_collection_label(self, targets: list) -> None:
         """更新"待测目标"标签的集合名称和数量。"""
+        if self._target_panel.is_temporary():
+            self._collection_label.setText(
+                f"待测目标: 临时列表 ({len(self._target_panel._temporary_targets)})")
+            return
         if self._current_collection_id is None:
             self._collection_label.setText(f"待测目标: 全部 ({len(targets)})")
         elif self._current_collection_id == 0:
@@ -240,28 +250,32 @@ class TestPanel(QWidget):
             QMessageBox.information(self, "提示", "有测试正在进行中，请等待完成。")
             return
 
-        targets = []
-        for tid in target_ids:
-            t = self._db.get_target(tid)
-            if t:
-                targets.append(t)
+        if self._target_panel.is_temporary():
+            # 临时列表：先持久化为未分类下的真实目标，保证测试结果可写入历史
+            self._target_panel.persist_temporary_targets()
+        targets = self._target_panel.get_targets_by_ids(target_ids)
 
         if not targets:
             QMessageBox.information(self, "提示", "没有找到有效的目标。")
             return
 
         scan_targets = [
-            ScanTarget(id=t.id, ip=t.ip, port=t.port, description=t.description)
+            ScanTarget(id=self._target_panel.get_real_id(t.id), ip=t.ip, port=t.port,
+                       description=t.description)
             for t in targets
         ]
 
-        collection_name = ""
-        if self._current_collection_id is not None and self._current_collection_id > 0:
-            collection = self._db.get_collection(self._current_collection_id)
-            collection_name = collection.name if collection else ""
-        self._session_id = self._db.create_test_session(
-            self._current_collection_id if self._current_collection_id else None, collection_name
-        )
+        if self._target_panel.is_temporary():
+            # 临时列表：不入库目标，会话归属记为空
+            session_cid = None
+            collection_name = "临时列表"
+        else:
+            session_cid = self._current_collection_id if self._current_collection_id else None
+            collection_name = ""
+            if self._current_collection_id is not None and self._current_collection_id > 0:
+                collection = self._db.get_collection(self._current_collection_id)
+                collection_name = collection.name if collection else ""
+        self._session_id = self._db.create_test_session(session_cid, collection_name)
         self._run_test(scan_targets)
 
     def _run_test(self, scan_targets: list[ScanTarget]):
@@ -342,6 +356,10 @@ class TestPanel(QWidget):
             f"测试完成 | 共计 {self._total} | "
             f"连通 {self._success_count} | 未连通 {self._fail_count}"
         )
+        # 临时列表：把最近结果写回内存目标，刷新「最近状态」列
+        if self._target_panel.is_temporary():
+            last = {r.target_id: r.success for r in self._all_results}
+            self._target_panel.set_temporary_results(last)
         # 测试完成后自动刷新目标列表，更新「最近状态」
         self._target_panel.refresh()
         self.test_finished.emit()

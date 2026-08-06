@@ -125,6 +125,10 @@ class MainWindow(QMainWindow):
         # Tab 2: 协议测试
         self._proto_panel = ProtocolPanel(self._db)
         self._proto_panel.test_finished.connect(self._update_statusbar)
+        # 协议测试选中目标 → 连通测试临时列表
+        self._proto_panel.connectivity_test_requested.connect(
+            self._on_connectivity_test_requested
+        )
         self._tabs.addTab(self._proto_panel, "协议测试")
 
         layout.addWidget(self._tabs)
@@ -173,9 +177,26 @@ class MainWindow(QMainWindow):
         self._tabs.setCurrentIndex(1)  # 协议测试
         self._proto_panel.prefill_client_target(ip, port)
 
+    def _on_connectivity_test_requested(self, targets: list):
+        """协议测试选中的目标 → 切到连通测试并加载为临时列表。"""
+        self._tabs.setCurrentIndex(0)  # 连通测试
+        self._conn_panel.load_temporary_targets(targets)
+
     # ── 窗口关闭 ───────────────────────────────────────────
 
     def closeEvent(self, event):
+        # 未保存的预设报文：先提示是否保存
+        if self._proto_panel.has_unsaved_presets():
+            reply = QMessageBox.question(
+                self, "未保存的预设报文",
+                "有预设报文未保存，是否保存？",
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel, QMessageBox.No
+            )
+            if reply == QMessageBox.Cancel:
+                event.ignore()
+                return
+            if reply == QMessageBox.Yes:
+                self._proto_panel.save_unsaved_presets()
         active = self._conn_panel.is_test_running()
         active = active or self._proto_panel.has_active_servers()
         if active:

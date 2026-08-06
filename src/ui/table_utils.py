@@ -5,13 +5,19 @@
 - 列宽可手动拖动调整（Interactive）
 - 内容超出表格宽度时出现横向滚动条，可拖动查看
 - 单元格内容被列宽截断时，鼠标悬停显示完整数据 tooltip
+
+拖拽目标到集合：
+- TargetDragTable 作为目标表格，拖动时把选中目标 ID 写入 TARGETS_MIME。
+- ReorderableTree 作为集合树，接收该 MIME 后发出 targets_dropped(coll_id, ids)。
 """
 
 from __future__ import annotations
 
+import json
 from functools import partial
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QMimeData, Signal
+from PySide6.QtGui import QDrag
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHeaderView,
@@ -20,14 +26,21 @@ from PySide6.QtWidgets import (
 )
 
 
+# 拖动目标到集合时传递目标 ID 的自定义 MIME 类型
+TARGETS_MIME = "application/x-testtool-target-ids"
+
+
 class ReorderableTree(QTreeWidget):
     """支持内部拖拽排序的树 —— 仅允许在相同父节点下调整顺序。
 
     拖拽完成后发出 order_changed 信号，由外部持久化新顺序。
     非集合节点应在填充时去掉 ItemIsDragEnabled/ItemIsDropEnabled 标志。
+    同时接收目标表格拖入的目标：dropEvent 时解析 TARGETS_MIME，
+    发出 targets_dropped(collection_id, target_ids) 信号。
     """
 
     order_changed = Signal()
+    targets_dropped = Signal(int, list)  # collection_id, target_ids
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -35,8 +48,48 @@ class ReorderableTree(QTreeWidget):
         self.setDefaultDropAction(Qt.MoveAction)
         self.setDragEnabled(True)
         self.setDropIndicatorShown(True)
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasFormat(TARGETS_MIME):
+            event.accept()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasFormat(TARGETS_MIME):
+            item = self.itemAt(event.position().toPoint())
+            # 仅允许落在集合节点上（UserRole 存集合 ID）；父节点 UserRole 为 None，不接受
+            if item is not None and item.data(0, Qt.UserRole) is not None:
+                event.accept()
+                return
+            event.ignore()
+            return
+        super().dragMoveEvent(event)
 
     def dropEvent(self, event):
+        if event.mimeData().hasFormat(TARGETS_MIME):
+            item = self.itemAt(event.position().toPoint())
+            if item is None:
+                event.ignore()
+                return
+            coll_id = item.data(0, Qt.UserRole)
+            if coll_id is None:
+                event.ignore()
+                return
+            try:
+                ids = [int(x) for x in
+                       json.loads(bytes(event.mimeData().data(TARGETS_MIME)).decode("utf-8"))]
+            except Exception:
+                event.ignore()
+                return
+            if not ids:
+                event.ignore()
+                return
+            event.setDropAction(Qt.MoveAction)
+            event.accept()
+            self.targets_dropped.emit(coll_id, ids)
+            return
         # 记录被拖拽项及其原父节点，防止被拖出原父节点
         dragged = [(it, it.parent()) for it in self.selectedItems()]
         super().dropEvent(event)
@@ -48,6 +101,32 @@ class ReorderableTree(QTreeWidget):
                     else:
                         self.addTopLevelItem(item)
             self.order_changed.emit()
+
+
+class TargetDragTable(QTableWidget):
+    """可拖动目标行的表格 —— 拖动时把选中目标 ID 写入 TARGETS_MIME，供集合树接收。
+
+    使用约定：目标 ID 存于第 0 列单元格的 Qt.UserRole。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDragEnabled(True)
+        self.setDragDropMode(QAbstractItemView.DragOnly)
+
+    def startDrag(self, supported_actions):
+        ids = []
+        for idx in self.selectionModel().selectedRows(0):
+            item = self.item(idx.row(), 0)
+            if item is not None and item.data(Qt.UserRole) is not None:
+                ids.append(item.data(Qt.UserRole))
+        if not ids:
+            return
+        mime = QMimeData()
+        mime.setData(TARGETS_MIME, json.dumps(ids).encode("utf-8"))
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(Qt.MoveAction)
 
 
 def enable_autofit(table: QTableWidget) -> None:

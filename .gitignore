@@ -11,3 +11,4 @@ dist/
 .vscode/
 .idea/
 *.egg-info/
+package-lock.json

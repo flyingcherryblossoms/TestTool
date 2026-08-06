@@ -414,13 +414,26 @@ class Database:
                     ORDER BY t.sort_order, t.created_at DESC
                 """).fetchall()
             elif collection_id == 0:
-                rows = conn.execute("""
-                    SELECT t.*, b.name AS collection_name
-                    FROM connect_targets t
-                    LEFT JOIN connect_collections b ON t.collection_id = b.id
-                    WHERE t.collection_id IS NULL
-                    ORDER BY t.sort_order, t.created_at DESC
-                """).fetchall()
+                # 未分类：既包含未归属目标（NULL），也包含"未分类"集合内的目标
+                uncat = conn.execute(
+                    "SELECT id FROM connect_collections WHERE name = '未分类' LIMIT 1"
+                ).fetchone()
+                if uncat:
+                    rows = conn.execute("""
+                        SELECT t.*, b.name AS collection_name
+                        FROM connect_targets t
+                        LEFT JOIN connect_collections b ON t.collection_id = b.id
+                        WHERE t.collection_id IS NULL OR t.collection_id = ?
+                        ORDER BY t.sort_order, t.created_at DESC
+                    """, (uncat["id"],)).fetchall()
+                else:
+                    rows = conn.execute("""
+                        SELECT t.*, b.name AS collection_name
+                        FROM connect_targets t
+                        LEFT JOIN connect_collections b ON t.collection_id = b.id
+                        WHERE t.collection_id IS NULL
+                        ORDER BY t.sort_order, t.created_at DESC
+                    """).fetchall()
             else:
                 rows = conn.execute("""
                     SELECT t.*, b.name AS collection_name
@@ -806,6 +819,15 @@ class Database:
                 (to_collection_id, from_collection_id)
             )
             return cur.rowcount
+
+    def move_protocol_target_ids_to_collection(self, target_ids: list[int],
+                                               collection_id: int) -> None:
+        """将指定协议目标移动到集合（用于拖拽归集）。"""
+        with self._connect() as conn:
+            conn.executemany(
+                "UPDATE protocol_targets SET collection_id = ? WHERE id = ?",
+                [(collection_id, tid) for tid in target_ids]
+            )
 
     def delete_protocol_collection(self, collection_id: int) -> None:
         """删除协议测试集合。先移动目标到未分类，再删除集合本身。"""

@@ -16,7 +16,8 @@ from pathlib import Path
 # 确保项目根目录在 Python 路径中
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from PySide6.QtGui import QFont, QIcon
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication
 
 from src.ui.main_window import MainWindow
@@ -36,17 +37,47 @@ def _get_icon_path() -> str:
     return ""
 
 
+def _make_fallback_icon() -> QIcon:
+    """程序绘制的兜底图标：深色圆角方块 + 白色 TT。
+
+    当图标文件缺失或 Qt 无法解码时使用，避免 QPixmap::scaled 空图警告。
+    """
+    try:
+        pixmap = QPixmap(64, 64)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setBrush(QColor("#2c3e50"))
+        painter.setPen(Qt.NoPen)
+        painter.drawRoundedRect(4, 4, 56, 56, 12, 12)
+        painter.setPen(QColor("#ffffff"))
+        painter.setFont(QFont("Arial", 22, QFont.Bold))
+        painter.drawText(pixmap.rect(), Qt.AlignCenter, "TT")
+        painter.end()
+        return QIcon(pixmap)
+    except Exception:
+        return QIcon()
+
+
+def _load_icon() -> QIcon:
+    """加载窗口图标；文件缺失或 Qt 无法解码时返回程序绘制的兜底图标。"""
+    icon_path = _get_icon_path()
+    if icon_path:
+        icon = QIcon(icon_path)
+        if not icon.isNull():
+            return icon
+    return _make_fallback_icon()
+
+
 def run_gui(db_path: str) -> None:
     """启动图形界面。"""
     app = QApplication(sys.argv)
     app.setApplicationName("TestTool")
     app.setOrganizationName("TestTool")
 
-    # 设置窗口图标
-    icon_path = _get_icon_path()
-    if icon_path:
-        icon = QIcon(icon_path)
-        app.setWindowIcon(icon)
+    # 设置窗口图标（无效图标会被兜底替换，避免 QPixmap::scaled 空图警告）
+    icon = _load_icon()
+    app.setWindowIcon(icon)
 
     # 设置全局样式
     app.setStyle("Fusion")
@@ -57,8 +88,7 @@ def run_gui(db_path: str) -> None:
         app.setFont(QFont("Microsoft YaHei UI", 9))
 
     window = MainWindow(db_path)
-    if icon_path:
-        window.setWindowIcon(QIcon(icon_path))
+    window.setWindowIcon(icon)
     window.show()
 
     sys.exit(app.exec())
