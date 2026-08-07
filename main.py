@@ -31,7 +31,7 @@ def _get_icon_path() -> str:
         base = Path(__file__).resolve().parent
     # Windows 优先 ICO，Linux 用 PNG
     for name in ("icon.ico", "icon.png"):
-        icon = base / "src" / name
+        icon = base / "resources" / name
         if icon.exists():
             return str(icon)
     return ""

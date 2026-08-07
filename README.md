@@ -125,8 +125,8 @@ TestTool/
 pip install PySide6 openpyxl xlrd Pillow pyinstaller
 
 pyinstaller --onefile --windowed --name TestTool \
-    --icon=src/icon.ico \
-    --add-data "src/icon.ico;portcheck" \
+    --icon=resources/icon.ico \
+    --add-data "resources/icon.ico;resources" \
     --clean --noconfirm main.py
 ```
 
@@ -137,7 +137,7 @@ sudo apt-get install -y libegl1 libgl1 libopengl0 libxkbcommon0
 pip install PySide6 openpyxl xlrd Pillow pyinstaller
 
 pyinstaller --onefile --windowed --name TestTool \
-    --add-data "src/icon.png:portcheck" \
+    --add-data "resources/icon.png:resources" \
     --clean --noconfirm main.py
 ```
 

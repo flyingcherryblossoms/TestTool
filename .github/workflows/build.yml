@@ -17,34 +17,13 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install PySide6 openpyxl xlrd Pillow websocket-client websockets pyinstaller
-
-      - name: Generate icon
-        shell: python
-        run: |
-          import os; os.makedirs('portcheck', exist_ok=True)
-          from PIL import Image, ImageDraw
-          s=256;m=s/2
-          img=Image.new('RGBA',(s,s),(0,0,0,0))
-          d=ImageDraw.Draw(img)
-          d.rounded_rectangle([0,0,s-1,s-1],radius=s//5,fill='#1a5276')
-          pad=int(s*0.15)
-          d.rounded_rectangle([pad,pad,s-pad,s-pad],radius=s//6,fill='#2980b9')
-          cx,cy,nr=m,m*0.88,int(s*0.07)
-          nodes=[(cx,int(cy-s*0.22)),(int(cx-s*0.2),int(cy+s*0.12)),(int(cx+s*0.2),int(cy+s*0.12))]
-          for i in range(3):
-           for j in range(i+1,3):d.line([nodes[i],nodes[j]],fill='#aed6f1',width=5)
-          for nx,ny in nodes:d.ellipse([nx-nr,ny-nr,nx+nr,ny+nr],fill='#ecf0f1')
-          tx,ty,ts=int(m+s*0.22),int(m+s*0.22),s*0.26
-          p1,p2,p3=(tx-int(ts*0.45),ty-int(ts*0.05)),(tx-int(ts*0.05),ty+int(ts*0.35)),(tx+int(ts*0.5),ty-int(ts*0.3))
-          d.line([p1,p2,p3],fill='#2ecc71',width=10,joint='curve')
-          img.save('portcheck/icon.ico',format='ICO',sizes=[(16,16),(32,32),(48,48),(256,256)])
+        run: pip install PySide6 openpyxl xlrd websocket-client websockets pyinstaller
 
       - name: Build
         run: |
           pyinstaller --onefile --windowed --name TestTool `
-            --icon=portcheck/icon.ico `
-            --add-data "portcheck/icon.ico;portcheck" `
+            --icon=resources/icon.ico `
+            --add-data "resources/icon.ico;resources" `
             --clean --noconfirm main.py
 
       - name: Package
@@ -79,33 +58,12 @@ jobs:
           sudo apt-get install -y -qq libegl1 libgl1 libopengl0 libxkbcommon0
 
       - name: Install Python deps
-        run: pip install PySide6 openpyxl xlrd Pillow websocket-client websockets pyinstaller
-
-      - name: Generate icon
-        shell: python
-        run: |
-          import os; os.makedirs('portcheck', exist_ok=True)
-          from PIL import Image, ImageDraw
-          s=256;m=s/2
-          img=Image.new('RGBA',(s,s),(0,0,0,0))
-          d=ImageDraw.Draw(img)
-          d.rounded_rectangle([0,0,s-1,s-1],radius=s//5,fill='#1a5276')
-          pad=int(s*0.15)
-          d.rounded_rectangle([pad,pad,s-pad,s-pad],radius=s//6,fill='#2980b9')
-          cx,cy,nr=m,m*0.88,int(s*0.07)
-          nodes=[(cx,int(cy-s*0.22)),(int(cx-s*0.2),int(cy+s*0.12)),(int(cx+s*0.2),int(cy+s*0.12))]
-          for i in range(3):
-           for j in range(i+1,3):d.line([nodes[i],nodes[j]],fill='#aed6f1',width=5)
-          for nx,ny in nodes:d.ellipse([nx-nr,ny-nr,nx+nr,ny+nr],fill='#ecf0f1')
-          tx,ty,ts=int(m+s*0.22),int(m+s*0.22),s*0.26
-          p1,p2,p3=(tx-int(ts*0.45),ty-int(ts*0.05)),(tx-int(ts*0.05),ty+int(ts*0.35)),(tx+int(ts*0.5),ty-int(ts*0.3))
-          d.line([p1,p2,p3],fill='#2ecc71',width=10,joint='curve')
-          img.save('portcheck/icon.png')
+        run: pip install PySide6 openpyxl xlrd websocket-client websockets pyinstaller
 
       - name: Build
         run: |
           pyinstaller --onefile --windowed --name TestTool \
-            --add-data "portcheck/icon.png:portcheck" \
+            --add-data "resources/icon.png:resources" \
             --clean --noconfirm main.py
 
       - name: Package
@@ -143,35 +101,13 @@ jobs:
           python3.8 /tmp/get-pip.py -q
 
       - name: Install Python deps
-        run: python3.8 -m pip install PySide6 openpyxl xlrd Pillow websocket-client websockets pyinstaller
-
-      - name: Generate icon
-        run: |
-          python3.8 -c "
-          import os; os.makedirs('portcheck', exist_ok=True)
-          from PIL import Image, ImageDraw
-          s=256;m=s/2
-          img=Image.new('RGBA',(s,s),(0,0,0,0))
-          d=ImageDraw.Draw(img)
-          d.rounded_rectangle([0,0,s-1,s-1],radius=s//5,fill='#1a5276')
-          pad=int(s*0.15)
-          d.rounded_rectangle([pad,pad,s-pad,s-pad],radius=s//6,fill='#2980b9')
-          cx,cy,nr=m,m*0.88,int(s*0.07)
-          nodes=[(cx,int(cy-s*0.22)),(int(cx-s*0.2),int(cy+s*0.12)),(int(cx+s*0.2),int(cy+s*0.12))]
-          for i in range(3):
-           for j in range(i+1,3):d.line([nodes[i],nodes[j]],fill='#aed6f1',width=5)
-          for nx,ny in nodes:d.ellipse([nx-nr,ny-nr,nx+nr,ny+nr],fill='#ecf0f1')
-          tx,ty,ts=int(m+s*0.22),int(m+s*0.22),s*0.26
-          p1,p2,p3=(tx-int(ts*0.45),ty-int(ts*0.05)),(tx-int(ts*0.05),ty+int(ts*0.35)),(tx+int(ts*0.5),ty-int(ts*0.3))
-          d.line([p1,p2,p3],fill='#2ecc71',width=10,joint='curve')
-          img.save('portcheck/icon.png')
-          "
+        run: python3.8 -m pip install PySide6 openpyxl xlrd websocket-client websockets pyinstaller
 
       - name: Build
         run: |
           QT_PLUGINS=$(python3.8 -c "import PySide6,os;print(os.path.join(os.path.dirname(PySide6.__file__),'Qt','plugins'))")
           python3.8 -m PyInstaller --onefile --name TestTool \
-            --add-data "portcheck/icon.png:portcheck" \
+            --add-data "resources/icon.png:resources" \
             --add-data "${QT_PLUGINS}/platforms:PySide6/Qt/plugins/platforms" \
             --clean --noconfirm main.py
 
@@ -205,33 +141,12 @@ jobs:
           sudo apt-get install -y -qq libegl1 libgl1 libopengl0 libxkbcommon0
 
       - name: Install Python deps
-        run: pip install PySide6 openpyxl xlrd Pillow websocket-client websockets pyinstaller
-
-      - name: Generate icon
-        shell: python
-        run: |
-          import os; os.makedirs('portcheck', exist_ok=True)
-          from PIL import Image, ImageDraw
-          s=256;m=s/2
-          img=Image.new('RGBA',(s,s),(0,0,0,0))
-          d=ImageDraw.Draw(img)
-          d.rounded_rectangle([0,0,s-1,s-1],radius=s//5,fill='#1a5276')
-          pad=int(s*0.15)
-          d.rounded_rectangle([pad,pad,s-pad,s-pad],radius=s//6,fill='#2980b9')
-          cx,cy,nr=m,m*0.88,int(s*0.07)
-          nodes=[(cx,int(cy-s*0.22)),(int(cx-s*0.2),int(cy+s*0.12)),(int(cx+s*0.2),int(cy+s*0.12))]
-          for i in range(3):
-           for j in range(i+1,3):d.line([nodes[i],nodes[j]],fill='#aed6f1',width=5)
-          for nx,ny in nodes:d.ellipse([nx-nr,ny-nr,nx+nr,ny+nr],fill='#ecf0f1')
-          tx,ty,ts=int(m+s*0.22),int(m+s*0.22),s*0.26
-          p1,p2,p3=(tx-int(ts*0.45),ty-int(ts*0.05)),(tx-int(ts*0.05),ty+int(ts*0.35)),(tx+int(ts*0.5),ty-int(ts*0.3))
-          d.line([p1,p2,p3],fill='#2ecc71',width=10,joint='curve')
-          img.save('portcheck/icon.png')
+        run: pip install PySide6 openpyxl xlrd websocket-client websockets pyinstaller
 
       - name: Build
         run: |
           pyinstaller --onefile --windowed --name TestTool \
-            --add-data "portcheck/icon.png:portcheck" \
+            --add-data "resources/icon.png:resources" \
             --clean --noconfirm main.py
 
       - name: Package
@@ -269,35 +184,13 @@ jobs:
           python3.8 /tmp/get-pip.py -q
 
       - name: Install Python deps
-        run: python3.8 -m pip install PySide6 openpyxl xlrd Pillow websocket-client websockets pyinstaller
-
-      - name: Generate icon
-        run: |
-          python3.8 -c "
-          import os; os.makedirs('portcheck', exist_ok=True)
-          from PIL import Image, ImageDraw
-          s=256;m=s/2
-          img=Image.new('RGBA',(s,s),(0,0,0,0))
-          d=ImageDraw.Draw(img)
-          d.rounded_rectangle([0,0,s-1,s-1],radius=s//5,fill='#1a5276')
-          pad=int(s*0.15)
-          d.rounded_rectangle([pad,pad,s-pad,s-pad],radius=s//6,fill='#2980b9')
-          cx,cy,nr=m,m*0.88,int(s*0.07)
-          nodes=[(cx,int(cy-s*0.22)),(int(cx-s*0.2),int(cy+s*0.12)),(int(cx+s*0.2),int(cy+s*0.12))]
-          for i in range(3):
-           for j in range(i+1,3):d.line([nodes[i],nodes[j]],fill='#aed6f1',width=5)
-          for nx,ny in nodes:d.ellipse([nx-nr,ny-nr,nx+nr,ny+nr],fill='#ecf0f1')
-          tx,ty,ts=int(m+s*0.22),int(m+s*0.22),s*0.26
-          p1,p2,p3=(tx-int(ts*0.45),ty-int(ts*0.05)),(tx-int(ts*0.05),ty+int(ts*0.35)),(tx+int(ts*0.5),ty-int(ts*0.3))
-          d.line([p1,p2,p3],fill='#2ecc71',width=10,joint='curve')
-          img.save('portcheck/icon.png')
-          "
+        run: python3.8 -m pip install PySide6 openpyxl xlrd websocket-client websockets pyinstaller
 
       - name: Build
         run: |
           QT_PLUGINS=$(python3.8 -c "import PySide6,os;print(os.path.join(os.path.dirname(PySide6.__file__),'Qt','plugins'))")
           python3.8 -m PyInstaller --onefile --name TestTool \
-            --add-data "portcheck/icon.png:portcheck" \
+            --add-data "resources/icon.png:resources" \
             --add-data "${QT_PLUGINS}/platforms:PySide6/Qt/plugins/platforms" \
             --clean --noconfirm main.py
 
@@ -326,33 +219,12 @@ jobs:
           python-version: "3.12"
 
       - name: Install Python deps
-        run: pip install PySide6 openpyxl xlrd Pillow websocket-client websockets pyinstaller
-
-      - name: Generate icon
-        shell: python
-        run: |
-          import os; os.makedirs('portcheck', exist_ok=True)
-          from PIL import Image, ImageDraw
-          s=256;m=s/2
-          img=Image.new('RGBA',(s,s),(0,0,0,0))
-          d=ImageDraw.Draw(img)
-          d.rounded_rectangle([0,0,s-1,s-1],radius=s//5,fill='#1a5276')
-          pad=int(s*0.15)
-          d.rounded_rectangle([pad,pad,s-pad,s-pad],radius=s//6,fill='#2980b9')
-          cx,cy,nr=m,m*0.88,int(s*0.07)
-          nodes=[(cx,int(cy-s*0.22)),(int(cx-s*0.2),int(cy+s*0.12)),(int(cx+s*0.2),int(cy+s*0.12))]
-          for i in range(3):
-           for j in range(i+1,3):d.line([nodes[i],nodes[j]],fill='#aed6f1',width=5)
-          for nx,ny in nodes:d.ellipse([nx-nr,ny-nr,nx+nr,ny+nr],fill='#ecf0f1')
-          tx,ty,ts=int(m+s*0.22),int(m+s*0.22),s*0.26
-          p1,p2,p3=(tx-int(ts*0.45),ty-int(ts*0.05)),(tx-int(ts*0.05),ty+int(ts*0.35)),(tx+int(ts*0.5),ty-int(ts*0.3))
-          d.line([p1,p2,p3],fill='#2ecc71',width=10,joint='curve')
-          img.save('portcheck/icon.png')
+        run: pip install PySide6 openpyxl xlrd websocket-client websockets pyinstaller
 
       - name: Build
         run: |
           pyinstaller --onefile --windowed --name TestTool \
-            --add-data "portcheck/icon.png:portcheck" \
+            --add-data "resources/icon.png:resources" \
             --clean --noconfirm main.py
 
       - name: Package
