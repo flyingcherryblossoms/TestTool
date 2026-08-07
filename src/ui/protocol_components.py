@@ -54,12 +54,21 @@ from src.database import Database
 from src.protocol import compute_length_header
 from src.scanner import ScanTarget, ScannerWorker
 from src.ui.protocol_workers import (
+    StressTestWorker,
     TcpClientWorker,
     TcpServerWorker,
     WsClientWorker,
     WsServerWorker,
 )
-from src.ui.table_utils import enable_stretch_fill, refresh_tooltips
+from src.ui.clipboard import (
+    KIND_PRESET,
+    KIND_PROTO_SERVER,
+    copy_items,
+    paste_items,
+)
+from src.ui.format_text import FormatTextEdit
+from src.ui.message_format import format_payload
+from src.ui.table_utils import enable_stretch_fill, refresh_tooltips, unique_copy_name
 
 
 ENCODINGS = ["UTF-8", "GBK", "GB2312", "GB18030", "ISO-8859-1", "ASCII"]
@@ -131,11 +140,18 @@ class ServerDialog(QDialog):
             self._response_mode_combo.setCurrentIndex(1)
         self._response_mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         layout.addRow("响应模式:", self._response_mode_combo)
-        self._response_edit = QPlainTextEdit()
+        self._delay_spin = QSpinBox()
+        self._delay_spin.setRange(0, 600000)
+        self._delay_spin.setSuffix(" ms")
+        self._delay_spin.setToolTip("响应延迟（毫秒），0 表示不延迟。")
+        self._delay_spin.setValue(server.get("response_delay", 0) if server else 0)
+        layout.addRow("响应延迟:", self._delay_spin)
+        self._response_edit = FormatTextEdit()
         self._response_edit.setPlaceholderText("输入固定响应内容...")
         self._response_edit.setMaximumHeight(120)
         if server:
             self._response_edit.setPlainText(server.get("response_message", ""))
+        layout.addRow("内容格式:", self._response_edit.format_combo)
         layout.addRow("响应内容:", self._response_edit)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -161,6 +177,7 @@ class ServerDialog(QDialog):
             "port": self._port_spin.value(),
             "response_mode": self._response_mode_combo.currentData(),
             "response_message": self._response_edit.toPlainText(),
+            "response_delay": self._delay_spin.value(),
         }
         if self._is_tcp:
             data["encoding"] = self._encoding_combo.currentText()
@@ -201,6 +218,8 @@ class ClientPanelBase(QWidget):
         self._db = db
         self._client_worker: TcpClientWorker | WsClientWorker | None = None
         self._conn_worker: ScannerWorker | None = None
+        self._stress_worker: StressTestWorker | None = None
+        self._loading_stress = False
         self._selected_preset_idx: int | None = None
         self._drafts: dict[int, str] = {}  # 每个预设独立的未保存草稿（索引 → 内容）
         self._dirty: set[int] = set()      # 有未保存修改的预设索引
@@ -253,6 +272,15 @@ class ClientPanelBase(QWidget):
 
     def _params_area_max_height(self):
         return None
+
+    # ── 压测参数持久化钩子 ──────────────────────────────────
+
+    def _load_stress_from_store(self) -> dict:
+        """从存储加载压测参数（子类实现）。"""
+        return {}
+
+    def _save_stress_to_store(self, sp: dict):
+        """压测参数变更时持久化（子类实现）。"""
 
     # ── UI ───────────────────────────────────────────────────
 
@@ -326,8 +354,8 @@ class ClientPanelBase(QWidget):
         self._preset_selected_label.setWordWrap(True)
         pl.addWidget(self._preset_selected_label)
         pbl = QGridLayout()
-        buttons = [("添加", self._add_preset), ("删除", self._delete_preset),
-                   ("清空", self._clear_presets)]
+        buttons = [("添加", self._add_preset), ("复制", self._copy_preset),
+                   ("删除", self._delete_preset), ("清空", self._clear_presets)]
         for i, (btn_text, slot) in enumerate(buttons):
             pbl.addWidget(QPushButton(btn_text, clicked=slot), i // 3, i % 3)
         pl.addLayout(pbl)
@@ -339,9 +367,11 @@ class ClientPanelBase(QWidget):
         self._send_group = QGroupBox("发送报文")
         self._send_group.setMinimumHeight(160)
         sl = QVBoxLayout(self._send_group)
-        self._send_edit = QPlainTextEdit()
+        self._send_edit = FormatTextEdit()
         self._send_edit.setPlaceholderText("输入要发送的报文...")
         self._send_edit.textChanged.connect(self._mark_msg_dirty)
+        self._send_edit.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._send_edit.customContextMenuRequested.connect(self._on_send_edit_menu)
         if self._show_len_label:
             self._send_edit.textChanged.connect(self._update_len_label)
             self._len_label = QLabel("报文长度: 0 字节")
@@ -355,6 +385,9 @@ class ClientPanelBase(QWidget):
         self._param_enc.setMaximumWidth(85)
         self._param_enc.currentTextChanged.connect(self._on_param_changed)
         sh.addWidget(self._param_enc)
+        sh.addWidget(QLabel("格式:"))
+        self._send_edit.format_combo.setMaximumWidth(80)
+        sh.addWidget(self._send_edit.format_combo)
         self._send_btn = QPushButton("发送")
         self._send_btn.setMinimumWidth(80)
         self._send_btn.clicked.connect(self._send_message)
@@ -365,12 +398,104 @@ class ClientPanelBase(QWidget):
         sh.addWidget(self._terminate_btn)
         sh.addWidget(QPushButton("保存", clicked=self._save_preset))
         sh.addWidget(QPushButton("清空", clicked=self._send_edit.clear))
+        sh.addWidget(QPushButton("格式化", clicked=self._format_message))
         # 连通性测试：直接检测当前 IP:端口并显示结果，不跳转页面
         conn_btn = QPushButton("连通测试", clicked=self._run_connectivity_test)
         conn_btn.setStyleSheet("background-color: #3498db; color: white; font-weight: bold;")
         sh.addWidget(conn_btn)
+        # 压力测试：点击展开/收起下方隐藏的压测参数区
+        self._stress_toggle_btn = QPushButton("压力测试")
+        self._stress_toggle_btn.setCheckable(True)
+        self._stress_toggle_btn.setStyleSheet(
+            "background-color: #e74c3c; color: white; font-weight: bold;")
+        self._stress_toggle_btn.toggled.connect(self._toggle_stress_area)
+        sh.addWidget(self._stress_toggle_btn)
         sh.addStretch()
         sl.addLayout(sh)
+
+        # ── 压测参数区（隐藏，点击"压力测试"展开）──
+        self._stress_area = QWidget()
+        st_l = QVBoxLayout(self._stress_area)
+        st_l.setContentsMargins(0, 0, 0, 0)
+        st_l.setSpacing(4)
+        core_l = QHBoxLayout()
+        core_l.addWidget(QLabel("并发数:"))
+        self._stress_conc = QSpinBox()
+        self._stress_conc.setRange(1, 10000)
+        self._stress_conc.setValue(10)
+        self._stress_conc.setToolTip("同时发起请求的虚拟用户/线程数")
+        core_l.addWidget(self._stress_conc)
+        core_l.addWidget(QLabel("总请求数:"))
+        self._stress_total = QSpinBox()
+        self._stress_total.setRange(1, 10 ** 9)
+        self._stress_total.setValue(100)
+        self._stress_total.setToolTip("总共要发送的请求总数")
+        core_l.addWidget(self._stress_total)
+        core_l.addWidget(QLabel("QPS限制:"))
+        self._stress_qps = QSpinBox()
+        self._stress_qps.setRange(0, 100000)
+        self._stress_qps.setValue(0)
+        self._stress_qps.setSpecialValueText("不限")
+        self._stress_qps.setToolTip("限制每秒最大请求数，0 = 不限")
+        core_l.addWidget(self._stress_qps)
+        core_l.addStretch()
+        st_l.addLayout(core_l)
+        adv_l = QHBoxLayout()
+        adv_l.addWidget(QLabel("压测时长:"))
+        self._stress_dur = QSpinBox()
+        self._stress_dur.setRange(0, 86400)
+        self._stress_dur.setValue(0)
+        self._stress_dur.setSuffix("s")
+        self._stress_dur.setSpecialValueText("不限")
+        self._stress_dur.setToolTip("运行多少秒后自动停止，0 = 不限")
+        adv_l.addWidget(self._stress_dur)
+        adv_l.addWidget(QLabel("预热:"))
+        self._stress_warm = QSpinBox()
+        self._stress_warm.setRange(0, 3600)
+        self._stress_warm.setValue(0)
+        self._stress_warm.setSuffix("s")
+        self._stress_warm.setToolTip("逐步增加并发数到目标值的时间")
+        adv_l.addWidget(self._stress_warm)
+        adv_l.addWidget(QLabel("超时:"))
+        self._stress_to = QDoubleSpinBox()
+        self._stress_to.setRange(0.1, 60)
+        self._stress_to.setValue(5.0)
+        self._stress_to.setSingleStep(0.5)
+        self._stress_to.setSuffix("s")
+        self._stress_to.setToolTip("单个请求超时时间")
+        adv_l.addWidget(self._stress_to)
+        adv_l.addWidget(QLabel("递增步长:"))
+        self._stress_ramp = QSpinBox()
+        self._stress_ramp.setRange(0, 10000)
+        self._stress_ramp.setValue(0)
+        self._stress_ramp.setToolTip("预热期每批增加的并发数，0 = 一次性全部启动")
+        adv_l.addWidget(self._stress_ramp)
+        adv_l.addStretch()
+        st_l.addLayout(adv_l)
+        run_l = QHBoxLayout()
+        self._stress_btn_run = QPushButton("开始压测")
+        self._stress_btn_run.setStyleSheet(
+            "background-color: #e67e22; color: white; font-weight: bold;")
+        self._stress_btn_run.clicked.connect(self._start_stress_test)
+        run_l.addWidget(self._stress_btn_run)
+        self._stress_btn_stop = QPushButton("停止")
+        self._stress_btn_stop.setVisible(False)
+        self._stress_btn_stop.clicked.connect(self._stop_stress_test)
+        run_l.addWidget(self._stress_btn_stop)
+        self._stress_btn_reset = QPushButton("重置默认参数")
+        self._stress_btn_reset.clicked.connect(self._reset_stress_params)
+        run_l.addWidget(self._stress_btn_reset)
+        self._stress_result = QLabel("就绪")
+        run_l.addWidget(self._stress_result)
+        run_l.addStretch()
+        st_l.addLayout(run_l)
+        self._stress_area.setVisible(False)
+        sl.addWidget(self._stress_area)
+        # 压测参数变更 → 持久化（子类实现保存逻辑）
+        for w in (self._stress_conc, self._stress_total, self._stress_qps,
+                  self._stress_dur, self._stress_warm, self._stress_to,
+                  self._stress_ramp):
+            w.valueChanged.connect(self._on_stress_param_changed)
         right_splitter.addWidget(self._send_group)
 
         resp_g = QGroupBox("响应报文")
@@ -479,6 +604,30 @@ class ClientPanelBase(QWidget):
         )
         self._send_group.setTitle("发送报文" + (" *" if dirty else ""))
 
+    # ── 报文格式化 ───────────────────────────────────────────
+
+    def _format_message(self):
+        """按所选格式把发送框内容格式化（text 不处理，json / xml 缩进排版）。"""
+        text = self._send_edit.toPlainText()
+        formatted, err = format_payload(text, self._send_edit.current_format())
+        if err:
+            QMessageBox.warning(self, "格式化", err)
+            return
+        if formatted != text:
+            self._send_edit.setPlainText(formatted)
+
+    def _build_send_edit_menu(self, pos) -> QMenu:
+        """构建发送框右键菜单：标准编辑菜单 + 「格式化」动作。"""
+        menu = self._send_edit.createStandardContextMenu(pos)
+        menu.addSeparator()
+        menu.addAction("格式化", self._format_message)
+        return menu
+
+    def _on_send_edit_menu(self, pos):
+        """发送框右键菜单入口：弹出 _build_send_edit_menu 构建的菜单。"""
+        menu = self._build_send_edit_menu(pos)
+        menu.exec(self._send_edit.viewport().mapToGlobal(pos))
+
     def _current_is_dirty(self) -> bool:
         idx = self._selected_preset_idx
         return idx is not None and idx in self._dirty
@@ -564,6 +713,7 @@ class ClientPanelBase(QWidget):
         menu.addAction("添加", self._add_preset)
         if item:
             menu.addAction("保存", self._save_preset)
+            menu.addAction("复制", self._copy_preset)
             menu.addAction("重命名", self._edit_preset)
             menu.addAction("删除", self._delete_preset)
             menu.addSeparator()
@@ -598,13 +748,16 @@ class ClientPanelBase(QWidget):
         if any(p.get("name", "") == name for p in presets):
             QMessageBox.warning(self, "名称重复", f"预设「{name}」已存在，请使用其他名称。")
             return
-        presets.append({"name": name, "message": self._send_edit.toPlainText()})
+        # 新预设报文内容为空：清空发送框后直接开始编辑
+        presets.append({"name": name, "message": ""})
         self._selected_preset_idx = len(presets) - 1
         self._drafts.pop(self._selected_preset_idx, None)
         self._dirty.discard(self._selected_preset_idx)
         self.save_presets(presets)
         self.presets_saved.emit()
         self._refresh_preset_list()
+        # 新建后自动选中新预设（_refresh_preset_list 已设置），并清空发送框
+        self._send_edit.clear()
         self._msg_dirty = False
         self._update_send_label()
 
@@ -616,15 +769,7 @@ class ClientPanelBase(QWidget):
         presets = list(self.get_presets())
 
         if self._selected_preset_idx is not None and self._selected_preset_idx < len(presets):
-            old_msg = presets[self._selected_preset_idx].get("message", "")
-            if old_msg and old_msg != new_msg:
-                reply = QMessageBox.question(
-                    self, "确认覆盖",
-                    f"预设「{presets[self._selected_preset_idx]['name']}」已有内容，是否覆盖？",
-                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No
-                )
-                if reply != QMessageBox.Yes:
-                    return
+            # 直接覆盖当前选中预设，不再弹确认框
             presets[self._selected_preset_idx]["message"] = new_msg
         elif presets:
             # 未选中预设：弹窗选择覆盖或新建（双击列表项可直接确认）
@@ -661,16 +806,8 @@ class ClientPanelBase(QWidget):
                 presets.append({"name": name, "message": new_msg})
                 self._selected_preset_idx = len(presets) - 1
             else:
+                # 直接覆盖所选预设，不再弹确认框
                 idx = sel - 1
-                old_msg = presets[idx].get("message", "")
-                if old_msg and old_msg != new_msg:
-                    reply = QMessageBox.question(
-                        self, "确认覆盖",
-                        f"预设「{presets[idx]['name']}」已有内容，是否覆盖？",
-                        QMessageBox.Yes | QMessageBox.No, QMessageBox.No
-                    )
-                    if reply != QMessageBox.Yes:
-                        return
                 presets[idx]["message"] = new_msg
                 self._selected_preset_idx = idx
         else:
@@ -715,6 +852,78 @@ class ClientPanelBase(QWidget):
         self.presets_saved.emit()
         self._refresh_preset_list()
         self._msg_dirty = False
+        self._update_send_label()
+
+    def _copy_preset(self):
+        """复制选中的预设报文，名称自动追加"副本"。"""
+        if not self._can_edit_presets():
+            return
+        items = self._preset_list.selectedItems()
+        if not items:
+            return
+        presets = list(self.get_presets())
+        existing = {p.get("name", "") for p in presets}
+        added_idxs = []
+        for it in sorted(items, key=lambda x: x.data(Qt.UserRole) or -1):
+            idx = it.data(Qt.UserRole)
+            if idx is None or idx >= len(presets):
+                continue
+            src = presets[idx]
+            new_name = unique_copy_name(src.get("name", ""), existing)
+            presets.append({"name": new_name, "message": src.get("message", "")})
+            existing.add(new_name)
+            added_idxs.append(len(presets) - 1)
+        if not added_idxs:
+            return
+        self.save_presets(presets)
+        self.presets_saved.emit()
+        self._selected_preset_idx = added_idxs[0]
+        self._drafts.pop(self._selected_preset_idx, None)
+        self._dirty.discard(self._selected_preset_idx)
+        self._refresh_preset_list()
+        self._msg_dirty = self._current_is_dirty()
+        self._update_send_label()
+
+    def _copy_preset_to_clip(self):
+        """Ctrl+C：把选中的预设报文复制到应用内剪贴板。"""
+        items = self._preset_list.selectedItems()
+        if not items:
+            return
+        presets = self.get_presets()
+        payload = []
+        for it in sorted(items, key=lambda x: x.data(Qt.UserRole) or -1):
+            idx = it.data(Qt.UserRole)
+            if idx is None or idx >= len(presets):
+                continue
+            p = presets[idx]
+            payload.append({"name": p.get("name", ""), "message": p.get("message", "")})
+        if payload:
+            copy_items(KIND_PRESET, payload)
+
+    def _paste_preset_from_clip(self):
+        """Ctrl+V：把剪贴板中的预设报文粘贴到当前列表，名称追加"副本"。"""
+        payload = paste_items(KIND_PRESET)
+        if not payload:
+            QMessageBox.information(self, "提示", "剪贴板中没有可粘贴的预设报文。")
+            return
+        if not self._can_edit_presets():
+            return
+        presets = list(self.get_presets())
+        existing = {p.get("name", "") for p in presets}
+        added_idxs = []
+        for p in payload:
+            new_name = unique_copy_name(p.get("name", ""), existing)
+            presets.append({"name": new_name, "message": p.get("message", "")})
+            existing.add(new_name)
+            added_idxs.append(len(presets) - 1)
+        self.save_presets(presets)
+        self.presets_saved.emit()
+        self._selected_preset_idx = added_idxs[0] if added_idxs else None
+        if self._selected_preset_idx is not None:
+            self._drafts.pop(self._selected_preset_idx, None)
+            self._dirty.discard(self._selected_preset_idx)
+        self._refresh_preset_list()
+        self._msg_dirty = self._current_is_dirty()
         self._update_send_label()
 
     def _delete_preset(self):
@@ -807,6 +1016,106 @@ class ClientPanelBase(QWidget):
             QMessageBox.warning(
                 self, "连通性测试", f"{r.ip}:{r.port} 未连通: {r.error_msg}")
 
+    # ── 压测参数区 ─────────────────────────────────────────
+
+    def _toggle_stress_area(self, checked: bool):
+        """点击"压力测试"按钮展开/收起压测参数区。"""
+        self._stress_area.setVisible(checked)
+        if checked:
+            self._apply_stress_params(self._load_stress_from_store())
+
+    def _apply_stress_params(self, sp: dict):
+        """把压测参数字典应用到控件（不触发保存/脏标记）。"""
+        self._loading_stress = True
+        try:
+            self._stress_conc.setValue(int(sp.get("concurrency", 10)))
+            self._stress_total.setValue(int(sp.get("total_requests", 100)))
+            self._stress_qps.setValue(int(sp.get("qps_limit", 0)))
+            self._stress_dur.setValue(int(sp.get("duration", 0)))
+            self._stress_warm.setValue(int(sp.get("warmup", 0)))
+            self._stress_to.setValue(float(sp.get("timeout", 5.0)))
+            self._stress_ramp.setValue(int(sp.get("ramp_step", 0)))
+        finally:
+            self._loading_stress = False
+
+    def collect_stress_params(self) -> dict:
+        """汇总当前压测参数。"""
+        return {
+            "concurrency": self._stress_conc.value(),
+            "total_requests": self._stress_total.value(),
+            "qps_limit": self._stress_qps.value(),
+            "duration": self._stress_dur.value(),
+            "warmup": self._stress_warm.value(),
+            "timeout": self._stress_to.value(),
+            "ramp_step": self._stress_ramp.value(),
+        }
+
+    def _on_stress_param_changed(self):
+        if self._loading_stress:
+            return
+        self._save_stress_to_store(self.collect_stress_params())
+
+    def _reset_stress_params(self):
+        """把压测参数重置为默认值并持久化。"""
+        self._apply_stress_params({})
+        self._save_stress_to_store(self.collect_stress_params())
+
+    # ── 压测执行 ───────────────────────────────────────────
+
+    def _start_stress_test(self):
+        if self._stress_worker and self._stress_worker.isRunning():
+            return
+        if not self._can_send():
+            return
+        msg = self._send_edit.toPlainText()
+        if not msg:
+            QMessageBox.information(self, "提示", "请输入要发送的报文。")
+            return
+        ip = self._param_ip.text().strip()
+        if not ip:
+            QMessageBox.information(self, "提示", "IP 地址为空。")
+            return
+        proto = self._proto_combo.currentData()
+        self._stress_worker = StressTestWorker(
+            proto=proto, ip=ip, port=self._param_port.value(),
+            message=msg, encoding=self._param_enc.currentText(),
+            head_len=self._param_hl.value(), timeout=self._param_timeout.value(),
+            ws_url=self._param_ws_url.text().strip(),
+            concurrency=self._stress_conc.value(),
+            total_requests=self._stress_total.value(),
+            qps_limit=self._stress_qps.value(),
+            duration=self._stress_dur.value(),
+            warmup=self._stress_warm.value(),
+            ramp_step=self._stress_ramp.value(),
+            parent=self,
+        )
+        self._stress_worker.progress.connect(self._on_stress_progress)
+        self._stress_worker.finished.connect(self._on_stress_finished)
+        self._stress_btn_run.setEnabled(False)
+        self._stress_btn_run.setText("压测中...")
+        self._stress_btn_stop.setVisible(True)
+        self._stress_result.setText("压测进行中...")
+        self._stress_worker.start()
+
+    def _stop_stress_test(self):
+        if self._stress_worker and self._stress_worker.isRunning():
+            self._stress_worker.stop()
+            self._stress_result.setText("正在停止...")
+
+    def _on_stress_progress(self, done: int, success: int, fail: int):
+        self._stress_result.setText(
+            f"已完成 {done}/{self._stress_total.value()} · 成功 {success} · 失败 {fail}")
+
+    def _on_stress_finished(self, done: int, success: int, fail: int, elapsed: float):
+        self._stress_worker = None
+        self._stress_btn_run.setEnabled(True)
+        self._stress_btn_run.setText("开始压测")
+        self._stress_btn_stop.setVisible(False)
+        qps = (done / elapsed) if elapsed > 0 else 0.0
+        self._stress_result.setText(
+            f"压测完成: 共 {done} 次 · 成功 {success} · 失败 {fail}"
+            f" · 耗时 {elapsed:.1f}s · {qps:.1f} QPS")
+
     def _send_message(self):
         if not self._can_send():
             return
@@ -896,7 +1205,13 @@ class ClientPanelBase(QWidget):
             self._resp_edit.appendPlainText(text)
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_F5:
+        if event.key() == Qt.Key_C and event.modifiers() == Qt.ControlModifier:
+            self._copy_preset_to_clip()
+        elif event.key() == Qt.Key_V and event.modifiers() == Qt.ControlModifier:
+            self._paste_preset_from_clip()
+        elif event.key() == Qt.Key_F2:
+            self._edit_preset()
+        elif event.key() == Qt.Key_F5:
             self._refresh_preset_list()
         elif event.key() == Qt.Key_Delete or (
             event.key() == Qt.Key_D and event.modifiers() == Qt.ControlModifier
@@ -1084,6 +1399,7 @@ class ServerPanelBase(QWidget):
         bl.addWidget(QPushButton("添加", clicked=self._add_server))
         bl.addWidget(QPushButton("编辑", clicked=self._edit_server))
         bl.addWidget(QPushButton("删除", clicked=self._delete_selected_servers))
+        bl.addWidget(QPushButton("复制", clicked=self._copy_servers))
         bl.addWidget(QPushButton("启动选中", clicked=self._start_selected))
         bl.addWidget(QPushButton("停止选中", clicked=self._stop_selected))
         bl.addStretch()
@@ -1284,12 +1600,14 @@ class ServerPanelBase(QWidget):
                                     encoding=self._send.get(s.id, s.encoding or "UTF-8"),
                                     recv_encoding=self._recv.get(s.id, s.recv_encoding or "UTF-8"),
                                     head_len=s.head_length,
-                                    response_mode=s.response_mode, response_message=s.response_message)
+                                    response_mode=s.response_mode, response_message=s.response_message,
+                                    response_delay_ms=s.response_delay)
                 w.message_received.connect(partial(self._on_srv_msg, s.id, s.name))
                 w.message_received_raw.connect(partial(self._on_srv_msg_raw, s.id))
             else:
                 w = WsServerWorker(server_id=s.id, ip=s.ip, port=s.port, path=s.ws_path,
-                                   response_mode=s.response_mode, response_message=s.response_message)
+                                   response_mode=s.response_mode, response_message=s.response_message,
+                                   response_delay_ms=s.response_delay)
                 w.message_received.connect(lambda addr, msg, sid=s.id, nm=s.name:
                                            self._on_srv_msg(sid, nm, addr, msg))
                 w.message_received_raw.connect(partial(self._on_srv_msg_raw, s.id))
@@ -1364,7 +1682,8 @@ class ServerPanelBase(QWidget):
             ip=srv.ip, port=srv.port, encoding=send_enc,
             recv_encoding=recv_enc, head_length=srv.head_length,
             ws_path=srv.ws_path, response_mode=srv.response_mode,
-            response_message=srv.response_message, target_id=srv.target_id,
+            response_message=srv.response_message,
+            response_delay=srv.response_delay, target_id=srv.target_id,
         )
         w = self._tcp_workers.get(sid)
         if w is not None and hasattr(w, "set_encodings"):
@@ -1435,7 +1754,9 @@ class ServerPanelBase(QWidget):
                 name=d["name"], server_type=st, ip=d["ip"], port=d["port"],
                 encoding=d.get("encoding", "UTF-8"), recv_encoding=d.get("recv_encoding", "UTF-8"), head_length=d.get("head_length", 0),
                 ws_path=d.get("ws_path", "/"), response_mode=d["response_mode"],
-                response_message=d["response_message"], target_id=self._add_target_id(),
+                response_message=d["response_message"],
+                response_delay=d.get("response_delay", 0),
+                target_id=self._add_target_id(),
             )
             self._refresh()
 
@@ -1461,7 +1782,8 @@ class ServerPanelBase(QWidget):
         data = dict(name=srv.name, ip=srv.ip, port=srv.port, encoding=srv.encoding,
                     recv_encoding=srv.recv_encoding, head_length=srv.head_length,
                     ws_path=srv.ws_path, response_mode=srv.response_mode,
-                    response_message=srv.response_message)
+                    response_message=srv.response_message,
+                    response_delay=srv.response_delay)
         dlg = ServerDialog(self._edit_dialog_title(), srv.server_type, data, parent=self)
         if dlg.exec() == QDialog.Accepted:
             d = dlg.get_data()
@@ -1471,6 +1793,7 @@ class ServerPanelBase(QWidget):
                 recv_encoding=d.get("recv_encoding", "UTF-8"),
                 head_length=d.get("head_length", 0), ws_path=d.get("ws_path", "/"),
                 response_mode=d["response_mode"], response_message=d["response_message"],
+                response_delay=d.get("response_delay", 0),
                 target_id=self._edit_target_id(srv),
             )
             self._refresh()
@@ -1500,6 +1823,73 @@ class ServerPanelBase(QWidget):
             for sid in ids:
                 self._db.delete_protocol_server(sid)
             self._refresh()
+
+    def _copy_servers(self):
+        """复制选中的监听器配置，名称自动追加"副本"。"""
+        if not self._can_add():
+            return
+        ids = self._get_selected_server_ids()
+        if not ids:
+            return QMessageBox.information(self, "提示", "请选择要复制的监听器。")
+        srvs = [s for s in (self._db.get_protocol_server(sid) for sid in ids) if s]
+        if not srvs:
+            return
+        existing = {s.name for s in self._load_servers()}
+        for s in srvs:
+            new_name = unique_copy_name(s.name or "", existing)
+            self._db.add_protocol_server(
+                name=new_name, server_type=s.server_type, ip=s.ip, port=s.port,
+                encoding=s.encoding, recv_encoding=s.recv_encoding,
+                head_length=s.head_length, ws_path=s.ws_path,
+                response_mode=s.response_mode, response_message=s.response_message,
+                response_delay=s.response_delay,
+                target_id=s.target_id)
+            existing.add(new_name)
+        self._refresh()
+
+    def _copy_servers_to_clip(self):
+        """Ctrl+C：把选中的监听器配置复制到应用内剪贴板。"""
+        ids = self._get_selected_server_ids()
+        if not ids:
+            return
+        payload = []
+        for s in (self._db.get_protocol_server(sid) for sid in ids):
+            if not s:
+                continue
+            payload.append({
+                "name": s.name or "", "server_type": s.server_type,
+                "ip": s.ip, "port": s.port, "encoding": s.encoding or "",
+                "recv_encoding": s.recv_encoding or "", "head_length": s.head_length,
+                "ws_path": s.ws_path or "", "response_mode": s.response_mode,
+                "response_message": s.response_message or "",
+                "response_delay": s.response_delay,
+                "target_id": s.target_id,
+            })
+        if payload:
+            copy_items(KIND_PROTO_SERVER, payload)
+
+    def _paste_servers_from_clip(self):
+        """Ctrl+V：把剪贴板中的监听器配置粘贴到当前列表，名称追加"副本"。"""
+        if not self._can_add():
+            return
+        payload = paste_items(KIND_PROTO_SERVER)
+        if not payload:
+            QMessageBox.information(self, "提示", "剪贴板中没有可粘贴的监听器。")
+            return
+        existing = {s.name for s in self._load_servers()}
+        for p in payload:
+            new_name = unique_copy_name(p.get("name", ""), existing)
+            self._db.add_protocol_server(
+                name=new_name, server_type=p["server_type"], ip=p["ip"], port=p["port"],
+                encoding=p.get("encoding", "UTF-8"),
+                recv_encoding=p.get("recv_encoding", "UTF-8"),
+                head_length=p.get("head_length", 5), ws_path=p.get("ws_path", ""),
+                response_mode=p.get("response_mode", "echo"),
+                response_message=p.get("response_message", ""),
+                response_delay=p.get("response_delay", 0),
+                target_id=p.get("target_id"))
+            existing.add(new_name)
+        self._refresh()
 
     def _start_selected(self):
         ids = self._get_selected_server_ids()
@@ -1558,7 +1948,11 @@ class ServerPanelBase(QWidget):
         self._stop_all()
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_F5:
+        if event.key() == Qt.Key_C and event.modifiers() == Qt.ControlModifier:
+            self._copy_servers_to_clip()
+        elif event.key() == Qt.Key_V and event.modifiers() == Qt.ControlModifier:
+            self._paste_servers_from_clip()
+        elif event.key() == Qt.Key_F5:
             self._refresh()
         elif event.key() == Qt.Key_Delete or (event.key() == Qt.Key_D and event.modifiers() == Qt.ControlModifier):
             self._delete_selected_servers()

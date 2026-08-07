@@ -7,6 +7,7 @@ stop_server() 从主线程调用引擎的 stop() 解除阻塞。
 
 from __future__ import annotations
 
+import threading
 import time
 
 from PySide6.QtCore import QThread, Signal
@@ -57,7 +58,7 @@ class TcpServerWorker(QThread):
     def __init__(self, server_id: int, ip: str, port: int, encoding: str,
                  head_len: int, response_mode: str,
                  response_message: str, recv_encoding: str | None = None,
-                 parent=None):
+                 response_delay_ms: int = 0, parent=None):
         super().__init__(parent)
         self._server_id = server_id
         self._ip = ip
@@ -67,6 +68,7 @@ class TcpServerWorker(QThread):
         self._head_len = head_len
         self._response_mode = response_mode
         self._response_message = response_message
+        self._response_delay_ms = response_delay_ms
         self._engine: TcpServerEngine | None = None
         self._pending_raw: bytes | None = None
 
@@ -104,6 +106,8 @@ class TcpServerWorker(QThread):
         self.message_received.emit(client_addr, message)
         if raw is not None:
             self.message_received_raw.emit(client_addr, raw)
+        if self._response_delay_ms > 0:
+            time.sleep(self._response_delay_ms / 1000.0)
         if self._response_mode == "echo":
             return message
         return self._response_message
@@ -153,7 +157,8 @@ class WsServerWorker(QThread):
     error_occurred = Signal(str)
 
     def __init__(self, server_id: int, ip: str, port: int, path: str,
-                 response_mode: str, response_message: str, parent=None):
+                 response_mode: str, response_message: str,
+                 response_delay_ms: int = 0, parent=None):
         super().__init__(parent)
         self._server_id = server_id
         self._ip = ip
@@ -161,6 +166,7 @@ class WsServerWorker(QThread):
         self._path = path
         self._response_mode = response_mode
         self._response_message = response_message
+        self._response_delay_ms = response_delay_ms
         self._engine: WsServerEngine | None = None
 
     def run(self) -> None:
@@ -182,6 +188,8 @@ class WsServerWorker(QThread):
             self.message_received_raw.emit("", message.encode("utf-8"))
         except Exception:
             pass
+        if self._response_delay_ms > 0:
+            time.sleep(self._response_delay_ms / 1000.0)
         if self._response_mode == "echo":
             return message
         return self._response_message
@@ -200,3 +208,160 @@ class WsServerWorker(QThread):
         if self._engine:
             self._engine.stop()
         self.wait(3000)
+
+
+# ── 压测 Worker ────────────────────────────────────────────
+
+
+class _TokenBucket:
+    """简单令牌桶，用于 QPS 限速。rate <= 0 时不限速。"""
+
+    def __init__(self, rate: float):
+        self._rate = rate
+        self._lock = threading.Lock()
+        self._tokens = float(rate) if rate > 0 else 0.0
+        self._last = None
+
+    def acquire(self) -> None:
+        """阻塞直到取得一个令牌。"""
+        if self._rate <= 0:
+            return
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                if self._last is None:
+                    self._last = now
+                self._tokens = min(
+                    float(self._rate),
+                    self._tokens + (now - self._last) * self._rate,
+                )
+                self._last = now
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
+                    return
+            time.sleep(0.001)
+
+
+class StressTestWorker(QThread):
+    """压测 Worker：按 并发数 / 总请求数 / QPS限制 / 压测时长 并发发送报文并统计。
+
+    run() 阻塞直到达到总请求数、时长耗尽或 stop() 被调用。
+    预热期内递增步长逐渐把并发数升到目标值。
+    """
+
+    progress = Signal(int, int, int)          # 已完成, 成功, 失败
+    finished = Signal(int, int, int, float)   # 已完成, 成功, 失败, 耗时(秒)
+
+    def __init__(self, proto: str, ip: str, port: int, message: str,
+                 encoding: str, head_len: int, timeout: float,
+                 ws_url: str, concurrency: int, total_requests: int,
+                 qps_limit: int, duration: int, warmup: int,
+                 ramp_step: int, parent=None):
+        super().__init__(parent)
+        self._proto = proto
+        self._ip = ip
+        self._port = port
+        self._message = message
+        self._encoding = encoding
+        self._head_len = head_len
+        self._timeout = timeout
+        self._ws_url = ws_url
+        self._concurrency = max(1, concurrency)
+        self._total_requests = max(1, total_requests)
+        self._qps_limit = max(0, qps_limit)
+        self._duration = max(0, duration)
+        self._warmup = max(0, warmup)
+        self._ramp_step = max(0, ramp_step)
+        self._stop_event = threading.Event()
+        self._lock = threading.Lock()
+        self._done = 0
+        self._success = 0
+        self._fail = 0
+
+    def stop(self) -> None:
+        """请求停止压测（线程安全）。"""
+        self._stop_event.set()
+
+    def _send_once(self) -> bool:
+        """执行一次请求，返回是否成功。"""
+        if self._proto == "tcp_client":
+            ok, _ = tcp_send_and_receive(
+                self._ip, self._port, self._message,
+                self._encoding, self._head_len, self._timeout,
+            )
+            return ok
+        url = self._ws_url or f"ws://{self._ip}:{self._port}/ws"
+        ok, _ = ws_send_and_receive(url, self._message, self._timeout)
+        return ok
+
+    def _worker_loop(self, bucket: _TokenBucket, start: float) -> None:
+        """单个压测线程：取令牌 → 占请求槽 → 发送 → 记录结果。"""
+        while not self._stop_event.is_set():
+            if self._duration > 0 and (time.monotonic() - start) >= self._duration:
+                break
+            with self._lock:
+                if self._done >= self._total_requests:
+                    break
+                # 原子占用一个请求槽，避免并发线程一起越过总请求数边界
+                self._done += 1
+                slot = self._done
+            bucket.acquire()
+            if self._stop_event.is_set():
+                break
+            ok = self._send_once()
+            with self._lock:
+                if ok:
+                    self._success += 1
+                else:
+                    self._fail += 1
+                success, fail = self._success, self._fail
+            if slot % 5 == 0 or slot >= self._total_requests:
+                self.progress.emit(slot, success, fail)
+
+    def run(self) -> None:
+        start = time.monotonic()
+        bucket = _TokenBucket(self._qps_limit)
+        threads = []
+        # 预热递增：先启动 ramp_step 个，之后分批补足到 concurrency
+        active = self._concurrency
+        if self._ramp_step > 0 and self._concurrency > self._ramp_step:
+            active = self._ramp_step
+        for _ in range(active):
+            t = threading.Thread(target=self._worker_loop, args=(bucket, start), daemon=True)
+            threads.append(t)
+            t.start()
+        if active < self._concurrency:
+            steps = (self._concurrency - active + self._ramp_step - 1) // self._ramp_step
+            interval = (self._warmup / steps) if (self._warmup > 0 and steps > 0) else 0.5
+            nxt = time.monotonic() + interval
+            while active < self._concurrency and not self._stop_event.is_set():
+                if self._duration > 0 and (time.monotonic() - start) >= self._duration:
+                    break
+                time.sleep(0.05)
+                if time.monotonic() >= nxt:
+                    add = min(self._ramp_step, self._concurrency - active)
+                    for _ in range(add):
+                        t = threading.Thread(target=self._worker_loop, args=(bucket, start), daemon=True)
+                        threads.append(t)
+                        t.start()
+                    active += add
+                    nxt = time.monotonic() + interval
+        # 等待：总请求数达 / 时长耗尽 / 全部线程退出 / 停止
+        while not self._stop_event.is_set():
+            with self._lock:
+                done = self._done
+            if done >= self._total_requests:
+                break
+            if self._duration > 0 and (time.monotonic() - start) >= self._duration:
+                break
+            if not any(t.is_alive() for t in threads):
+                break
+            time.sleep(0.05)
+        self._stop_event.set()
+        for t in threads:
+            t.join(0.5)
+        elapsed = time.monotonic() - start
+        with self._lock:
+            done, success, fail = self._done, self._success, self._fail
+        self._last_elapsed = elapsed
+        self.finished.emit(done, success, fail, elapsed)

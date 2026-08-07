@@ -95,6 +95,7 @@ class ProtocolServer:
     ws_path: str = ""
     response_mode: str = "fixed"      # "fixed" | "echo"
     response_message: str = ""
+    response_delay: int = 0           # 响应延迟（毫秒）
     target_id: int | None = None      # 关联的协议目标
     sort_order: int = 0
     created_at: str = ""
@@ -116,6 +117,7 @@ class ProtocolTarget:
     ws_use_ssl: bool = False
     send_message: str = ""            # 发送消息模板
     send_presets: str = "[]"          # JSON 格式多预设报文 [{"name":"...","message":"..."}]
+    stress_params: str = "{}"         # JSON 格式压测参数 {"concurrency":..,"qps_limit":..,..}
     sort_order: int = 0
     created_at: str = ""
 
@@ -224,6 +226,7 @@ CREATE TABLE IF NOT EXISTS protocol_servers (
     ws_path TEXT DEFAULT '',
     response_mode TEXT DEFAULT 'fixed',
     response_message TEXT DEFAULT '',
+    response_delay INTEGER DEFAULT 0,
     target_id INTEGER,
     sort_order INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT (datetime('now', 'localtime')),
@@ -249,6 +252,7 @@ CREATE TABLE IF NOT EXISTS protocol_targets (
     ws_use_ssl INTEGER DEFAULT 0,
     send_message TEXT DEFAULT '',
     send_presets TEXT DEFAULT '[]',
+    stress_params TEXT DEFAULT '{}',
     sort_order INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT (datetime('now', 'localtime')),
     FOREIGN KEY (collection_id) REFERENCES protocol_collections(id) ON DELETE CASCADE
@@ -299,6 +303,25 @@ class Database:
         """创建数据库和表结构。"""
         with self._connect() as conn:
             conn.executescript(SCHEMA_SQL)
+            # 服务端响应延迟列：老库缺列时幂等补列（默认 0，不迁移历史数据）
+            try:
+                conn.execute(
+                    "ALTER TABLE protocol_servers "
+                    "ADD COLUMN response_delay INTEGER DEFAULT 0"
+                )
+            except sqlite3.OperationalError:
+                pass  # 列已存在
+            # 目标压测参数字段：老库缺列时幂等补列（默认空对象）
+            try:
+                conn.execute(
+                    "ALTER TABLE protocol_targets "
+                    "ADD COLUMN stress_params TEXT DEFAULT '{}'"
+                )
+            except sqlite3.OperationalError:
+                pass  # 列已存在
+            cols = [r["name"] for r in conn.execute(
+                "PRAGMA table_info(protocol_servers)").fetchall()]
+            self._servers_have_delay = "response_delay" in cols
             # 列兼容
             for tbl, old, new in [("connect_test_sessions", "batch_name", "collection_name")]:
                 try:
@@ -918,6 +941,7 @@ class Database:
                 head_length=r["head_length"], ws_path=r["ws_path"],
                 response_mode=r["response_mode"],
                 response_message=r["response_message"],
+                response_delay=r["response_delay"] if "response_delay" in r.keys() else 0,
                 target_id=r["target_id"],
                 sort_order=r["sort_order"], created_at=r["created_at"]
             ) for r in rows]
@@ -939,6 +963,7 @@ class Database:
                     head_length=r["head_length"], ws_path=r["ws_path"],
                     response_mode=r["response_mode"],
                     response_message=r["response_message"],
+                    response_delay=r["response_delay"] if "response_delay" in r.keys() else 0,
                     target_id=r["target_id"],
                     sort_order=r["sort_order"], created_at=r["created_at"]
                 )
@@ -952,18 +977,31 @@ class Database:
                             ws_path: str = "",
                             response_mode: str = "fixed",
                             response_message: str = "",
+                            response_delay: int = 0,
                             target_id: int | None = None) -> int:
         """添加协议服务端配置，返回新 ID。"""
         with self._connect() as conn:
-            cur = conn.execute("""
-                INSERT INTO protocol_servers
-                    (name, server_type, ip, port, encoding, recv_encoding,
-                     head_length, ws_path, response_mode, response_message,
-                     target_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (name, server_type, ip, port, encoding, recv_encoding,
-                  head_length, ws_path, response_mode, response_message,
-                  target_id))
+            if self._servers_have_delay:
+                cur = conn.execute("""
+                    INSERT INTO protocol_servers
+                        (name, server_type, ip, port, encoding, recv_encoding,
+                         head_length, ws_path, response_mode, response_message,
+                         response_delay, target_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (name, server_type, ip, port, encoding, recv_encoding,
+                      head_length, ws_path, response_mode, response_message,
+                      response_delay, target_id))
+            else:
+                # 老库无 response_delay 列，插入时省略（默认 0）
+                cur = conn.execute("""
+                    INSERT INTO protocol_servers
+                        (name, server_type, ip, port, encoding, recv_encoding,
+                         head_length, ws_path, response_mode, response_message,
+                         target_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (name, server_type, ip, port, encoding, recv_encoding,
+                      head_length, ws_path, response_mode, response_message,
+                      target_id))
             return cur.lastrowid
 
     def update_protocol_server(self, server_id: int, name: str,
@@ -974,19 +1012,32 @@ class Database:
                                ws_path: str = "",
                                response_mode: str = "fixed",
                                response_message: str = "",
+                               response_delay: int = 0,
                                target_id: int | None = None) -> None:
         """更新协议服务端配置。"""
         with self._connect() as conn:
-            conn.execute("""
-                UPDATE protocol_servers SET
-                    name = ?, server_type = ?, ip = ?, port = ?,
-                    encoding = ?, recv_encoding = ?, head_length = ?,
-                    ws_path = ?, response_mode = ?, response_message = ?,
-                    target_id = ?
-                WHERE id = ?
-            """, (name, server_type, ip, port, encoding, recv_encoding,
-                  head_length, ws_path, response_mode, response_message,
-                  target_id, server_id))
+            if self._servers_have_delay:
+                conn.execute("""
+                    UPDATE protocol_servers SET
+                        name = ?, server_type = ?, ip = ?, port = ?,
+                        encoding = ?, recv_encoding = ?, head_length = ?,
+                        ws_path = ?, response_mode = ?, response_message = ?,
+                        response_delay = ?, target_id = ?
+                    WHERE id = ?
+                """, (name, server_type, ip, port, encoding, recv_encoding,
+                      head_length, ws_path, response_mode, response_message,
+                      response_delay, target_id, server_id))
+            else:
+                conn.execute("""
+                    UPDATE protocol_servers SET
+                        name = ?, server_type = ?, ip = ?, port = ?,
+                        encoding = ?, recv_encoding = ?, head_length = ?,
+                        ws_path = ?, response_mode = ?, response_message = ?,
+                        target_id = ?
+                    WHERE id = ?
+                """, (name, server_type, ip, port, encoding, recv_encoding,
+                      head_length, ws_path, response_mode, response_message,
+                      target_id, server_id))
 
     def delete_protocol_server(self, server_id: int) -> None:
         """删除协议服务端配置。"""
@@ -1021,6 +1072,7 @@ class Database:
                 ws_use_ssl=bool(r["ws_use_ssl"]),
                 send_message=r["send_message"],
                 send_presets=r["send_presets"],
+                stress_params=r["stress_params"],
                 sort_order=r["sort_order"], created_at=r["created_at"]
             ) for r in rows]
 
@@ -1033,18 +1085,20 @@ class Database:
                             ws_path: str = "",
                             ws_use_ssl: bool = False,
                             send_message: str = "",
-                            send_presets: str = "[]") -> int:
+                            send_presets: str = "[]",
+                            stress_params: str = "{}") -> int:
         """添加协议目标，返回新 ID。"""
         with self._connect() as conn:
             cur = conn.execute("""
                 INSERT INTO protocol_targets
                     (collection_id, name, ip, port, encoding,
                      recv_encoding, head_length, timeout, ws_path, ws_use_ssl,
-                     send_message, send_presets)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     send_message, send_presets, stress_params)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (collection_id, name, ip.strip(), port, encoding,
                   recv_encoding, head_length, timeout, ws_path,
-                  1 if ws_use_ssl else 0, send_message, send_presets))
+                  1 if ws_use_ssl else 0, send_message, send_presets,
+                  stress_params))
             return cur.lastrowid
 
     def add_protocol_targets_batch(self, targets: list[tuple]) -> int:
@@ -1089,6 +1143,7 @@ class Database:
                     ws_use_ssl=bool(r["ws_use_ssl"]),
                     send_message=r["send_message"],
                 send_presets=r["send_presets"],
+                    stress_params=r["stress_params"],
                     sort_order=r["sort_order"], created_at=r["created_at"]
                 )
             return None
@@ -1102,19 +1157,28 @@ class Database:
                                ws_path: str = "",
                                ws_use_ssl: bool = False,
                                send_message: str = "",
-                               send_presets: str = "[]") -> None:
-        """更新协议目标（含客户端参数）。"""
+                               send_presets: str = "[]",
+                               stress_params: str | None = None) -> None:
+        """更新协议目标（含客户端参数）。
+
+        stress_params 为 None 时保持不变（供不涉及压测的调用方沿用旧值）。
+        """
         with self._connect() as conn:
-            conn.execute("""
-                UPDATE protocol_targets SET
-                    name = ?, ip = ?, port = ?,
-                    encoding = ?, recv_encoding = ?, head_length = ?, timeout = ?,
-                    ws_path = ?, ws_use_ssl = ?, send_message = ?,
-                    send_presets = ?
-                WHERE id = ?
-            """, (name, ip.strip(), port, encoding, recv_encoding,
-                  head_length, timeout, ws_path, 1 if ws_use_ssl else 0,
-                  send_message, send_presets, target_id))
+            fields = ["name", "ip", "port", "encoding", "recv_encoding",
+                      "head_length", "timeout", "ws_path", "ws_use_ssl",
+                      "send_message", "send_presets"]
+            values = [name, ip.strip(), port, encoding, recv_encoding,
+                      head_length, timeout, ws_path, 1 if ws_use_ssl else 0,
+                      send_message, send_presets]
+            if stress_params is not None:
+                fields.append("stress_params")
+                values.append(stress_params)
+            values.append(target_id)
+            conn.execute(
+                f"UPDATE protocol_targets SET "
+                f"{', '.join(f'{f} = ?' for f in fields)} "
+                f"WHERE id = ?",
+                values)
 
     # ── 协议测试会话操作 ────────────────────────────────────
 

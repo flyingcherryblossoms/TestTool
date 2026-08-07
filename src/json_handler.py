@@ -25,6 +25,7 @@ def export_collection_to_json(filepath: str | Path, collection: dict) -> tuple[b
                             "encoding": str, "head_length": int,
                             "ws_path": str,
                             "response_mode": str, "response_message": str,
+                            "response_delay": int,  # 响应延迟(毫秒)
                         }, ...
                     ]
                 }, ...
@@ -164,6 +165,7 @@ def _parse_collection(data: dict) -> tuple[dict | None, str]:
             "ws_use_ssl": t.get("ws_use_ssl", False),
             "send_message": t.get("send_message", ""),
             "send_presets": t.get("send_presets", []),
+            "stress_params": t.get("stress_params", {}),
             "servers": servers,
         })
 
@@ -188,6 +190,7 @@ def _parse_client_config(data: dict) -> tuple[dict | None, str]:
         "ws_use_ssl": data.get("ws_use_ssl", False),
         "send_message": data.get("send_message", ""),
         "send_presets": data.get("send_presets", []),
+        "stress_params": data.get("stress_params", {}),
     }
     return cfg, ""
 
@@ -221,6 +224,7 @@ def _validate_server_dict(s: dict, path: str, is_ws: bool = False) -> dict | str
         "ws_path": s.get("ws_path", "/"),
         "response_mode": s.get("response_mode", "fixed"),
         "response_message": s.get("response_message", ""),
+        "response_delay": s.get("response_delay", 0),
     }
 
 

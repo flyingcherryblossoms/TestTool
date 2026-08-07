@@ -31,7 +31,13 @@ from PySide6.QtWidgets import (
 
 from src.csv_handler import export_targets_to_csv, parse_targets_csv
 from src.database import Database, Target
-from src.ui.table_utils import TargetDragTable, enable_stretch_fill, refresh_tooltips
+from src.ui.clipboard import KIND_CONN_TARGET, copy_items, paste_items
+from src.ui.table_utils import (
+    TargetDragTable,
+    enable_stretch_fill,
+    refresh_tooltips,
+    unique_copy_name,
+)
 from src.excel_handler import (
     export_targets_to_excel,
     parse_targets_excel,
@@ -381,6 +387,10 @@ class TargetPanel(QWidget):
         self._delete_btn = QPushButton("删除")
         self._delete_btn.clicked.connect(self._delete_targets)
         action_layout.addWidget(self._delete_btn)
+
+        self._copy_btn = QPushButton("复制")
+        self._copy_btn.clicked.connect(self._copy_targets)
+        action_layout.addWidget(self._copy_btn)
 
         self._proto_test_btn = QPushButton("协议测试")
         self._proto_test_btn.setStyleSheet(
@@ -767,6 +777,7 @@ class TargetPanel(QWidget):
             menu.addAction("测试连通性", lambda: self._on_double_click(model.index(row, 0)))
             menu.addAction("协议测试", self._on_protocol_test_selected)
             menu.addSeparator()
+            menu.addAction("复制", self._copy_targets)
             menu.addAction("编辑", self._edit_target)
             menu.addAction("删除", self._delete_targets)
         menu.exec(self._table.viewport().mapToGlobal(pos))
@@ -852,6 +863,83 @@ class TargetPanel(QWidget):
             self._db.delete_targets(ids)
             self.refresh()
             self.targets_changed.emit()
+
+    def _resolve_collection_id(self) -> int | None:
+        """把当前集合 id 解析为可用于写入的集合 id（未分类 0 → 真实未分类集合）。"""
+        cid = self._current_collection_id
+        if cid == 0:
+            return self._ensure_uncat_collection()
+        return cid
+
+    def _copy_targets(self):
+        """复制选中的目标。连通测试目标无名称字段，描述自动追加"副本"区分。"""
+        if self._temporary_mode:
+            QMessageBox.information(self, "提示", "临时列表不支持复制。")
+            return
+        ids = self.get_selected_target_ids()
+        if not ids:
+            QMessageBox.information(self, "提示", "请先选中要复制的目标。")
+            return
+        targets = self.get_targets_by_ids(ids)
+        if not targets:
+            return
+        cid = self._resolve_collection_id()
+        existing = {t.description or "" for t in self._db.get_targets(cid)}
+        for t in targets:
+            desc = t.description or ""
+            if desc:
+                new_desc = unique_copy_name(desc, existing)
+            else:
+                new_desc = "副本"
+                while new_desc in existing:
+                    new_desc += "副本"
+            self._db.add_target(
+                ip=t.ip, port=t.port, description=new_desc,
+                collection_id=cid,
+            )
+            existing.add(new_desc)
+        self.refresh()
+        self.targets_changed.emit()
+
+    def _copy_targets_to_clip(self):
+        """Ctrl+C：把选中的目标复制到应用内剪贴板。"""
+        if self._temporary_mode:
+            return
+        ids = self.get_selected_target_ids()
+        if not ids:
+            return
+        targets = self.get_targets_by_ids(ids)
+        payload = [{"ip": t.ip, "port": t.port, "description": t.description or ""}
+                   for t in targets]
+        if payload:
+            copy_items(KIND_CONN_TARGET, payload)
+
+    def _paste_targets_from_clip(self):
+        """Ctrl+V：把剪贴板中的目标粘贴到当前集合，描述追加"副本"。"""
+        if self._temporary_mode:
+            QMessageBox.information(self, "提示", "临时列表不支持粘贴。")
+            return
+        payload = paste_items(KIND_CONN_TARGET)
+        if not payload:
+            QMessageBox.information(self, "提示", "剪贴板中没有可粘贴的目标。")
+            return
+        cid = self._resolve_collection_id()
+        existing = {t.description or "" for t in self._db.get_targets(cid)}
+        for p in payload:
+            desc = (p.get("description") or "").strip()
+            if desc:
+                new_desc = unique_copy_name(desc, existing)
+            else:
+                new_desc = "副本"
+                while new_desc in existing:
+                    new_desc += "副本"
+            self._db.add_target(
+                ip=p["ip"], port=p["port"], description=new_desc,
+                collection_id=cid,
+            )
+            existing.add(new_desc)
+        self.refresh()
+        self.targets_changed.emit()
 
     def _on_protocol_test_selected(self):
         """将第一个勾选目标的 IP/端口发送到协议测试面板。"""
@@ -1036,7 +1124,11 @@ class TargetPanel(QWidget):
             QMessageBox.critical(self, "导出失败", f"导出失败:\n{err}")
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Delete or (event.key() == Qt.Key_D and event.modifiers() == Qt.ControlModifier):
+        if event.key() == Qt.Key_C and event.modifiers() == Qt.ControlModifier:
+            self._copy_targets_to_clip()
+        elif event.key() == Qt.Key_V and event.modifiers() == Qt.ControlModifier:
+            self._paste_targets_from_clip()
+        elif event.key() == Qt.Key_Delete or (event.key() == Qt.Key_D and event.modifiers() == Qt.ControlModifier):
             self._delete_targets()
         else:
             super().keyPressEvent(event)

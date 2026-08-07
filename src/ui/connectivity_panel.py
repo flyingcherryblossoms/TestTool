@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from PySide6.QtCore import Qt, QTimer, Signal
 
 from pathlib import Path
@@ -71,6 +73,14 @@ class _CollectionListTab(CollectionSidebarBase):
 
     def _new_collection_prefix(self) -> str:
         return "连通性测试"
+
+    def _copy_collection_targets(self, src_cid: int, new_cid: int):
+        """把源集合的全部目标复制到新集合。"""
+        for t in self._db.get_targets(src_cid):
+            self._db.add_target(
+                ip=t.ip, port=t.port, description=t.description,
+                collection_id=new_cid,
+            )
 
     # ── 右键菜单 ───────────────────────────────────────────
 
@@ -142,9 +152,13 @@ class _CollectionListTab(CollectionSidebarBase):
         selected = self._tree.selectedItems()
         valid = [it.data(0, Qt.UserRole) for it in selected
                  if it.data(0, Qt.UserRole) not in (None, 0)]
+        coll_names = []
         if valid:
             targets = []
             for bid in valid:
+                coll = self._get_collection(bid)
+                if coll:
+                    coll_names.append(coll.name)
                 targets.extend(self._db.get_targets(bid))
         else:
             reply = QMessageBox.question(
@@ -157,14 +171,25 @@ class _CollectionListTab(CollectionSidebarBase):
         if not targets:
             QMessageBox.information(self, "提示", "没有可导出的数据。")
             return
+        # 默认文件名：集合名称_导出时间(yyyyMMddHHmmss)，默认导出 JSON
+        ts = datetime.now().strftime("%Y%m%d%H%M%S")
+        if len(coll_names) == 1:
+            default_name = f"{coll_names[0]}_{ts}.json"
+        elif coll_names:
+            default_name = f"{coll_names[0]}_等{len(coll_names)}个集合_{ts}.json"
+        else:
+            default_name = f"collections_{ts}.json"
         filepath, _ = QFileDialog.getSaveFileName(
-            self, "导出目标", "targets.xlsx",
-            "Excel 文件 (*.xlsx);;CSV 文件 (*.csv);;JSON 文件 (*.json)")
+            self, "导出目标", default_name,
+            "JSON 文件 (*.json);;Excel 文件 (*.xlsx);;CSV 文件 (*.csv)")
         if not filepath:
             return
         data = [{"ip": t.ip, "port": t.port, "description": t.description,
                  "collection_name": t.collection_name or ""} for t in targets]
         ext = Path(filepath).suffix.lower()
+        if not ext:
+            filepath += ".json"
+            ext = ".json"
         if ext == ".json":
             ok, err = _export_connectivity_json(filepath, data)
         elif ext == ".csv":

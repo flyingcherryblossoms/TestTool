@@ -30,6 +30,19 @@ from PySide6.QtWidgets import (
 TARGETS_MIME = "application/x-testtool-target-ids"
 
 
+def unique_copy_name(name: str, existing: set[str]) -> str:
+    """生成不冲突的复制名：原名 + "副本"，冲突时追加序号（副本2、副本3...）。"""
+    if not name:
+        name = "未命名"
+    cand = f"{name}副本"
+    if cand not in existing:
+        return cand
+    n = 2
+    while f"{name}副本{n}" in existing:
+        n += 1
+    return f"{name}副本{n}"
+
+
 def _make_drag_pixmap(text: str) -> QPixmap:
     """渲染一段文本为拖拽缩略图，避免 QPixmap::scaled 空图警告。"""
     from PySide6.QtGui import QFont, QFontMetrics, QPainter

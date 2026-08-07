@@ -22,7 +22,8 @@ from PySide6.QtWidgets import (
 )
 
 from src.database import Database
-from src.ui.table_utils import ReorderableTree
+from src.ui.clipboard import KIND_COLLECTION, copy_items, paste_items
+from src.ui.table_utils import ReorderableTree, unique_copy_name
 
 
 class CollectionSidebarBase(QWidget):
@@ -259,6 +260,7 @@ class CollectionSidebarBase(QWidget):
         if is_custom:
             menu.addSeparator()
             self._build_collection_menu(menu, item, cid)
+            menu.addAction("复制集合", lambda cid=cid: self._copy_collection(cid))
         else:
             # 空白 / 未分类 / 自定义集合父节点：统一提供"刷新集合"
             self._build_blank_menu(menu)
@@ -288,6 +290,47 @@ class CollectionSidebarBase(QWidget):
                 if child.data(0, Qt.UserRole) == cid:
                     self._tree.setCurrentItem(child)
                     return
+
+    def _copy_collection(self, cid: int):
+        """深拷贝集合：复制集合及其下全部目标，名称追加"副本"。
+
+        集合本身经 _add_collection 创建（协议集合保留源集合的 protocol_type），
+        目标经 _copy_collection_targets 逐个复制。
+        """
+        collection = self._get_collection(cid)
+        if not collection:
+            return
+        existing = {c.name for c in self._get_all_collections()}
+        new_name = unique_copy_name(getattr(collection, "name", ""), existing)
+        kwargs = {}
+        pt = getattr(collection, "protocol_type", None)
+        if pt:
+            kwargs["protocol_type"] = pt
+        new_id = self._add_collection(new_name, **kwargs)
+        self._copy_collection_targets(cid, new_id)
+        self.refresh(select_id=new_id)
+
+    def _copy_collection_targets(self, src_cid: int, new_cid: int) -> None:
+        """把源集合的全部目标复制到新集合。子类实现。"""
+        raise NotImplementedError
+
+    def _copy_collections_to_clip(self):
+        """Ctrl+C：把选中的集合 id 复制到应用内剪贴板。"""
+        selected = self._tree.selectedItems()
+        uncat_id = self._uncat_node_id()
+        cids = [it.data(0, Qt.UserRole) for it in selected
+                if it.data(0, Qt.UserRole) not in (None, uncat_id)]
+        if cids:
+            copy_items(KIND_COLLECTION, cids)
+
+    def _paste_collections_from_clip(self):
+        """Ctrl+V：把剪贴板中的集合粘贴为副本（深拷贝集合及目标）。"""
+        cids = paste_items(KIND_COLLECTION)
+        valid = [c for c in cids if self._get_collection(c)]
+        if not valid:
+            return QMessageBox.information(self, "提示", "剪贴板中没有可粘贴的集合。")
+        for cid in valid:
+            self._copy_collection(cid)
 
     def _on_edit(self):
         item = self._tree.currentItem()
@@ -329,7 +372,11 @@ class CollectionSidebarBase(QWidget):
             self.refresh()
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_F5:
+        if event.key() == Qt.Key_C and event.modifiers() == Qt.ControlModifier:
+            self._copy_collections_to_clip()
+        elif event.key() == Qt.Key_V and event.modifiers() == Qt.ControlModifier:
+            self._paste_collections_from_clip()
+        elif event.key() == Qt.Key_F5:
             self.refresh()
         elif (event.key() == Qt.Key_Delete
               or (event.key() == Qt.Key_D and event.modifiers() == Qt.ControlModifier)):

@@ -54,16 +54,19 @@ from PySide6.QtWidgets import (
 
 from src.database import Database
 from src.protocol import compute_length_header
+from src.ui.clipboard import KIND_PROTO_TARGET, copy_items, paste_items
 from src.ui.collection_sidebar import CollectionSidebarBase
 from src.ui.table_utils import (
     TargetDragTable,
     enable_stretch_fill,
     refresh_tooltips,
+    unique_copy_name,
 )
 from src.ui.protocol_workers import (
     TcpClientWorker,
     WsClientWorker,
 )
+from src.ui.format_text import FormatTextEdit
 from src.json_handler import (
     export_collection_to_json,
     export_collections_to_json,
@@ -164,8 +167,9 @@ class _TargetDialog(QDialog):
         self._ws_ssl = QCheckBox("SSL")
         self._ws_ssl.setChecked(ws_use_ssl)
         layout.addRow("WS SSL:", self._ws_ssl)
-        self._send_msg = QPlainTextEdit(send_message)
+        self._send_msg = FormatTextEdit(text=send_message)
         self._send_msg.setFixedHeight(60)
+        layout.addRow("报文格式:", self._send_msg.format_combo)
         layout.addRow("发送报文:", self._send_msg)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._validate)
@@ -249,8 +253,29 @@ class _CollectionSidebar(CollectionSidebarBase):
     def _get_collection(self, cid):
         return self._db.get_protocol_collection(cid)
 
-    def _add_collection(self, name: str) -> int:
-        return self._db.add_protocol_collection(name=name, protocol_type="tcp_client")
+    def _add_collection(self, name: str, protocol_type: str = "tcp_client") -> int:
+        return self._db.add_protocol_collection(name=name, protocol_type=protocol_type)
+
+    def _copy_collection_targets(self, src_cid: int, new_cid: int):
+        """把源集合的全部目标复制到新集合（含目标上挂的服务端配置）。"""
+        for t in self._db.get_protocol_targets(src_cid):
+            tid = self._db.add_protocol_target(
+                collection_id=new_cid, ip=t.ip, port=t.port, name=t.name,
+                encoding=t.encoding, recv_encoding=t.recv_encoding,
+                head_length=t.head_length, timeout=t.timeout,
+                ws_path=t.ws_path, ws_use_ssl=t.ws_use_ssl,
+                send_message=t.send_message, send_presets=t.send_presets,
+                stress_params=t.stress_params,
+            )
+            for s in self._db.get_protocol_servers_by_target(t.id):
+                self._db.add_protocol_server(
+                    name=s.name, server_type=s.server_type,
+                    ip=s.ip, port=s.port, encoding=s.encoding,
+                    recv_encoding=s.recv_encoding, head_length=s.head_length,
+                    ws_path=s.ws_path, response_mode=s.response_mode,
+                    response_message=s.response_message,
+                    response_delay=s.response_delay, target_id=tid,
+                )
 
     def _update_collection(self, cid: int, name: str):
         coll = self._db.get_protocol_collection(cid)
@@ -299,6 +324,7 @@ class _CollectionSidebar(CollectionSidebarBase):
                 )
                 for t in coll_data["targets"]:
                     presets = json.dumps(t.get("send_presets", []), ensure_ascii=False)
+                    stress = json.dumps(t.get("stress_params", {}), ensure_ascii=False)
                     tid = self._db.add_protocol_target(
                         collection_id=cid, ip=t["ip"], port=t["port"],
                         name=t.get("name", ""), encoding=t["encoding"],
@@ -306,6 +332,7 @@ class _CollectionSidebar(CollectionSidebarBase):
                         head_length=t["head_length"], timeout=t["timeout"],
                         ws_path=t["ws_path"], ws_use_ssl=t["ws_use_ssl"],
                         send_message=t["send_message"], send_presets=presets,
+                        stress_params=stress,
                     )
                     for s in t.get("servers", []):
                         self._db.add_protocol_server(
@@ -314,7 +341,8 @@ class _CollectionSidebar(CollectionSidebarBase):
                             recv_encoding=s.get("recv_encoding", "UTF-8"),
                             head_length=s["head_length"], ws_path=s["ws_path"],
                             response_mode=s["response_mode"],
-                            response_message=s["response_message"], target_id=tid,
+                            response_message=s["response_message"],
+                            response_delay=s.get("response_delay", 0), target_id=tid,
                         )
                 imported += 1
         self.refresh()
@@ -349,26 +377,35 @@ class _CollectionSidebar(CollectionSidebarBase):
                     presets = json.loads(t.send_presets) if t.send_presets else []
                 except json.JSONDecodeError:
                     presets = []
+                try:
+                    stress = json.loads(t.stress_params) if t.stress_params else {}
+                except (json.JSONDecodeError, TypeError):
+                    stress = {}
                 targets_data.append({
                     "ip": t.ip, "port": t.port, "name": t.name,
                     "encoding": t.encoding, "recv_encoding": t.recv_encoding,
                     "head_length": t.head_length,
                     "timeout": t.timeout, "ws_path": t.ws_path,
                     "ws_use_ssl": t.ws_use_ssl, "send_message": t.send_message,
-                    "send_presets": presets,
+                    "send_presets": presets, "stress_params": stress,
                     "servers": [{"name": s.name, "server_type": s.server_type,
                                  "ip": s.ip, "port": s.port, "encoding": s.encoding,
                                  "recv_encoding": s.recv_encoding,
                                  "head_length": s.head_length, "ws_path": s.ws_path,
                                  "response_mode": s.response_mode,
-                                 "response_message": s.response_message} for s in servers],
+                                 "response_message": s.response_message,
+                                 "response_delay": s.response_delay} for s in servers],
                 })
             collections_data.append({
                 "name": coll.name, "protocol_type": coll.protocol_type,
                 "targets": targets_data,
             })
-        # 默认文件名
-        default_name = f"{collections_data[0]['name']}.json" if len(collections_data) == 1 else "collections.json"
+        # 默认文件名：集合名称_导出时间(yyyyMMddHHmmss)，多选取首集合名
+        ts = datetime.now().strftime("%Y%m%d%H%M%S")
+        if len(collections_data) == 1:
+            default_name = f"{collections_data[0]['name']}_{ts}.json"
+        else:
+            default_name = f"{collections_data[0]['name']}_等{len(collections_data)}个集合_{ts}.json"
         filepath, _ = QFileDialog.getSaveFileName(
             self, "导出集合", default_name, "JSON 文件 (*.json);;所有文件 (*)")
         if not filepath:
@@ -469,6 +506,21 @@ class TargetClientPanel(ClientPanelBase):
     def _params_area_max_height(self):
         return 64
 
+    # ── 压测参数持久化：目标客户端写入目标行，保存由"保存参数"统一处理 ──
+
+    def _load_stress_from_store(self) -> dict:
+        t = self._owner._target
+        if not t:
+            return {}
+        try:
+            return json.loads(t.stress_params) if t.stress_params else {}
+        except (json.JSONDecodeError, TypeError):
+            return {}
+
+    def _save_stress_to_store(self, sp: dict):
+        # 仅标记脏，落库由"保存参数"按钮统一写入 update_protocol_target
+        self._mark_config_dirty()
+
     # ── 加载目标参数 ────────────────────────────────────────
 
     def load_target(self, target):
@@ -487,6 +539,7 @@ class TargetClientPanel(ClientPanelBase):
             "ws_timeout": target.timeout, "ws_ssl": target.ws_use_ssl,
         }
         self.set_params(cfg)
+        self._apply_stress_params(self._load_stress_from_store())
         self._send_edit.setPlainText(target.send_message)
         self._update_len_label()
         self._refresh_preset_list()
@@ -524,11 +577,12 @@ class TargetMockServerPanel(ServerPanelBase):
         return self._db.get_protocol_servers_by_target(self._owner._target.id)
 
     def _server_columns(self):
-        return ["名称", "监听地址", "端口", "发送编码", "接收编码", "HeadLen", "响应模式", "状态", "操作"]
+        return ["名称", "监听地址", "端口", "发送编码", "接收编码", "HeadLen", "响应模式", "延迟(ms)", "状态", "操作"]
 
     def _row_cells(self, s, is_tcp: bool):
         return [s.name, s.ip, str(s.port), s.encoding or "", s.recv_encoding or "",
-                str(s.head_length), "回显" if s.response_mode == "echo" else "固定"]
+                str(s.head_length), "回显" if s.response_mode == "echo" else "固定",
+                str(s.response_delay)]
 
     def _center_columns(self):
         return {2, 5}
@@ -724,6 +778,8 @@ class _TargetDetailPanel(QWidget):
             ws_use_ssl=p["ws_ssl"],
             send_message=self._target.send_message,
             send_presets=self._target.send_presets,
+            stress_params=json.dumps(
+                self._client_panel.collect_stress_params(), ensure_ascii=False),
         )
         self._target = self._db.get_protocol_target(self._target.id)
         self.target_updated.emit()
@@ -738,6 +794,10 @@ class _TargetDetailPanel(QWidget):
             presets = json.loads(t.send_presets) if t.send_presets else []
         except json.JSONDecodeError:
             presets = []
+        try:
+            stress = json.loads(t.stress_params) if t.stress_params else {}
+        except (json.JSONDecodeError, TypeError):
+            stress = {}
         data = {
             "version": 1, "type": "protocol_client_config",
             "protocol_type": "tcp_client" if _target_proto_label(t) != "WS" else "ws_client",
@@ -746,6 +806,7 @@ class _TargetDetailPanel(QWidget):
             "head_length": t.head_length, "timeout": t.timeout,
             "ws_url": t.ws_path, "ws_use_ssl": t.ws_use_ssl,
             "send_message": t.send_message, "send_presets": presets,
+            "stress_params": stress,
             "servers": [{"name": s.name, "server_type": s.server_type,
                          "ip": s.ip, "port": s.port, "encoding": s.encoding,
                          "recv_encoding": s.recv_encoding,
@@ -790,6 +851,7 @@ class _TargetDetailPanel(QWidget):
             ws_use_ssl=cfg.get("ws_use_ssl", False),
             send_message=cfg.get("send_message", ""),
             send_presets=json.dumps(cfg.get("send_presets", []), ensure_ascii=False),
+            stress_params=json.dumps(cfg.get("stress_params", {}), ensure_ascii=False),
         )
         self._target = self._db.get_protocol_target(self._target.id)
         self.target_updated.emit()
@@ -1106,6 +1168,7 @@ class _CollectionDetailTab(QWidget):
         tbl.addWidget(QPushButton("添加", clicked=self._on_add_target))
         tbl.addWidget(QPushButton("编辑", clicked=self._on_edit_target))
         tbl.addWidget(QPushButton("删除", clicked=self._on_delete_target))
+        tbl.addWidget(QPushButton("复制", clicked=self._copy_target))
         tbl.addWidget(QPushButton("测试", clicked=self._on_test_target))
         conn_btn = QPushButton("连通测试", clicked=self._on_connectivity_test_requested)
         conn_btn.setStyleSheet("background-color: #3498db; color: white; font-weight: bold;")
@@ -1281,6 +1344,107 @@ class _CollectionDetailTab(QWidget):
             self._refresh_targets()
             self.targets_changed.emit()
 
+    def _copy_target(self):
+        """复制选中的目标，名称自动追加"副本"（含全部客户端参数及其下挂服务端）。"""
+        if not self._coll:
+            return QMessageBox.information(self, "提示", "请先选择一个集合。")
+        rows = set(i.row() for i in self._target_table.selectedIndexes())
+        if not rows:
+            return QMessageBox.information(self, "提示", "请选择要复制的目标。")
+        ids = []
+        for row in sorted(rows):
+            item = self._target_table.item(row, 0)
+            if item and item.data(Qt.UserRole) is not None:
+                ids.append(item.data(Qt.UserRole))
+        if not ids:
+            return
+        targets = [t for t in (self._db.get_protocol_target(tid) for tid in ids) if t]
+        if not targets:
+            return
+        existing = {t.name or "" for t in self._db.get_protocol_targets(self._coll.id)}
+        for t in targets:
+            new_name = unique_copy_name(t.name or "", existing)
+            new_tid = self._db.add_protocol_target(
+                collection_id=self._coll.id, ip=t.ip, port=t.port, name=new_name,
+                encoding=t.encoding, recv_encoding=t.recv_encoding,
+                head_length=t.head_length, timeout=t.timeout,
+                ws_path=t.ws_path, ws_use_ssl=t.ws_use_ssl,
+                send_message=t.send_message, send_presets=t.send_presets,
+                stress_params=t.stress_params)
+            for s in self._db.get_protocol_servers_by_target(t.id):
+                self._db.add_protocol_server(
+                    name=s.name, server_type=s.server_type,
+                    ip=s.ip, port=s.port, encoding=s.encoding,
+                    recv_encoding=s.recv_encoding, head_length=s.head_length,
+                    ws_path=s.ws_path, response_mode=s.response_mode,
+                    response_message=s.response_message,
+                    response_delay=s.response_delay, target_id=new_tid)
+            existing.add(new_name)
+        self._refresh_targets()
+        self.targets_changed.emit()
+
+    def _copy_target_to_clip(self):
+        """Ctrl+C：把选中的协议目标复制到应用内剪贴板（含其下挂服务端）。"""
+        ids = self._get_selected_target_ids()
+        if not ids:
+            return
+        payload = []
+        for t in (self._db.get_protocol_target(tid) for tid in ids):
+            if not t:
+                continue
+            payload.append({
+                "ip": t.ip, "port": t.port, "name": t.name or "",
+                "encoding": t.encoding, "recv_encoding": t.recv_encoding,
+                "head_length": t.head_length, "timeout": t.timeout,
+                "ws_path": t.ws_path, "ws_use_ssl": t.ws_use_ssl,
+                "send_message": t.send_message, "send_presets": t.send_presets,
+                "stress_params": t.stress_params,
+                "servers": [
+                    {"name": s.name, "server_type": s.server_type,
+                     "ip": s.ip, "port": s.port, "encoding": s.encoding or "",
+                     "recv_encoding": s.recv_encoding or "",
+                     "head_length": s.head_length, "ws_path": s.ws_path or "",
+                     "response_mode": s.response_mode,
+                     "response_message": s.response_message or "",
+                     "response_delay": s.response_delay}
+                    for s in self._db.get_protocol_servers_by_target(t.id)
+                ],
+            })
+        if payload:
+            copy_items(KIND_PROTO_TARGET, payload)
+
+    def _paste_target_from_clip(self):
+        """Ctrl+V：把剪贴板中的协议目标粘贴到当前集合，名称追加"副本"。"""
+        if not self._coll:
+            return QMessageBox.information(self, "提示", "请先选择一个集合。")
+        payload = paste_items(KIND_PROTO_TARGET)
+        if not payload:
+            return QMessageBox.information(self, "提示", "剪贴板中没有可粘贴的目标。")
+        existing = {t.name or "" for t in self._db.get_protocol_targets(self._coll.id)}
+        for p in payload:
+            new_name = unique_copy_name(p.get("name", ""), existing)
+            new_tid = self._db.add_protocol_target(
+                collection_id=self._coll.id, ip=p["ip"], port=p["port"], name=new_name,
+                encoding=p.get("encoding", "UTF-8"),
+                recv_encoding=p.get("recv_encoding", "UTF-8"),
+                head_length=p.get("head_length", 5), timeout=p.get("timeout", 30.0),
+                ws_path=p.get("ws_path", ""), ws_use_ssl=p.get("ws_use_ssl", False),
+                send_message=p.get("send_message", ""),
+                send_presets=p.get("send_presets", "[]"),
+                stress_params=p.get("stress_params", "{}"))
+            for s in p.get("servers", []):
+                self._db.add_protocol_server(
+                    name=s["name"], server_type=s["server_type"],
+                    ip=s["ip"], port=s["port"], encoding=s.get("encoding", "UTF-8"),
+                    recv_encoding=s.get("recv_encoding", "UTF-8"),
+                    head_length=s.get("head_length", 5), ws_path=s.get("ws_path", ""),
+                    response_mode=s.get("response_mode", "echo"),
+                    response_message=s.get("response_message", ""),
+                    response_delay=s.get("response_delay", 0), target_id=new_tid)
+            existing.add(new_name)
+        self._refresh_targets()
+        self.targets_changed.emit()
+
     def _on_test_target(self):
         row = self._target_table.currentRow()
         if row < 0:
@@ -1302,6 +1466,7 @@ class _CollectionDetailTab(QWidget):
             menu.addAction("编辑", self._on_edit_target)
             menu.addAction("连通测试", self._on_connectivity_test_requested)
         if self._target_table.selectedIndexes():
+            menu.addAction("复制", self._copy_target)
             menu.addAction("删除", self._on_delete_target)
         menu.addSeparator()
         menu.addAction("全选", lambda: self._target_table.selectAll())
@@ -1337,7 +1502,11 @@ class _CollectionDetailTab(QWidget):
             self.connectivity_test_requested.emit(targets)
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_F5:
+        if event.key() == Qt.Key_C and event.modifiers() == Qt.ControlModifier:
+            self._copy_target_to_clip()
+        elif event.key() == Qt.Key_V and event.modifiers() == Qt.ControlModifier:
+            self._paste_target_from_clip()
+        elif event.key() == Qt.Key_F5:
             self._refresh_targets()
         elif event.key() == Qt.Key_Delete or (event.key() == Qt.Key_D and event.modifiers() == Qt.ControlModifier):
             self._on_delete_target()
@@ -1366,13 +1535,14 @@ class _ServerTab(ServerPanelBase):
         return self._db.get_all_protocol_servers(self._type_filter.currentData())
 
     def _server_columns(self):
-        return ["名称", "类型", "监听地址", "端口", "发送编码", "接收编码", "关联目标", "响应模式", "状态", "操作"]
+        return ["名称", "类型", "监听地址", "端口", "发送编码", "接收编码", "关联目标", "响应模式", "延迟(ms)", "状态", "操作"]
 
     def _row_cells(self, s, is_tcp: bool):
         return [s.name, "TCP" if "tcp" in s.server_type else "WS",
                 s.ip, str(s.port), s.encoding or "", s.recv_encoding or "",
                 self._target_cell(s),
-                "回显" if s.response_mode == "echo" else "固定"]
+                "回显" if s.response_mode == "echo" else "固定",
+                str(s.response_delay)]
 
     def _target_cell(self, s) -> str:
         if s.target_id:
@@ -1758,6 +1928,7 @@ class _StandaloneClientTab(ClientPanelBase):
         except (json.JSONDecodeError, TypeError):
             self._presets = []
         self._load_config()
+        self._apply_stress_params(self._load_stress_from_store())
         self._refresh_preset_list()
 
     # ── 钩子：独立客户端与目标客户端的差异 ──────────────────
@@ -1785,6 +1956,21 @@ class _StandaloneClientTab(ClientPanelBase):
     def save_presets(self, presets):
         self._presets = presets
         self._save_presets_to_settings()
+
+    # ── 压测参数持久化：独立客户端写入 settings 表 ────────────
+
+    def _load_stress_from_store(self) -> dict:
+        raw = self._db.get_setting("standalone_stress", "")
+        if not raw:
+            return {}
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+
+    def _save_stress_to_store(self, sp: dict):
+        self._db.set_setting("standalone_stress",
+                             json.dumps(sp, ensure_ascii=False))
 
     # ── 配置持久化（settings 表）────────────────────────────
 
@@ -1833,6 +2019,7 @@ class _StandaloneClientTab(ClientPanelBase):
             ws_path=self._param_ws_url.text().strip(),
             ws_use_ssl=self._param_ws_ssl.isChecked(),
             send_message=self._send_edit.toPlainText() if proto == "tcp_client" else "",
+            stress_params=json.dumps(self.collect_stress_params(), ensure_ascii=False),
         )
         QMessageBox.information(self, "保存完成", f"已保存到集合 [{coll.name}]")
         self.target_saved.emit()
