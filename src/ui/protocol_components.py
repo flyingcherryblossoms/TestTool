@@ -18,9 +18,10 @@ from datetime import datetime
 from functools import partial
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -53,6 +54,7 @@ from PySide6.QtWidgets import (
 from src.database import Database
 from src.protocol import compute_length_header
 from src.scanner import ScanTarget, ScannerWorker
+from src.ui.http_client import HttpParamWidget, HttpRequestWorker
 from src.ui.protocol_workers import (
     StressTestWorker,
     TcpClientWorker,
@@ -220,6 +222,7 @@ class ClientPanelBase(QWidget):
         self._conn_worker: ScannerWorker | None = None
         self._stress_worker: StressTestWorker | None = None
         self._loading_stress = False
+        self._loading = False  # set_params 加载中，抑制 _save_config / _mark_config_dirty
         self._selected_preset_idx: int | None = None
         self._drafts: dict[int, str] = {}  # 每个预设独立的未保存草稿（索引 → 内容）
         self._dirty: set[int] = set()      # 有未保存修改的预设索引
@@ -292,6 +295,7 @@ class ClientPanelBase(QWidget):
         self._proto_combo = QComboBox()
         self._proto_combo.addItem("TCP", "tcp_client")
         self._proto_combo.addItem("WebSocket", "ws_client")
+        self._proto_combo.addItem("HTTP", "http_client")
         self._proto_combo.currentIndexChanged.connect(self._on_proto_changed)
         self._proto_combo.currentIndexChanged.connect(self._on_param_changed)
         proto_row.addWidget(QLabel("协议:")); proto_row.addWidget(self._proto_combo)
@@ -322,10 +326,15 @@ class ClientPanelBase(QWidget):
         wf.addWidget(self._param_ws_ssl)
         wf.addStretch()
 
+        # HTTP 占位页（HTTP 参数编辑区移到下方发送区域）
+        self._http_placeholder = QWidget()
+        self._http_placeholder.setMaximumHeight(0)
+
         self._param_stack = QStackedWidget()
         self._param_stack.setMaximumHeight(32)
-        self._param_stack.addWidget(self._tcp_params_w)
-        self._param_stack.addWidget(self._ws_params_w)
+        self._param_stack.addWidget(self._tcp_params_w)     # 0: TCP
+        self._param_stack.addWidget(self._ws_params_w)      # 1: WebSocket
+        self._param_stack.addWidget(self._http_placeholder) # 2: HTTP (empty)
         layout.addWidget(self._param_stack)
 
         # 参数变更自动处理（保存 / 标记脏）
@@ -336,12 +345,21 @@ class ClientPanelBase(QWidget):
         self._param_ws_url.textChanged.connect(self._on_param_changed)
         self._param_ws_timeout.valueChanged.connect(self._on_param_changed)
         self._param_ws_ssl.toggled.connect(self._on_param_changed)
+        # TCP/WS 预设改为保存完整配置，参数变更也需标记预设脏
+        self._param_ip.textChanged.connect(self._mark_msg_dirty)
+        self._param_port.valueChanged.connect(self._mark_msg_dirty)
+        self._param_hl.valueChanged.connect(self._mark_msg_dirty)
+        self._param_timeout.valueChanged.connect(self._mark_msg_dirty)
+        self._param_ws_url.textChanged.connect(self._mark_msg_dirty)
+        self._param_ws_timeout.valueChanged.connect(self._mark_msg_dirty)
+        self._param_ws_ssl.toggled.connect(self._mark_msg_dirty)
 
-        # ── 左右分栏：预设 | 发送+响应 ──
-        h_splitter = QSplitter(Qt.Horizontal)
+        # ── 上半区左右分栏：预设 | 发送区域 ──
+        self._top_splitter = QSplitter(Qt.Horizontal)
 
-        preset_g = QGroupBox("预设报文")
-        pl = QVBoxLayout(preset_g)
+        # 左侧：预设配置
+        self._preset_group = QGroupBox("预设配置")
+        pl = QVBoxLayout(self._preset_group)
         self._preset_list = QListWidget()
         self._preset_list.setAlternatingRowColors(False)
         self._preset_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -354,16 +372,23 @@ class ClientPanelBase(QWidget):
         self._preset_selected_label.setWordWrap(True)
         pl.addWidget(self._preset_selected_label)
         pbl = QGridLayout()
-        buttons = [("添加", self._add_preset), ("复制", self._copy_preset),
-                   ("删除", self._delete_preset), ("清空", self._clear_presets)]
-        for i, (btn_text, slot) in enumerate(buttons):
-            pbl.addWidget(QPushButton(btn_text, clicked=slot), i // 3, i % 3)
+        self._preset_add_btn = QPushButton("添加", clicked=self._add_preset)
+        self._preset_save_btn = QPushButton("保存", clicked=self._save_preset)
+        self._preset_delete_btn = QPushButton("删除", clicked=self._delete_preset)
+        self._preset_delete_btn.setStyleSheet(
+            "QPushButton { color: #fff; background-color: #e74c3c; }"
+            "QPushButton:hover { background-color: #c0392b; }"
+        )
+        pbl.addWidget(self._preset_add_btn, 0, 0)
+        pbl.addWidget(self._preset_save_btn, 0, 1)
+        pbl.addWidget(self._preset_delete_btn, 0, 2)
         pl.addLayout(pbl)
-        h_splitter.addWidget(preset_g)
+        self._top_splitter.addWidget(self._preset_group)
 
-        # 右侧：发送 + 响应
-        right_splitter = QSplitter(Qt.Vertical)
+        # 右侧：发送区域（TCP/WS 报文编辑 或 HTTP 参数编辑）
+        self._send_area_stack = QStackedWidget()
 
+        # 页 0: TCP / WS 发送报文区
         self._send_group = QGroupBox("发送报文")
         self._send_group.setMinimumHeight(160)
         sl = QVBoxLayout(self._send_group)
@@ -384,6 +409,7 @@ class ClientPanelBase(QWidget):
         self._param_enc.setEditable(True)
         self._param_enc.setMaximumWidth(85)
         self._param_enc.currentTextChanged.connect(self._on_param_changed)
+        self._param_enc.currentTextChanged.connect(self._mark_msg_dirty)
         sh.addWidget(self._param_enc)
         sh.addWidget(QLabel("格式:"))
         self._send_edit.format_combo.setMaximumWidth(80)
@@ -396,13 +422,15 @@ class ClientPanelBase(QWidget):
         self._terminate_btn.setVisible(False)
         self._terminate_btn.clicked.connect(self._cancel_client)
         sh.addWidget(self._terminate_btn)
-        sh.addWidget(QPushButton("保存", clicked=self._save_preset))
-        sh.addWidget(QPushButton("清空", clicked=self._send_edit.clear))
-        sh.addWidget(QPushButton("格式化", clicked=self._format_message))
-        # 连通性测试：直接检测当前 IP:端口并显示结果，不跳转页面
-        conn_btn = QPushButton("连通测试", clicked=self._run_connectivity_test)
-        conn_btn.setStyleSheet("background-color: #3498db; color: white; font-weight: bold;")
-        sh.addWidget(conn_btn)
+        self._format_send_btn = QPushButton("格式化", clicked=lambda *_: self._format_editor(self._send_edit))
+        sh.addWidget(self._format_send_btn)
+        self._save_preset_btn = QPushButton("保存", clicked=self._save_preset)
+        sh.addWidget(self._save_preset_btn)
+        self._clear_btn = QPushButton("清空", clicked=self._send_edit.clear)
+        sh.addWidget(self._clear_btn)
+        self._conn_test_btn = QPushButton("连通测试", clicked=self._run_connectivity_test)
+        self._conn_test_btn.setStyleSheet("background-color: #3498db; color: white; font-weight: bold;")
+        sh.addWidget(self._conn_test_btn)
         # 压力测试：点击展开/收起下方隐藏的压测参数区
         self._stress_toggle_btn = QPushButton("压力测试")
         self._stress_toggle_btn.setCheckable(True)
@@ -496,8 +524,28 @@ class ClientPanelBase(QWidget):
                   self._stress_dur, self._stress_warm, self._stress_to,
                   self._stress_ramp):
             w.valueChanged.connect(self._on_stress_param_changed)
-        right_splitter.addWidget(self._send_group)
+        self._send_area_stack.addWidget(self._send_group)  # page 0
 
+        # 页 1: HTTP 参数编辑区
+        self._http_params = HttpParamWidget()
+        self._http_params.method_changed.connect(self._on_param_changed)
+        self._http_params._url_edit.textChanged.connect(self._on_param_changed)
+        self._http_params.config_changed.connect(self._on_param_changed)
+        self._http_params.send_requested.connect(self._send_message)
+        self._http_params.cancel_requested.connect(self._cancel_client)
+        self._http_params.method_changed.connect(self._mark_msg_dirty)
+        self._http_params._url_edit.textChanged.connect(self._mark_msg_dirty)
+        self._http_params.config_changed.connect(self._mark_msg_dirty)
+        self._send_area_stack.addWidget(self._http_params)  # page 1
+
+        self._send_area_stack.setCurrentIndex(0)
+        self._top_splitter.addWidget(self._send_area_stack)
+
+        self._top_splitter.setStretchFactor(0, 0)
+        self._top_splitter.setStretchFactor(1, 1)
+        self._top_splitter.setSizes([120, 680])
+
+        # ── 下半区：响应报文（全宽）──
         resp_g = QGroupBox("响应报文")
         rl = QVBoxLayout(resp_g)
         resp_tool = QHBoxLayout()
@@ -507,12 +555,14 @@ class ClientPanelBase(QWidget):
         self._resp_enc_combo.addItems(ENCODINGS)
         self._resp_enc_combo.currentTextChanged.connect(self._refresh_response_display)
         self._resp_enc_combo.currentTextChanged.connect(self._on_param_changed)
+        self._resp_enc_combo.currentTextChanged.connect(self._mark_msg_dirty)
         resp_tool.addWidget(self._resp_enc_combo)
         self._resp_hex_toggle = QPushButton("十六进制")
         self._resp_hex_toggle.setCheckable(True)
         self._resp_hex_toggle.toggled.connect(self._refresh_response_display)
         resp_tool.addWidget(self._resp_hex_toggle)
-        resp_tool.addWidget(QPushButton("清空", clicked=lambda: self._resp_edit.clear()))
+        resp_tool.addWidget(QPushButton("格式化", clicked=lambda *_: self._format_editor(self._resp_edit)))
+        resp_tool.addWidget(QPushButton("清空", clicked=lambda *_: self._resp_edit.clear()))
         resp_tool.addStretch()
         rl.addLayout(resp_tool)
         self._resp_edit = QPlainTextEdit()
@@ -520,42 +570,87 @@ class ClientPanelBase(QWidget):
         self._resp_edit.setPlaceholderText("响应将显示在这里...")
         self._resp_edit.setFont(QFont("Consolas", 10))
         rl.addWidget(self._resp_edit)
-        right_splitter.addWidget(resp_g)
 
-        right_splitter.setStretchFactor(0, 1)
-        right_splitter.setStretchFactor(1, 1)
-        h_splitter.addWidget(right_splitter)
+        # ── 上下分栏：发送区 | 响应区 ──
+        v_splitter = QSplitter(Qt.Vertical)
+        v_splitter.addWidget(self._top_splitter)
+        v_splitter.addWidget(resp_g)
+        v_splitter.setStretchFactor(0, 1)
+        v_splitter.setStretchFactor(1, 1)
+        layout.addWidget(v_splitter)
 
-        h_splitter.setStretchFactor(0, 0)
-        h_splitter.setStretchFactor(1, 1)
-        h_splitter.setSizes([120, 680])
-        layout.addWidget(h_splitter)
+        # Ctrl+S 快捷键（不依赖焦点位置）
+        self._ctrl_s_shortcut = QShortcut(QKeySequence("Ctrl+S"), self)
+        self._ctrl_s_shortcut.activated.connect(self._on_ctrl_s)
 
     # ── 协议切换 / 参数收集 ──────────────────────────────────
 
     def _on_proto_changed(self, idx: int):
-        self._param_stack.setCurrentIndex(
-            0 if self._proto_combo.currentData() == "tcp_client" else 1)
+        data = self._proto_combo.currentData()
+        if data == "tcp_client":
+            self._param_stack.setCurrentIndex(0)
+            self._param_stack.setMaximumHeight(32)
+            self._send_area_stack.setCurrentIndex(0)
+            self._top_splitter.setSizes([120, 680])
+            if self._show_len_label:
+                self._len_label.setVisible(True)
+            self._preset_group.setTitle("预设配置")
+        elif data == "ws_client":
+            self._param_stack.setCurrentIndex(1)
+            self._param_stack.setMaximumHeight(32)
+            self._send_area_stack.setCurrentIndex(0)
+            self._top_splitter.setSizes([120, 680])
+            if self._show_len_label:
+                self._len_label.setVisible(True)
+            self._preset_group.setTitle("预设配置")
+        else:  # http_client
+            self._param_stack.setCurrentIndex(2)
+            self._param_stack.setMaximumHeight(0)
+            self._send_area_stack.setCurrentIndex(1)
+            self._top_splitter.setSizes([150, 650])
+            if self._show_len_label:
+                self._len_label.setVisible(False)
+            self._preset_group.setTitle("预设配置")
 
     def set_params(self, cfg: dict):
-        """从配置 dict 填充参数控件（不触发保存/脏标记语义）。"""
-        proto = cfg.get("proto", "tcp_client")
-        self._proto_combo.setCurrentIndex(0 if proto == "tcp_client" else 1)
-        self._param_stack.setCurrentIndex(0 if proto == "tcp_client" else 1)
-        self._param_ip.setText(cfg.get("ip", "127.0.0.1"))
-        self._param_port.setValue(cfg.get("port", 80))
-        self._param_enc.setCurrentText(cfg.get("encoding", "UTF-8"))
-        self._resp_enc_combo.setCurrentText(cfg.get("recv_encoding", "UTF-8"))
-        self._param_hl.setValue(cfg.get("head_length", 5))
-        self._param_timeout.setValue(cfg.get("timeout", 5.0))
-        self._param_ws_url.setText(cfg.get("ws_url", "ws://127.0.0.1:80/ws"))
-        self._param_ws_timeout.setValue(cfg.get("ws_timeout", 5.0))
-        self._param_ws_ssl.setChecked(cfg.get("ws_ssl", False))
+        """从配置 dict 填充参数控件（抑制加载过程中的保存/脏标记）。"""
+        self._loading = True
+        self._proto_combo.blockSignals(True)
+        try:
+            proto = cfg.get("proto", "tcp_client")
+            if proto == "http_client":
+                self._proto_combo.setCurrentIndex(2)
+                self._param_stack.setCurrentIndex(2)
+                self._http_params.set_config(cfg)  # 完整 HTTP 配置恢复
+            else:
+                self._proto_combo.setCurrentIndex(0 if proto == "tcp_client" else 1)
+                self._param_stack.setCurrentIndex(0 if proto == "tcp_client" else 1)
+                self._param_ip.setText(cfg.get("ip", "127.0.0.1"))
+                self._param_port.setValue(cfg.get("port", 80))
+                self._param_enc.setCurrentText(cfg.get("encoding", "UTF-8"))
+                self._resp_enc_combo.setCurrentText(cfg.get("recv_encoding", "UTF-8"))
+                self._param_hl.setValue(cfg.get("head_length", 5))
+                self._param_timeout.setValue(cfg.get("timeout", 5.0))
+                self._param_ws_url.setText(cfg.get("ws_url", "ws://127.0.0.1:80/ws"))
+                self._param_ws_timeout.setValue(cfg.get("ws_timeout", 5.0))
+                self._param_ws_ssl.setChecked(cfg.get("ws_ssl", False))
+                self._send_edit.setPlainText(cfg.get("send_message", ""))
+        finally:
+            self._proto_combo.blockSignals(False)
+            self._loading = False
+        # 手动触发 UI 切换（_send_area_stack, _preset_group 标题等）
+        # 直接调用基类版本，避免触发子类（_StandaloneClientTab）的协议切换保存逻辑
+        ClientPanelBase._on_proto_changed(self, -1)
 
     def collect_params(self) -> dict:
         """汇总当前协议与参数。"""
+        proto = self._proto_combo.currentData()
+        if proto == "http_client":
+            config = self._http_params.get_config()
+            config["proto"] = proto
+            return config
         return {
-            "proto": self._proto_combo.currentData(),
+            "proto": proto,
             "ip": self._param_ip.text().strip(),
             "port": self._param_port.value(),
             "encoding": self._param_enc.currentText(),
@@ -565,6 +660,7 @@ class ClientPanelBase(QWidget):
             "ws_url": self._param_ws_url.text().strip(),
             "ws_timeout": self._param_ws_timeout.value(),
             "ws_ssl": self._param_ws_ssl.isChecked(),
+            "send_message": self._send_edit.toPlainText(),
         }
 
     def prefill(self, ip: str, port: int):
@@ -575,6 +671,8 @@ class ClientPanelBase(QWidget):
     # ── 脏标记 ───────────────────────────────────────────────
 
     def _mark_config_dirty(self):
+        if self._loading:
+            return
         if not self._config_dirty:
             self._config_dirty = True
             self.config_dirty_changed.emit(True)
@@ -593,6 +691,8 @@ class ClientPanelBase(QWidget):
         self._update_preset_stars()
 
     def _mark_msg_dirty(self):
+        if self._loading:
+            return
         self._msg_dirty = True
         self._sync_current_draft()
         self._update_send_label()
@@ -640,7 +740,11 @@ class ClientPanelBase(QWidget):
         presets = self.get_presets()
         if idx >= len(presets):
             return
-        text = self._send_edit.toPlainText()
+        proto = self._proto_combo.currentData()
+        if proto == "http_client":
+            text = json.dumps(self._http_params.get_config(), ensure_ascii=False)
+        else:
+            text = json.dumps(self.collect_params(), ensure_ascii=False)
         saved = presets[idx].get("message", "")
         if text != saved:
             self._drafts[idx] = text
@@ -729,8 +833,26 @@ class ClientPanelBase(QWidget):
         self._sync_current_draft()
         self._selected_preset_idx = idx
         draft = self._drafts.get(idx)
-        self._send_edit.setPlainText(
-            draft if draft is not None else presets[idx].get("message", ""))
+        proto = self._proto_combo.currentData()
+        if proto == "http_client":
+            config_str = draft if draft is not None else presets[idx].get("message", "{}")
+            try:
+                config = json.loads(config_str)
+            except json.JSONDecodeError:
+                config = {}
+            self._http_params.set_config(config)
+        else:
+            config_str = draft if draft is not None else presets[idx].get("message", "")
+            try:
+                config = json.loads(config_str)
+                if isinstance(config, dict) and "proto" in config:
+                    self.set_params(config)  # 新格式：完整配置
+                else:
+                    # JSON 解析成功但不是配置 dict（例如纯 JSON 报文）
+                    self._send_edit.setPlainText(config_str)
+            except json.JSONDecodeError:
+                # 旧格式：纯文本报文
+                self._send_edit.setPlainText(config_str)
         self._preset_selected_label.setText(f"✓ 已选择: {presets[idx].get('name', '')}")
         self._sync_current_draft()
         self._update_send_label()
@@ -740,7 +862,7 @@ class ClientPanelBase(QWidget):
         if not self._can_edit_presets():
             return
         presets = list(self.get_presets())
-        default_name = f"报文{len(presets) + 1}"
+        default_name = f"配置{len(presets) + 1}"
         name, ok = QInputDialog.getText(self, "添加预设", "预设名称:", text=default_name)
         if not ok or not name.strip():
             return
@@ -748,8 +870,12 @@ class ClientPanelBase(QWidget):
         if any(p.get("name", "") == name for p in presets):
             QMessageBox.warning(self, "名称重复", f"预设「{name}」已存在，请使用其他名称。")
             return
-        # 新预设报文内容为空：清空发送框后直接开始编辑
-        presets.append({"name": name, "message": ""})
+        proto = self._proto_combo.currentData()
+        if proto == "http_client":
+            message = json.dumps(self._http_params.get_config(), ensure_ascii=False)
+        else:
+            message = json.dumps(self.collect_params(), ensure_ascii=False)
+        presets.append({"name": name, "message": message})
         self._selected_preset_idx = len(presets) - 1
         self._drafts.pop(self._selected_preset_idx, None)
         self._dirty.discard(self._selected_preset_idx)
@@ -765,7 +891,11 @@ class ClientPanelBase(QWidget):
         """将当前输入框内容保存到选中的预设，或弹窗选择覆盖/新建。"""
         if not self._can_edit_presets():
             return
-        new_msg = self._send_edit.toPlainText()
+        proto = self._proto_combo.currentData()
+        if proto == "http_client":
+            new_msg = json.dumps(self._http_params.get_config(), ensure_ascii=False)
+        else:
+            new_msg = json.dumps(self.collect_params(), ensure_ascii=False)
         presets = list(self.get_presets())
 
         if self._selected_preset_idx is not None and self._selected_preset_idx < len(presets):
@@ -774,7 +904,7 @@ class ClientPanelBase(QWidget):
         elif presets:
             # 未选中预设：弹窗选择覆盖或新建（双击列表项可直接确认）
             dlg = QDialog(self)
-            dlg.setWindowTitle("保存报文")
+            dlg.setWindowTitle("保存配置")
             dlg.setMinimumWidth(300)
             dl = QVBoxLayout(dlg)
             dl.addWidget(QLabel("选择要覆盖的预设，或新建预设："))
@@ -795,7 +925,7 @@ class ClientPanelBase(QWidget):
             if sel < 0:
                 return
             if sel == 0:
-                default_name = f"报文{len(presets) + 1}"
+                default_name = f"配置{len(presets) + 1}"
                 name, ok = QInputDialog.getText(self, "新建预设", "预设名称:", text=default_name)
                 if not ok or not name.strip():
                     return
@@ -811,7 +941,8 @@ class ClientPanelBase(QWidget):
                 presets[idx]["message"] = new_msg
                 self._selected_preset_idx = idx
         else:
-            name, ok = QInputDialog.getText(self, "新建预设", "预设名称:", text="报文1")
+            default_name = f"配置{len(presets) + 1}"
+            name, ok = QInputDialog.getText(self, "新建预设", "预设名称:", text=default_name)
             if not ok or not name.strip():
                 return
             presets.append({"name": name.strip(), "message": new_msg})
@@ -826,6 +957,8 @@ class ClientPanelBase(QWidget):
                 self._dirty.discard(idx)
         self._refresh_preset_list()
         self._msg_dirty = self._current_is_dirty()
+        # 预设内容即完整配置，保存预设同时也清除配置脏标记
+        self.reset_config_dirty()
         self._update_send_label()
         self._update_preset_stars()
 
@@ -844,7 +977,11 @@ class ClientPanelBase(QWidget):
         if not ok or not name.strip():
             return
         presets[idx]["name"] = name.strip()
-        presets[idx]["message"] = self._send_edit.toPlainText()
+        proto = self._proto_combo.currentData()
+        if proto == "http_client":
+            presets[idx]["message"] = json.dumps(self._http_params.get_config(), ensure_ascii=False)
+        else:
+            presets[idx]["message"] = self._send_edit.toPlainText()
         self._selected_preset_idx = idx
         self._drafts.pop(idx, None)
         self._dirty.discard(idx)
@@ -904,7 +1041,7 @@ class ClientPanelBase(QWidget):
         """Ctrl+V：把剪贴板中的预设报文粘贴到当前列表，名称追加"副本"。"""
         payload = paste_items(KIND_PRESET)
         if not payload:
-            QMessageBox.information(self, "提示", "剪贴板中没有可粘贴的预设报文。")
+            QMessageBox.information(self, "提示", "剪贴板中没有可粘贴的预设配置。")
             return
         if not self._can_edit_presets():
             return
@@ -974,7 +1111,7 @@ class ClientPanelBase(QWidget):
             return
         reply = QMessageBox.question(
             self, "确认清空",
-            f"确定要清空全部 {len(presets)} 个预设报文吗？此操作不可恢复。",
+            f"确定要清空全部 {len(presets)} 个预设配置吗？此操作不可恢复。",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply != QMessageBox.Yes:
             return
@@ -1122,6 +1259,21 @@ class ClientPanelBase(QWidget):
         if self._client_worker and self._client_worker.isRunning():
             QMessageBox.information(self, "提示", "有请求正在进行中。")
             return
+        proto = self._proto_combo.currentData()
+
+        if proto == "http_client":
+            # HTTP: URL 由 HttpParamWidget 提供，不需要 send_edit
+            url = self._http_params.get_url()
+            if not url:
+                QMessageBox.information(self, "提示", "请输入 URL。")
+                return
+            self._http_request_info = f"{self._http_params.get_method()} {url}"
+            self._http_params.set_sending_state(True)
+            self._client_worker = self._http_params.build_worker(parent=self)
+            self._client_worker.finished.connect(self._on_client_done)
+            self._client_worker.start()
+            return
+
         msg = self._send_edit.toPlainText()
         if not msg:
             QMessageBox.information(self, "提示", "请输入要发送的消息。")
@@ -1129,7 +1281,6 @@ class ClientPanelBase(QWidget):
         self._send_btn.setEnabled(False)
         self._send_btn.setText("发送中...")
         self._terminate_btn.setVisible(True)
-        proto = self._proto_combo.currentData()
         self._client_worker = self._build_client_worker(msg, proto)
         self._client_worker.finished.connect(self._on_client_done)
         self._client_worker.start()
@@ -1138,15 +1289,21 @@ class ClientPanelBase(QWidget):
         if self._client_worker and self._client_worker.isRunning():
             self._client_worker.terminate()
             self._client_worker.wait(3000)
-        self._send_btn.setEnabled(True)
-        self._send_btn.setText("发送")
-        self._terminate_btn.setVisible(False)
+        if self._proto_combo.currentData() == "http_client":
+            self._http_params.reset_send_button()
+        else:
+            self._send_btn.setEnabled(True)
+            self._send_btn.setText("发送")
+            self._terminate_btn.setVisible(False)
         self._resp_edit.appendPlainText("[终止] 请求已被用户终止")
 
     def _on_client_done(self, success: bool, response: str):
-        self._send_btn.setEnabled(True)
-        self._send_btn.setText("发送")
-        self._terminate_btn.setVisible(False)
+        if self._proto_combo.currentData() == "http_client":
+            self._http_params.reset_send_button()
+        else:
+            self._send_btn.setEnabled(True)
+            self._send_btn.setText("发送")
+            self._terminate_btn.setVisible(False)
         self._last_response = response
         enc = self._response_encoding()
         try:
@@ -1159,8 +1316,14 @@ class ClientPanelBase(QWidget):
                 self._resp_enc_combo.setCurrentText(detected)
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         tag = "OK" if success else "FAIL"
-        ip = self._client_ip_label()
-        request = self._send_edit.toPlainText()
+        http_info = getattr(self, '_http_request_info', '')
+        if http_info:
+            ip = http_info
+            request = http_info
+            self._http_request_info = ''
+        else:
+            ip = self._client_ip_label()
+            request = self._send_edit.toPlainText()
         self._append_response(
             f"-------------------------------------------------------------------------------\n"
             f"[{ts}][客户端][{ip}]:\n{request}\n"
@@ -1198,11 +1361,70 @@ class ClientPanelBase(QWidget):
                 text = self._last_raw.decode(enc, errors="replace")
             self._resp_edit.setPlainText(text)
 
+    def _format_editor(self, editor: QPlainTextEdit):
+        """自动检测内容类型（JSON / XML）并格式化编辑器内容。"""
+        import xml.dom.minidom
+        text = editor.toPlainText()
+        if not text.strip():
+            return
+
+        # 提取可能存在的 HTTP 响应头
+        body = text
+        header = ""
+        if "\n\n" in text:
+            parts = text.split("\n\n", 1)
+            header = parts[0]
+            body = parts[1] if len(parts) > 1 else text
+
+        stripped = body.strip()
+
+        # 尝试 JSON
+        if stripped.startswith(("{", "[")):
+            try:
+                formatted = json.dumps(json.loads(stripped), indent=2, ensure_ascii=False)
+                if header:
+                    formatted = header + "\n\n" + formatted
+                editor.setPlainText(formatted)
+                return
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        # 尝试 XML
+        if stripped.startswith("<"):
+            try:
+                dom = xml.dom.minidom.parseString(stripped)
+                formatted = dom.toprettyxml(indent="  ")
+                if header:
+                    formatted = header + "\n\n" + formatted
+                editor.setPlainText(formatted)
+                return
+            except Exception:
+                pass
+
+        QMessageBox.information(self, "格式化失败",
+                                "内容不是有效的 JSON 或 XML。\n"
+                                "JSON 需以 { 或 [ 开头，XML 需以 < 开头。")
+
     def _append_response(self, text: str):
         if self._resp_hex_toggle.isChecked():
             self._refresh_response_display()
         else:
             self._resp_edit.appendPlainText(text)
+
+    def _on_ctrl_s(self):
+        """Ctrl+S 统一处理入口（QShortcut 触发，不依赖焦点位置）。"""
+        if self._selected_preset_idx is not None:
+            self._save_preset()
+        elif self._send_edit.hasFocus():
+            self._save_preset()
+        else:
+            fw = QApplication.focusWidget()
+            if self._proto_combo.currentData() == "http_client" \
+                    and fw is not None \
+                    and self._http_params.isAncestorOf(fw):
+                self._save_preset()
+            else:
+                self._on_ctrl_s_no_focus()
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_C and event.modifiers() == Qt.ControlModifier:
@@ -1218,10 +1440,7 @@ class ClientPanelBase(QWidget):
         ):
             self._delete_preset()
         elif event.key() == Qt.Key_S and event.modifiers() == Qt.ControlModifier:
-            if self._send_edit.hasFocus():
-                self._save_preset()
-            else:
-                self._on_ctrl_s_no_focus()
+            self._on_ctrl_s()
         else:
             super().keyPressEvent(event)
 

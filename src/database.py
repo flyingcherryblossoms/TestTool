@@ -103,21 +103,16 @@ class ProtocolServer:
 
 @dataclass
 class ProtocolTarget:
-    """协议测试集合内的目标 IP:Port，含独立客户端参数。"""
+    """协议测试集合内的目标。
+
+    配置（IP/端口/编码/超时/报文等）全部保存在 send_presets JSON 中，
+    不再使用独立列存储。DisplayInfo 可按需解析预设获取展示字段。
+    """
     id: int
     collection_id: int
     name: str = ""
-    ip: str = ""
-    port: int = 0
-    encoding: str = "UTF-8"
-    recv_encoding: str = "UTF-8"
-    head_length: int = 5              # 0=raw, >0=长度头位数
-    timeout: float = 30.0
-    ws_path: str = ""                 # WebSocket 路径
-    ws_use_ssl: bool = False
-    send_message: str = ""            # 发送消息模板
-    send_presets: str = "[]"          # JSON 格式多预设报文 [{"name":"...","message":"..."}]
-    stress_params: str = "{}"         # JSON 格式压测参数 {"concurrency":..,"qps_limit":..,..}
+    send_presets: str = "{}"          # JSON: {proto: [{name, message}, ...]}
+    stress_params: str = "{}"         # JSON: {"concurrency":..,"qps_limit":..,..}
     sort_order: int = 0
     created_at: str = ""
 
@@ -242,16 +237,7 @@ CREATE TABLE IF NOT EXISTS protocol_targets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     collection_id INTEGER NOT NULL,
     name TEXT DEFAULT '',
-    ip TEXT NOT NULL,
-    port INTEGER NOT NULL,
-    encoding TEXT DEFAULT 'UTF-8',
-    recv_encoding TEXT DEFAULT 'UTF-8',
-    head_length INTEGER DEFAULT 5,
-    timeout REAL DEFAULT 30.0,
-    ws_path TEXT DEFAULT '',
-    ws_use_ssl INTEGER DEFAULT 0,
-    send_message TEXT DEFAULT '',
-    send_presets TEXT DEFAULT '[]',
+    send_presets TEXT DEFAULT '{}',
     stress_params TEXT DEFAULT '{}',
     sort_order INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT (datetime('now', 'localtime')),
@@ -285,6 +271,91 @@ CREATE TABLE IF NOT EXISTS app_settings (
 """
 
 
+# ── 辅助函数 ──────────────────────────────────────────────
+
+
+def _protocol_target_from_row(r) -> ProtocolTarget:
+    """从数据库行构建 ProtocolTarget，兼容新旧 schema。"""
+    def _get(key, default):
+        try:
+            return r[key]
+        except (KeyError, IndexError):
+            return default
+
+    return ProtocolTarget(
+        id=_get("id", 0),
+        collection_id=_get("collection_id", 0),
+        name=_get("name", ""),
+        send_presets=_get("send_presets", "{}"),
+        stress_params=_get("stress_params", "{}"),
+        sort_order=_get("sort_order", 0),
+        created_at=_get("created_at", ""),
+    )
+
+
+def target_display_info(target: ProtocolTarget) -> dict:
+    """从目标的 send_presets 中提取展示信息（IP、端口、协议类型、编码等）。
+
+    返回 dict 包含: proto, ip, port, encoding, recv_encoding, head_length,
+    timeout, ws_url, ws_ssl, send_message, url, http_method
+    用于表格展示和旧代码兼容。
+    """
+    import json as _json
+    try:
+        all_presets = _json.loads(target.send_presets) if target.send_presets else {}
+    except (_json.JSONDecodeError, TypeError):
+        all_presets = {}
+
+    if not isinstance(all_presets, dict):
+        return _empty_display_info()
+
+    # _active_proto 记录用户最后使用的协议，优先使用
+    active = all_presets.get("_active_proto", "")
+    proto_order = [active] + [p for p in ("tcp_client", "ws_client", "http_client") if p != active] if active else ("tcp_client", "ws_client", "http_client")
+
+    # 按优先级查找有"默认配置"的协议
+    for proto in proto_order:
+        proto_presets = all_presets.get(proto, [])
+        if not isinstance(proto_presets, list):
+            continue
+        default = next((p for p in proto_presets if p.get("name") == "默认配置"), None)
+        if not default:
+            # 取第一个预设作为展示数据
+            default = proto_presets[0] if proto_presets else None
+        if default:
+            try:
+                cfg = _json.loads(default.get("message", "{}"))
+            except (_json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(cfg, dict):
+                cfg["_proto"] = proto
+                return {
+                    "proto": proto,
+                    "ip": cfg.get("ip", ""),
+                    "port": cfg.get("port", 0),
+                    "encoding": cfg.get("encoding", "UTF-8"),
+                    "recv_encoding": cfg.get("recv_encoding", "UTF-8"),
+                    "head_length": cfg.get("head_length", 0),
+                    "timeout": cfg.get("timeout", 30.0),
+                    "ws_url": cfg.get("ws_url", ""),
+                    "ws_ssl": cfg.get("ws_ssl", False),
+                    "send_message": cfg.get("send_message", ""),
+                    "url": cfg.get("url", ""),
+                    "http_method": cfg.get("method", "GET"),
+                }
+    return _empty_display_info()
+
+
+def _empty_display_info() -> dict:
+    return {
+        "proto": "tcp_client", "ip": "", "port": 0,
+        "encoding": "UTF-8", "recv_encoding": "UTF-8",
+        "head_length": 0, "timeout": 30.0,
+        "ws_url": "", "ws_ssl": False,
+        "send_message": "", "url": "", "http_method": "GET",
+    }
+
+
 # ── Database 类 ───────────────────────────────────────────
 
 
@@ -311,7 +382,7 @@ class Database:
                 )
             except sqlite3.OperationalError:
                 pass  # 列已存在
-            # 目标压测参数字段：老库缺列时幂等补列（默认空对象）
+            # 目标压测参数字段：老库缺列时幂等补列
             try:
                 conn.execute(
                     "ALTER TABLE protocol_targets "
@@ -1062,53 +1133,51 @@ class Database:
                 WHERE collection_id = ?
                 ORDER BY sort_order, created_at
             """, (collection_id,)).fetchall()
-            return [ProtocolTarget(
-                id=r["id"], collection_id=r["collection_id"],
-                ip=r["ip"], port=r["port"],
-                name=r["name"],
-                encoding=r["encoding"], recv_encoding=r["recv_encoding"],
-                head_length=r["head_length"],
-                timeout=r["timeout"], ws_path=r["ws_path"],
-                ws_use_ssl=bool(r["ws_use_ssl"]),
-                send_message=r["send_message"],
-                send_presets=r["send_presets"],
-                stress_params=r["stress_params"],
-                sort_order=r["sort_order"], created_at=r["created_at"]
-            ) for r in rows]
+            return [_protocol_target_from_row(r) for r in rows]
 
-    def add_protocol_target(self, collection_id: int, ip: str, port: int,
+    def add_protocol_target(self, collection_id: int,
                             name: str = "",
-                            encoding: str = "UTF-8",
-                            recv_encoding: str = "UTF-8",
-                            head_length: int = 5,
-                            timeout: float = 30.0,
-                            ws_path: str = "",
-                            ws_use_ssl: bool = False,
-                            send_message: str = "",
-                            send_presets: str = "[]",
-                            stress_params: str = "{}") -> int:
-        """添加协议目标，返回新 ID。"""
+                            send_presets: str = "{}",
+                            stress_params: str = "{}",
+                            **_kwargs) -> int:
+        """添加协议目标，返回新 ID。
+
+        旧字段 (ip, port, encoding, ...) 通过 **_kwargs 兼容忽略。
+        调用者应在创建目标后立即通过预设保存完整配置。
+        """
         with self._connect() as conn:
-            cur = conn.execute("""
-                INSERT INTO protocol_targets
-                    (collection_id, name, ip, port, encoding,
-                     recv_encoding, head_length, timeout, ws_path, ws_use_ssl,
-                     send_message, send_presets, stress_params)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (collection_id, name, ip.strip(), port, encoding,
-                  recv_encoding, head_length, timeout, ws_path,
-                  1 if ws_use_ssl else 0, send_message, send_presets,
-                  stress_params))
+            # 检测旧列是否存在（兼容老库 NOT NULL 约束）
+            cols = [r["name"] for r in conn.execute(
+                "PRAGMA table_info(protocol_targets)").fetchall()]
+            has_old = "ip" in cols
+            if has_old:
+                cur = conn.execute("""
+                    INSERT INTO protocol_targets
+                        (collection_id, name, ip, port,
+                         encoding, recv_encoding, head_length, timeout,
+                         ws_path, ws_use_ssl, send_message,
+                         send_presets, stress_params, url, http_config)
+                    VALUES (?, ?, '', 0,
+                            'UTF-8', 'UTF-8', 0, 30.0,
+                            '', 0, '',
+                            ?, ?, '', '{}')
+                """, (collection_id, name, send_presets, stress_params))
+            else:
+                cur = conn.execute("""
+                    INSERT INTO protocol_targets
+                        (collection_id, name, send_presets, stress_params)
+                    VALUES (?, ?, ?, ?)
+                """, (collection_id, name, send_presets, stress_params))
             return cur.lastrowid
 
     def add_protocol_targets_batch(self, targets: list[tuple]) -> int:
-        """批量添加协议目标。targets 为 [(collection_id, name, ip, port), ...]"""
+        """批量添加协议目标。targets 为 [(collection_id, name), ...]"""
         with self._connect() as conn:
             count = 0
-            for cid, name, ip, port in targets:
+            for cid, name in targets:
                 conn.execute(
-                    "INSERT INTO protocol_targets (collection_id, name, ip, port) VALUES (?, ?, ?, ?)",
-                    (cid, name, ip.strip(), port)
+                    "INSERT INTO protocol_targets (collection_id, name) VALUES (?, ?)",
+                    (cid, name)
                 )
                 count += 1
             return count
@@ -1133,52 +1202,37 @@ class Database:
                 "SELECT * FROM protocol_targets WHERE id = ?", (target_id,)
             ).fetchone()
             if r:
-                return ProtocolTarget(
-                    id=r["id"], collection_id=r["collection_id"],
-                    ip=r["ip"], port=r["port"],
-                    name=r["name"],
-                    encoding=r["encoding"], recv_encoding=r["recv_encoding"],
-                    head_length=r["head_length"],
-                    timeout=r["timeout"], ws_path=r["ws_path"],
-                    ws_use_ssl=bool(r["ws_use_ssl"]),
-                    send_message=r["send_message"],
-                send_presets=r["send_presets"],
-                    stress_params=r["stress_params"],
-                    sort_order=r["sort_order"], created_at=r["created_at"]
-                )
+                return _protocol_target_from_row(r)
             return None
 
-    def update_protocol_target(self, target_id: int, ip: str, port: int,
-                               name: str = "",
-                               encoding: str = "UTF-8",
-                               recv_encoding: str = "UTF-8",
-                               head_length: int = 5,
-                               timeout: float = 30.0,
-                               ws_path: str = "",
-                               ws_use_ssl: bool = False,
-                               send_message: str = "",
-                               send_presets: str = "[]",
-                               stress_params: str | None = None) -> None:
-        """更新协议目标（含客户端参数）。
+    def update_protocol_target(self, target_id: int, *,
+                               name: str | None = None,
+                               send_presets: str | None = None,
+                               stress_params: str | None = None,
+                               **kwargs) -> None:
+        """更新协议目标（配置已移入预设，仅更新名称/预设/压测参数）。
 
-        stress_params 为 None 时保持不变（供不涉及压测的调用方沿用旧值）。
+        旧字段 (ip, port, encoding, ...) 通过 **kwargs 兼容，直接忽略。
         """
         with self._connect() as conn:
-            fields = ["name", "ip", "port", "encoding", "recv_encoding",
-                      "head_length", "timeout", "ws_path", "ws_use_ssl",
-                      "send_message", "send_presets"]
-            values = [name, ip.strip(), port, encoding, recv_encoding,
-                      head_length, timeout, ws_path, 1 if ws_use_ssl else 0,
-                      send_message, send_presets]
+            fields = []
+            values = []
+            if name is not None:
+                fields.append("name")
+                values.append(name)
+            if send_presets is not None:
+                fields.append("send_presets")
+                values.append(send_presets)
             if stress_params is not None:
                 fields.append("stress_params")
                 values.append(stress_params)
-            values.append(target_id)
-            conn.execute(
-                f"UPDATE protocol_targets SET "
-                f"{', '.join(f'{f} = ?' for f in fields)} "
-                f"WHERE id = ?",
-                values)
+            if fields:
+                values.append(target_id)
+                conn.execute(
+                    f"UPDATE protocol_targets SET "
+                    f"{', '.join(f'{f} = ?' for f in fields)} "
+                    f"WHERE id = ?",
+                    values)
 
     # ── 协议测试会话操作 ────────────────────────────────────
 

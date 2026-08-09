@@ -21,7 +21,7 @@ import json
 from datetime import datetime
 from functools import partial
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QSettings, QTimer, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QSplitter,
+    QStackedWidget,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -52,7 +53,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.database import Database
+from src.database import Database, target_display_info
 from src.protocol import compute_length_header
 from src.ui.clipboard import KIND_PROTO_TARGET, copy_items, paste_items
 from src.ui.collection_sidebar import CollectionSidebarBase
@@ -84,15 +85,73 @@ from src.ui.protocol_components import (
 
 
 def _target_proto_label(target) -> str:
-    """根据目标参数推断实际协议类型。"""
-    is_tcp = bool(target.head_length or target.encoding != "UTF-8")
-    is_ws = bool(target.ws_path and target.ws_path.startswith("ws"))
-    if is_tcp and is_ws:
-        return "TCP/WS"
-    elif is_ws:
+    """根据目标参数推断实际协议类型。优先检查 send_presets 中的协议。"""
+    # 优先从 send_presets 推断
+    try:
+        sp = json.loads(target.send_presets) if target.send_presets else {}
+    except (json.JSONDecodeError, TypeError):
+        sp = {}
+    if isinstance(sp, dict):
+        keys = [k for k in sp if sp[k]]  # 有预设的协议
+        if "http_client" in keys:
+            return "HTTP"
+        if "ws_client" in keys and "tcp_client" not in keys:
+            return "WS"
+        if keys:
+            return "TCP"  # 包含 tcp_client 或混合
+    # 回退：从 display_info 推断
+    info = target_display_info(target)
+    proto = info.get("proto", "tcp_client")
+    if proto == "http_client":
+        return "HTTP"
+    elif proto == "ws_client":
         return "WS"
+    return "TCP"
+
+
+def _normalize_import_presets(t: dict) -> str:
+    """将导入数据中的预设规范化为 {proto: [...]} JSON 字符串。
+
+    兼容旧格式（扁平列表）和新格式（dict）。若数据中只有旧字段（ip/port 等），
+    自动构建"默认配置"预设。
+    """
+    raw = t.get("send_presets", [])
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            raw = []
+    if isinstance(raw, dict):
+        # 已是新格式 — 确保有 _active_proto
+        if "_active_proto" not in raw and raw:
+            first = next(iter(raw))
+            if first != "_active_proto":
+                raw["_active_proto"] = first
+        return json.dumps(raw, ensure_ascii=False)
+    if isinstance(raw, list) and raw:
+        # 旧格式扁平列表：包装为 tcp_client（或从 protocol_type 推断）
+        proto = t.get("protocol_type", "tcp_client")
+        return json.dumps({"_active_proto": proto, proto: raw}, ensure_ascii=False)
+    # 无预设：从旧字段构建默认配置
+    proto = t.get("protocol_type", "tcp_client")
+    if proto == "http_client":
+        cfg = {"method": t.get("http_method", "GET"), "url": t.get("url", ""),
+               "proto": proto}
     else:
-        return "TCP"
+        cfg = {
+            "proto": proto, "ip": t.get("ip", ""), "port": t.get("port", 0),
+            "encoding": t.get("encoding", "UTF-8"),
+            "recv_encoding": t.get("recv_encoding", "UTF-8"),
+            "head_length": t.get("head_length", 5),
+            "timeout": t.get("timeout", 30.0),
+            "ws_url": t.get("ws_path", ""),
+            "ws_ssl": t.get("ws_use_ssl", False),
+            "send_message": t.get("send_message", ""),
+        }
+    return json.dumps(
+        {"_active_proto": proto,
+         proto: [{"name": "默认配置", "message": json.dumps(cfg, ensure_ascii=False)}]},
+        ensure_ascii=False)
 
 
 def _slot(fn, *args):
@@ -104,30 +163,119 @@ def _slot(fn, *args):
 # ── 对话框 ──────────────────────────────────────────────────
 
 class _TargetDialog(QDialog):
-    """添加/编辑协议目标对话框 —— 支持所有目标字段。"""
+    """添加/编辑协议目标对话框 —— 按协议类型显示不同字段。"""
+
     def __init__(self, title: str, db: Database,
                  default_collection_id: int | None = None,
                  ip: str = "", port: int = 80,
                  name: str = "", encoding: str = "UTF-8",
                  recv_encoding: str = "UTF-8", head_length: int = 5,
                  timeout: float = 30.0, ws_path: str = "",
-                 ws_use_ssl: bool = False, send_message: str = "",
+                 ws_use_ssl: bool = False, url: str = "",
+                 http_method: str = "GET",
                  parent=None):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setMinimumWidth(420)
         layout = QFormLayout(self)
+
+        # 推断当前协议类型
+        if url:
+            self._proto_type = "http_client"
+        elif ws_path.startswith("ws"):
+            self._proto_type = "ws_client"
+        else:
+            self._proto_type = "tcp_client"
+
+        # ── 协议选择 ──
+        self._proto_combo = QComboBox()
+        self._proto_combo.addItem("TCP", "tcp_client")
+        self._proto_combo.addItem("WebSocket", "ws_client")
+        self._proto_combo.addItem("HTTP", "http_client")
+        idx = self._proto_combo.findData(self._proto_type)
+        if idx >= 0:
+            self._proto_combo.setCurrentIndex(idx)
+        self._proto_combo.currentIndexChanged.connect(self._on_proto_changed)
+        layout.addRow("协议:", self._proto_combo)
+
+        # 名称
         self._name = QLineEdit(name)
         self._name.setPlaceholderText("目标名称")
         layout.addRow("名称:", self._name)
+
+        # ── 协议参数栈 ──
+        self._proto_stack = QStackedWidget()
+
+        # TCP 页
+        tcp_w = QWidget()
+        tcp_f = QFormLayout(tcp_w)
         self._ip = QLineEdit(ip)
         self._ip.setPlaceholderText("192.168.1.1")
-        layout.addRow("IP:", self._ip)
+        tcp_f.addRow("IP:", self._ip)
         self._port = QSpinBox()
         self._port.setRange(1, 65535)
         self._port.setValue(port)
-        layout.addRow("端口:", self._port)
-        # 集合选择：默认当前集合，否则未分类
+        tcp_f.addRow("端口:", self._port)
+        self._enc = QComboBox()
+        self._enc.addItems(ENCODINGS)
+        self._enc.setEditable(True)
+        self._enc.setCurrentText(encoding)
+        tcp_f.addRow("发送编码:", self._enc)
+        self._recv_enc = QComboBox()
+        self._recv_enc.addItems(ENCODINGS)
+        self._recv_enc.setEditable(True)
+        self._recv_enc.setCurrentText(recv_encoding)
+        tcp_f.addRow("接收编码:", self._recv_enc)
+        self._hl = QSpinBox()
+        self._hl.setRange(0, 20)
+        self._hl.setValue(head_length)
+        self._hl.setSuffix("位")
+        tcp_f.addRow("头长度:", self._hl)
+        self._timeout = QDoubleSpinBox()
+        self._timeout.setRange(0.1, 60)
+        self._timeout.setValue(timeout)
+        self._timeout.setSingleStep(0.5)
+        self._timeout.setSuffix("s")
+        tcp_f.addRow("超时:", self._timeout)
+        self._proto_stack.addWidget(tcp_w)  # 0
+
+        # WebSocket 页
+        ws_w = QWidget()
+        ws_f = QFormLayout(ws_w)
+        self._ws_url = QLineEdit(ws_path or "ws://127.0.0.1:80/ws")
+        self._ws_url.setPlaceholderText("ws://127.0.0.1:80/ws")
+        ws_f.addRow("URL:", self._ws_url)
+        self._ws_ssl = QCheckBox("SSL")
+        self._ws_ssl.setChecked(ws_use_ssl)
+        ws_f.addRow("SSL:", self._ws_ssl)
+        self._ws_timeout = QDoubleSpinBox()
+        self._ws_timeout.setRange(0.1, 60)
+        self._ws_timeout.setValue(timeout)
+        self._ws_timeout.setSingleStep(0.5)
+        self._ws_timeout.setSuffix("s")
+        ws_f.addRow("超时:", self._ws_timeout)
+        self._proto_stack.addWidget(ws_w)  # 1
+
+        # HTTP 页
+        http_w = QWidget()
+        http_f = QFormLayout(http_w)
+        self._http_method = QComboBox()
+        self._http_method.addItems(["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
+        self._http_method.setEditable(True)
+        midx = self._http_method.findText(http_method.upper())
+        if midx >= 0:
+            self._http_method.setCurrentIndex(midx)
+        else:
+            self._http_method.setCurrentText(http_method.upper() or "GET")
+        http_f.addRow("Method:", self._http_method)
+        self._http_url = QLineEdit(url)
+        self._http_url.setPlaceholderText("http://example.com/api")
+        http_f.addRow("URL:", self._http_url)
+        self._proto_stack.addWidget(http_w)  # 2
+
+        layout.addRow(self._proto_stack)
+
+        # 集合选择
         self._collection_combo = QComboBox()
         self._uncat_collection_id = None
         for c in db.get_all_protocol_collections():
@@ -141,78 +289,112 @@ class _TargetDialog(QDialog):
         if idx >= 0:
             self._collection_combo.setCurrentIndex(idx)
         layout.addRow("所属集合:", self._collection_combo)
-        self._enc = QComboBox()
-        self._enc.addItems(ENCODINGS)
-        self._enc.setEditable(True)
-        self._enc.setCurrentText(encoding)
-        layout.addRow("发送编码:", self._enc)
-        self._recv_enc = QComboBox()
-        self._recv_enc.addItems(ENCODINGS)
-        self._recv_enc.setEditable(True)
-        self._recv_enc.setCurrentText(recv_encoding)
-        layout.addRow("接收编码:", self._recv_enc)
-        self._hl = QSpinBox()
-        self._hl.setRange(0, 20)
-        self._hl.setValue(head_length)
-        self._hl.setSuffix("位")
-        layout.addRow("头长度:", self._hl)
-        self._timeout = QDoubleSpinBox()
-        self._timeout.setRange(0.1, 60)
-        self._timeout.setValue(timeout)
-        self._timeout.setSingleStep(0.5)
-        self._timeout.setSuffix("s")
-        layout.addRow("超时:", self._timeout)
-        self._ws_path = QLineEdit(ws_path)
-        layout.addRow("WS路径:", self._ws_path)
-        self._ws_ssl = QCheckBox("SSL")
-        self._ws_ssl.setChecked(ws_use_ssl)
-        layout.addRow("WS SSL:", self._ws_ssl)
-        self._send_msg = FormatTextEdit(text=send_message)
-        self._send_msg.setFixedHeight(60)
-        layout.addRow("报文格式:", self._send_msg.format_combo)
-        layout.addRow("发送报文:", self._send_msg)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._validate)
         buttons.rejected.connect(self.reject)
         layout.addRow(buttons)
 
+        # 初始状态
+        self._on_proto_changed()
+
+    def _on_proto_changed(self):
+        """切换协议时显示对应的参数页。"""
+        proto = self._proto_combo.currentData()
+        if proto == "tcp_client":
+            self._proto_stack.setCurrentIndex(0)
+        elif proto == "ws_client":
+            self._proto_stack.setCurrentIndex(1)
+        else:
+            self._proto_stack.setCurrentIndex(2)
+
     def _validate(self):
         import re
-        ip = self._ip.text().strip()
-        if not ip:
-            QMessageBox.warning(self, "验证失败", "IP 地址不能为空。")
-            return
-        pattern = r'^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$'
-        m = re.match(pattern, ip)
-        if not m:
-            QMessageBox.warning(self, "验证失败",
-                                "IP 地址格式不正确，请输入有效的 IPv4 地址（例如 192.168.1.1）。")
-            return
-        parts = [int(g) for g in m.groups()]
-        if any(p > 255 for p in parts):
-            QMessageBox.warning(self, "验证失败",
-                                "IP 地址超出范围，每段取值范围为 0-255。")
-            return
-        port = self._port.value()
-        if port < 1 or port > 65535:
-            QMessageBox.warning(self, "验证失败",
-                                "端口号超出范围，有效范围为 1-65535。")
-            return
+        proto = self._proto_combo.currentData()
+        if proto == "tcp_client":
+            ip = self._ip.text().strip()
+            if not ip:
+                QMessageBox.warning(self, "验证失败", "IP 地址不能为空。")
+                return
+            pattern = r'^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$'
+            m = re.match(pattern, ip)
+            if not m:
+                QMessageBox.warning(self, "验证失败",
+                                    "IP 地址格式不正确，请输入有效的 IPv4 地址（例如 192.168.1.1）。")
+                return
+            parts = [int(g) for g in m.groups()]
+            if any(p > 255 for p in parts):
+                QMessageBox.warning(self, "验证失败", "IP 地址超出范围，每段取值范围为 0-255。")
+                return
+            if self._port.value() < 1 or self._port.value() > 65535:
+                QMessageBox.warning(self, "验证失败", "端口号超出范围，有效范围为 1-65535。")
+                return
+        elif proto == "ws_client":
+            url = self._ws_url.text().strip()
+            if not url:
+                QMessageBox.warning(self, "验证失败", "WebSocket URL 不能为空。")
+                return
+            if not url.startswith(("ws://", "wss://")):
+                QMessageBox.warning(self, "验证失败", "WebSocket URL 必须以 ws:// 或 wss:// 开头。")
+                return
+        else:  # http_client
+            url = self._http_url.text().strip()
+            if not url:
+                QMessageBox.warning(self, "验证失败", "HTTP URL 不能为空。")
+                return
+            if not url.startswith(("http://", "https://")):
+                url = "http://" + url
+                self._http_url.setText(url)
         self.accept()
 
+    @property
+    def protocol_type(self) -> str:
+        """当前选择的协议类型。"""
+        return self._proto_combo.currentData()
+
     def get_data(self) -> dict:
-        return dict(
-            ip=self._ip.text().strip(),
-            port=self._port.value(),
+        """根据协议类型返回对应字段。"""
+        proto = self._proto_combo.currentData()
+        result = dict(
             name=self._name.text().strip(),
-            encoding=self._enc.currentText(),
-            recv_encoding=self._recv_enc.currentText(),
-            head_length=self._hl.value(),
-            timeout=self._timeout.value(),
-            ws_path=self._ws_path.text().strip(),
-            ws_use_ssl=self._ws_ssl.isChecked(),
-            send_message=self._send_msg.toPlainText(),
+            proto=proto,
         )
+        if proto == "tcp_client":
+            result.update(
+                ip=self._ip.text().strip(),
+                port=self._port.value(),
+                encoding=self._enc.currentText(),
+                recv_encoding=self._recv_enc.currentText(),
+                head_length=self._hl.value(),
+                timeout=self._timeout.value(),
+                ws_path="",
+                ws_use_ssl=False,
+            )
+        elif proto == "ws_client":
+            result.update(
+                ip="0.0.0.0",
+                port=0,
+                encoding="UTF-8",
+                recv_encoding="UTF-8",
+                head_length=0,
+                ws_path=self._ws_url.text().strip(),
+                ws_use_ssl=self._ws_ssl.isChecked(),
+                timeout=self._ws_timeout.value(),
+            )
+        else:  # http_client
+            result.update(
+                ip="0.0.0.0",
+                port=80,
+                encoding="UTF-8",
+                recv_encoding="UTF-8",
+                head_length=0,
+                timeout=30.0,
+                ws_path=self._http_url.text().strip(),
+                ws_use_ssl=False,
+                url=self._http_url.text().strip(),
+                http_method=self._http_method.currentText().strip().upper() or "GET",
+            )
+        return result
 
     @property
     def collection_id(self) -> int | None:
@@ -260,11 +442,8 @@ class _CollectionSidebar(CollectionSidebarBase):
         """把源集合的全部目标复制到新集合（含目标上挂的服务端配置）。"""
         for t in self._db.get_protocol_targets(src_cid):
             tid = self._db.add_protocol_target(
-                collection_id=new_cid, ip=t.ip, port=t.port, name=t.name,
-                encoding=t.encoding, recv_encoding=t.recv_encoding,
-                head_length=t.head_length, timeout=t.timeout,
-                ws_path=t.ws_path, ws_use_ssl=t.ws_use_ssl,
-                send_message=t.send_message, send_presets=t.send_presets,
+                collection_id=new_cid, name=t.name,
+                send_presets=t.send_presets,
                 stress_params=t.stress_params,
             )
             for s in self._db.get_protocol_servers_by_target(t.id):
@@ -323,15 +502,11 @@ class _CollectionSidebar(CollectionSidebarBase):
                     name=coll_data["name"], protocol_type=coll_data["protocol_type"]
                 )
                 for t in coll_data["targets"]:
-                    presets = json.dumps(t.get("send_presets", []), ensure_ascii=False)
+                    presets = _normalize_import_presets(t)
                     stress = json.dumps(t.get("stress_params", {}), ensure_ascii=False)
                     tid = self._db.add_protocol_target(
-                        collection_id=cid, ip=t["ip"], port=t["port"],
-                        name=t.get("name", ""), encoding=t["encoding"],
-                        recv_encoding=t.get("recv_encoding", "UTF-8"),
-                        head_length=t["head_length"], timeout=t["timeout"],
-                        ws_path=t["ws_path"], ws_use_ssl=t["ws_use_ssl"],
-                        send_message=t["send_message"], send_presets=presets,
+                        collection_id=cid, name=t.get("name", ""),
+                        send_presets=presets,
                         stress_params=stress,
                     )
                     for s in t.get("servers", []):
@@ -374,20 +549,26 @@ class _CollectionSidebar(CollectionSidebarBase):
             for t in targets:
                 servers = self._db.get_protocol_servers_by_target(t.id)
                 try:
-                    presets = json.loads(t.send_presets) if t.send_presets else []
+                    presets = json.loads(t.send_presets) if t.send_presets else {}
                 except json.JSONDecodeError:
-                    presets = []
+                    presets = {}
                 try:
                     stress = json.loads(t.stress_params) if t.stress_params else {}
                 except (json.JSONDecodeError, TypeError):
                     stress = {}
+                info = target_display_info(t)
                 targets_data.append({
-                    "ip": t.ip, "port": t.port, "name": t.name,
-                    "encoding": t.encoding, "recv_encoding": t.recv_encoding,
-                    "head_length": t.head_length,
-                    "timeout": t.timeout, "ws_path": t.ws_path,
-                    "ws_use_ssl": t.ws_use_ssl, "send_message": t.send_message,
+                    "name": t.name,
                     "send_presets": presets, "stress_params": stress,
+                    # 兼容旧格式：冗余字段
+                    "ip": info["ip"], "port": info["port"],
+                    "encoding": info["encoding"], "recv_encoding": info["recv_encoding"],
+                    "head_length": info["head_length"],
+                    "timeout": info["timeout"], "ws_path": info.get("ws_url", ""),
+                    "ws_use_ssl": info.get("ws_ssl", False),
+                    "send_message": info.get("send_message", ""),
+                    "url": info.get("url", ""),
+                    "http_config": {},
                     "servers": [{"name": s.name, "server_type": s.server_type,
                                  "ip": s.ip, "port": s.port, "encoding": s.encoding,
                                  "recv_encoding": s.recv_encoding,
@@ -425,12 +606,12 @@ class TargetClientPanel(ClientPanelBase):
 
     def __init__(self, owner: "_TargetDetailPanel"):
         self._owner = owner
+        self._prev_proto = "tcp_client"  # 协议切换时跟踪上一个协议
         super().__init__(owner._db, parent=owner, show_len_label=True)
 
     # ── 钩子 ────────────────────────────────────────────────
 
     def _build_action_buttons(self, proto_row):
-        proto_row.addWidget(QPushButton("保存参数", clicked=self._owner._save_params))
         proto_row.addWidget(QPushButton("导出配置", clicked=self._owner._export_target))
         proto_row.addWidget(QPushButton("导入配置", clicked=self._owner._import_target_config))
         # 服务端展开/收起按钮
@@ -440,10 +621,40 @@ class TargetClientPanel(ClientPanelBase):
         proto_row.addWidget(self._server_toggle_btn)
 
     def _on_param_changed(self):
-        self._mark_config_dirty()
+        # 配置通过预设持久化，不标记 config_dirty（由 _mark_msg_dirty 处理）
+        pass
 
     def _on_ctrl_s_no_focus(self):
-        self._owner._save_params()
+        """Ctrl+S 无焦点时：保存当前配置到默认预设。"""
+        self._save_as_default_preset()
+
+    def _on_proto_changed(self, idx: int):
+        """协议切换时自动保存旧协议配置到默认预设、加载新协议预设。"""
+        new_proto = self._proto_combo.currentData()
+        if new_proto == self._prev_proto:
+            ClientPanelBase._on_proto_changed(self, idx)
+            return
+        # 保存旧协议的预设草稿，并把当前配置存入"默认配置"预设
+        self._sync_current_draft()
+        if self._dirty:
+            self.save_all_drafts()
+        if self._owner._target:
+            self._save_as_default_preset()
+        # 切换 UI
+        self._prev_proto = new_proto
+        ClientPanelBase._on_proto_changed(self, idx)
+        # 重置草稿/脏状态，加载新协议预设
+        self._drafts.clear()
+        self._dirty.clear()
+        self._selected_preset_idx = None
+        self._msg_dirty = False
+        self._refresh_preset_list()
+        self._update_send_label()
+        # 新协议确保存在"默认配置"预设
+        if self._owner._target:
+            self._ensure_default_preset()
+            # 更新 _active_proto，确保下次加载按最近使用的协议展示
+            self._update_active_proto(new_proto)
 
     def _can_send(self) -> bool:
         return bool(self._owner._target)
@@ -453,10 +664,49 @@ class TargetClientPanel(ClientPanelBase):
 
     def get_presets(self):
         t = self._owner._target
-        return self._owner._load_presets(t.send_presets) if t else []
+        if not t:
+            return []
+        proto = self._proto_combo.currentData()
+        return self._owner._load_presets(t.send_presets, proto)
 
     def save_presets(self, presets):
-        self._owner._save_presets_to_target(presets)
+        proto = self._proto_combo.currentData()
+        self._owner._save_presets_to_target(presets, proto)
+
+    def _ensure_default_preset(self):
+        """确保当前协议下存在"默认配置"预设；不存在则从当前参数创建。"""
+        presets = list(self.get_presets())
+        default_name = "默认配置"
+        existing = next((p for p in presets if p.get("name") == default_name), None)
+        if existing is None:
+            proto = self._proto_combo.currentData()
+            if proto == "http_client":
+                config = json.dumps(self._http_params.get_config(), ensure_ascii=False)
+            else:
+                config = json.dumps(self.collect_params(), ensure_ascii=False)
+            presets.append({"name": default_name, "message": config})
+            self.save_presets(presets)
+            self._refresh_preset_list()
+
+    def _save_as_default_preset(self):
+        """将当前参数保存到"默认配置"预设（没有则新建）。"""
+        default_name = "默认配置"
+        presets = list(self.get_presets())
+        proto = self._proto_combo.currentData()
+        if proto == "http_client":
+            config = json.dumps(self._http_params.get_config(), ensure_ascii=False)
+        else:
+            config = json.dumps(self.collect_params(), ensure_ascii=False)
+        for p in presets:
+            if p.get("name") == default_name:
+                p["message"] = config
+                self.save_presets(presets)
+                self._refresh_preset_list()
+                return
+        # 不存在则新建
+        presets.append({"name": default_name, "message": config})
+        self.save_presets(presets)
+        self._refresh_preset_list()
 
     def _build_client_worker(self, msg, proto):
         if proto == "tcp_client":
@@ -480,11 +730,20 @@ class TargetClientPanel(ClientPanelBase):
     def _record_session(self, success: bool, response: str, request: str):
         owner = self._owner
         if owner._target and owner._coll:
+            proto = self._proto_combo.currentData()
+            if proto == "http_client":
+                protocol_type = "http_client"
+                url = self._http_params.get_url() if self._http_params else ""
+                ip, port = url, 0
+            else:
+                protocol_type = owner._coll.protocol_type
+                ip = self._param_ip.text().strip()
+                port = self._param_port.value()
             owner._db.add_protocol_test_session(
                 collection_id=owner._coll.id, collection_name=owner._coll.name,
-                target_id=owner._target.id, protocol_type=owner._coll.protocol_type,
-                target_ip=self._param_ip.text().strip(),
-                target_port=self._param_port.value(),
+                target_id=owner._target.id, protocol_type=protocol_type,
+                target_ip=ip,
+                target_port=port,
                 success=success, request=request,
                 response=response, error_msg="" if success else response,
             )
@@ -528,21 +787,49 @@ class TargetClientPanel(ClientPanelBase):
         self._selected_preset_idx = None
         self._drafts.clear()
         self._dirty.clear()
-        proto_idx = 0 if _target_proto_label(target) != "WS" else 1
-        cfg = {
-            "proto": "ws_client" if proto_idx == 1 else "tcp_client",
-            "ip": target.ip, "port": target.port,
-            "encoding": target.encoding, "recv_encoding": target.recv_encoding,
-            "head_length": target.head_length, "timeout": target.timeout,
-            "ws_url": target.ws_path if (target.ws_path and target.ws_path.startswith("ws"))
-            else "ws://127.0.0.1:80/ws",
-            "ws_timeout": target.timeout, "ws_ssl": target.ws_use_ssl,
-        }
+        # 从预设中提取配置信息
+        info = target_display_info(target)
+        proto = info.get("proto", "tcp_client")
+        label = _target_proto_label(target)
+        if proto == "http_client":
+            cfg = {"proto": "http_client"}
+            # 尝试从预设中获取完整 HTTP 配置
+            try:
+                all_p = json.loads(target.send_presets) if target.send_presets else {}
+            except json.JSONDecodeError:
+                all_p = {}
+            if isinstance(all_p, dict):
+                http_presets = all_p.get("http_client", [])
+                default = next((p for p in http_presets if p.get("name") == "默认配置"), None)
+                if default:
+                    try:
+                        cfg = json.loads(default.get("message", "{}"))
+                    except json.JSONDecodeError:
+                        pass
+            if "url" not in cfg:
+                cfg["url"] = info.get("url", "")
+            if "method" not in cfg:
+                cfg["method"] = info.get("http_method", "GET")
+            cfg["proto"] = "http_client"
+        else:
+            cfg = {
+                "proto": proto,
+                "ip": info["ip"], "port": info["port"],
+                "encoding": info["encoding"], "recv_encoding": info["recv_encoding"],
+                "head_length": info["head_length"], "timeout": info["timeout"],
+                "ws_url": info.get("ws_url", "") or "ws://127.0.0.1:80/ws",
+                "ws_timeout": info["timeout"], "ws_ssl": info.get("ws_ssl", False),
+                "send_message": info.get("send_message", ""),
+            }
         self.set_params(cfg)
         self._apply_stress_params(self._load_stress_from_store())
-        self._send_edit.setPlainText(target.send_message)
+        self._send_edit.setPlainText(info.get("send_message", ""))
         self._update_len_label()
+        # 同步 _prev_proto 以正确跟踪协议切换
+        self._prev_proto = cfg.get("proto", "tcp_client")
         self._refresh_preset_list()
+        # 确保当前协议存在"默认配置"预设
+        self._ensure_default_preset()
 
 
 class TargetMockServerPanel(ServerPanelBase):
@@ -736,22 +1023,56 @@ class _TargetDetailPanel(QWidget):
 
     # ── 预设辅助 ────────────────────────────────────────────
 
-    def _load_presets(self, presets_json: str):
+    def _load_presets(self, presets_json: str, proto: str = ""):
+        """按协议提取预设列表。新格式为 {proto: [...]}，旧格式为 [...] 直接返回。"""
         try:
-            return json.loads(presets_json) if presets_json else []
+            data = json.loads(presets_json) if presets_json else []
         except json.JSONDecodeError:
             return []
+        if isinstance(data, list):
+            # 旧格式：扁平列表，按原样返回（首次保存时会迁移为新格式）
+            return data
+        if isinstance(data, dict):
+            return data.get(proto, [])
+        return []
 
-    def _save_presets_to_target(self, presets: list):
-        if self._target:
+    def _save_presets_to_target(self, presets: list, proto: str = ""):
+        """按协议分组保存预设（新格式：{proto: [...]}）。"""
+        if not self._target:
+            return
+        # 读取现有预设，兼容旧格式（扁平列表）
+        try:
+            all_presets = json.loads(self._target.send_presets) if self._target.send_presets else {}
+        except json.JSONDecodeError:
+            all_presets = {}
+        if isinstance(all_presets, list):
+            # 迁移旧格式 → 新格式：旧列表归入当前协议
+            all_presets = {proto: all_presets} if proto else {}
+        if proto:
+            all_presets[proto] = presets
+            all_presets["_active_proto"] = proto
+        self._db.update_protocol_target(
+            self._target.id,
+            name=self._target.name,
+            send_presets=json.dumps(all_presets, ensure_ascii=False),
+        )
+
+    def _update_active_proto(self, proto: str):
+        """更新 presets JSON 中的 _active_proto 提示，不改变预设内容。"""
+        if not self._target:
+            return
+        try:
+            all_presets = json.loads(self._target.send_presets) if self._target.send_presets else {}
+        except json.JSONDecodeError:
+            all_presets = {}
+        if isinstance(all_presets, list):
+            all_presets = {proto: all_presets} if proto else {}
+        if isinstance(all_presets, dict) and all_presets.get("_active_proto") != proto:
+            all_presets["_active_proto"] = proto
             self._db.update_protocol_target(
-                self._target.id, ip=self._target.ip, port=self._target.port,
-                name=self._target.name, encoding=self._target.encoding,
-                recv_encoding=self._target.recv_encoding,
-                head_length=self._target.head_length, timeout=self._target.timeout,
-                ws_path=self._target.ws_path, ws_use_ssl=self._target.ws_use_ssl,
-                send_message=self._target.send_message,
-                send_presets=json.dumps(presets, ensure_ascii=False),
+                self._target.id,
+                name=self._target.name,
+                send_presets=json.dumps(all_presets, ensure_ascii=False),
             )
 
     def _on_presets_saved(self):
@@ -761,60 +1082,57 @@ class _TargetDetailPanel(QWidget):
 
     # ── 保存参数 / 导出 / 导入 ──────────────────────────────
 
-    def _save_params(self):
-        if not self._target:
-            return
-        p = self._client_panel.collect_params()
-        proto = p["proto"]
-        self._db.update_protocol_target(
-            self._target.id,
-            ip=p["ip"], port=p["port"],
-            name=self._target.name,
-            encoding=p["encoding"] if proto == "tcp_client" else "UTF-8",
-            recv_encoding=p["recv_encoding"] if proto == "tcp_client" else "UTF-8",
-            head_length=p["head_length"] if proto == "tcp_client" else 0,
-            timeout=p["timeout"] if proto == "tcp_client" else p["ws_timeout"],
-            ws_path=p["ws_url"] if proto == "ws_client" else "",
-            ws_use_ssl=p["ws_ssl"],
-            send_message=self._target.send_message,
-            send_presets=self._target.send_presets,
-            stress_params=json.dumps(
-                self._client_panel.collect_stress_params(), ensure_ascii=False),
-        )
-        self._target = self._db.get_protocol_target(self._target.id)
-        self.target_updated.emit()
-        self._client_panel.reset_config_dirty()
-
     def _export_target(self):
         if not self._target:
             return
         t = self._target
         servers = self._db.get_protocol_servers_by_target(t.id)
         try:
-            presets = json.loads(t.send_presets) if t.send_presets else []
+            presets = json.loads(t.send_presets) if t.send_presets else {}
         except json.JSONDecodeError:
-            presets = []
+            presets = {}
         try:
             stress = json.loads(t.stress_params) if t.stress_params else {}
         except (json.JSONDecodeError, TypeError):
             stress = {}
+        info = target_display_info(t)
+        proto = info.get("proto", "tcp_client")
+        label = _target_proto_label(t)
         data = {
             "version": 1, "type": "protocol_client_config",
-            "protocol_type": "tcp_client" if _target_proto_label(t) != "WS" else "ws_client",
-            "ip": t.ip, "port": t.port, "encoding": t.encoding,
-            "recv_encoding": t.recv_encoding,
-            "head_length": t.head_length, "timeout": t.timeout,
-            "ws_url": t.ws_path, "ws_use_ssl": t.ws_use_ssl,
-            "send_message": t.send_message, "send_presets": presets,
-            "stress_params": stress,
+            "protocol_type": proto,
+            "ip": info["ip"], "port": info["port"],
+            "encoding": info["encoding"], "recv_encoding": info["recv_encoding"],
+            "head_length": info["head_length"], "timeout": info["timeout"],
+            "ws_url": info.get("ws_url", ""), "ws_use_ssl": info.get("ws_ssl", False),
+            "send_message": info.get("send_message", ""),
+            "send_presets": presets, "stress_params": stress,
             "servers": [{"name": s.name, "server_type": s.server_type,
                          "ip": s.ip, "port": s.port, "encoding": s.encoding,
                          "recv_encoding": s.recv_encoding,
                          "head_length": s.head_length, "ws_path": s.ws_path,
                          "response_mode": s.response_mode,
-                         "response_message": s.response_message} for s in servers],
+                         "response_message": s.response_message,
+                         "response_delay": s.response_delay} for s in servers],
         }
-        filepath, _ = QFileDialog.getSaveFileName(self, "导出目标", f"{t.ip}_{t.port}.json",
+        if label == "HTTP":
+            data["protocol_type"] = "http_client"
+            data["http_config"] = {}
+            if proto == "http_client":
+                try:
+                    all_p = json.loads(t.send_presets) if t.send_presets else {}
+                except json.JSONDecodeError:
+                    all_p = {}
+                http_presets = all_p.get("http_client", []) if isinstance(all_p, dict) else []
+                default = next((p for p in http_presets if p.get("name") == "默认配置"), None)
+                if default:
+                    try:
+                        data["http_config"] = json.loads(default.get("message", "{}"))
+                    except json.JSONDecodeError:
+                        pass
+            data["http_url"] = info.get("url", "")
+        filepath, _ = QFileDialog.getSaveFileName(self, "导出目标",
+                                                   f"{info['ip']}_{info['port']}.json",
                                                    "JSON 文件 (*.json);;所有文件 (*)")
         if not filepath:
             return
@@ -837,24 +1155,24 @@ class _TargetDetailPanel(QWidget):
         if not result or not isinstance(result[0], dict):
             return
         cfg = result[0]
-        proto = cfg.get("protocol_type", "tcp_client")
+        # 只导入预设和压测参数（配置全部在预设中）
+        presets = cfg.get("send_presets", [])
+        if isinstance(presets, list):
+            # 旧格式：扁平列表 → 包装为当前协议
+            proto = cfg.get("protocol_type", "tcp_client")
+            presets = {"_active_proto": proto, proto: presets}
+        elif isinstance(presets, dict) and "_active_proto" not in presets:
+            from src.database import target_display_info
+            presets["_active_proto"] = cfg.get("protocol_type", "tcp_client")
         self._db.update_protocol_target(
             self._target.id,
-            ip=cfg.get("ip", self._target.ip),
-            port=cfg.get("port", self._target.port),
-            name=self._target.name,
-            encoding=cfg.get("encoding", "UTF-8"),
-            recv_encoding=cfg.get("recv_encoding", self._target.recv_encoding),
-            head_length=cfg.get("head_length", 5),
-            timeout=cfg.get("timeout", 5.0),
-            ws_path=cfg.get("ws_url", ""),
-            ws_use_ssl=cfg.get("ws_use_ssl", False),
-            send_message=cfg.get("send_message", ""),
-            send_presets=json.dumps(cfg.get("send_presets", []), ensure_ascii=False),
+            send_presets=json.dumps(presets, ensure_ascii=False),
             stress_params=json.dumps(cfg.get("stress_params", {}), ensure_ascii=False),
         )
         self._target = self._db.get_protocol_target(self._target.id)
         self.target_updated.emit()
+        # 重新加载目标（会加载默认配置预设）
+        self._client_panel.load_target(self._target)
         QMessageBox.information(self, "导入完成", "目标配置已更新。")
 
     def _toggle_server_panel(self):
@@ -1037,7 +1355,7 @@ class _TargetDetailPanel(QWidget):
         rows = [
             [
                 s.started_at,
-                "TCP" if "tcp" in s.protocol_type else "WS",
+                "HTTP" if "http" in s.protocol_type else ("WS" if "ws" in s.protocol_type else "TCP"),
                 s.target_ip,
                 s.target_port,
                 "OK" if s.success else "FAIL",
@@ -1106,10 +1424,19 @@ class _TargetDetailPanel(QWidget):
             else:
                 self._delete_hist_sessions()
         elif event.key() == Qt.Key_S and event.modifiers() == Qt.ControlModifier:
-            if self._client_panel._send_edit.hasFocus():
-                self._client_panel._save_preset()
+            cp = self._client_panel
+            if cp._selected_preset_idx is not None:
+                cp._save_preset()
+            elif cp._send_edit.hasFocus():
+                cp._save_preset()
             else:
-                self._save_params()
+                fw = QApplication.focusWidget()
+                if cp._proto_combo.currentData() == "http_client" \
+                        and fw is not None \
+                        and cp._http_params.isAncestorOf(fw):
+                    cp._save_preset()
+                else:
+                    cp._save_as_default_preset()
         else:
             super().keyPressEvent(event)
 
@@ -1143,7 +1470,7 @@ class _CollectionDetailTab(QWidget):
         layout.addLayout(top_bar)
 
         sel_bar = QHBoxLayout()
-        sel_bar.addWidget(QPushButton("全选", clicked=lambda: self._target_table.selectAll()))
+        sel_bar.addWidget(QPushButton("全选", clicked=lambda *_: self._target_table.selectAll()))
         sel_bar.addWidget(QPushButton("反选", clicked=self._invert_target_selection))
         sel_bar.addStretch()
         sel_bar.addWidget(QPushButton("刷新", clicked=self._refresh_targets))
@@ -1162,6 +1489,7 @@ class _CollectionDetailTab(QWidget):
         self._target_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self._target_table.customContextMenuRequested.connect(self._on_target_menu)
         enable_stretch_fill(self._target_table)
+        self._target_table.horizontalHeader().sectionResized.connect(self._save_target_column_widths)
         layout.addWidget(self._target_table)
 
         tbl = QHBoxLayout()
@@ -1169,7 +1497,12 @@ class _CollectionDetailTab(QWidget):
         tbl.addWidget(QPushButton("编辑", clicked=self._on_edit_target))
         tbl.addWidget(QPushButton("删除", clicked=self._on_delete_target))
         tbl.addWidget(QPushButton("复制", clicked=self._copy_target))
-        tbl.addWidget(QPushButton("测试", clicked=self._on_test_target))
+        proto_test_btn = QPushButton("协议测试", clicked=self._on_test_target)
+        proto_test_btn.setStyleSheet(
+            "QPushButton { color: #fff; background-color: #8e44ad; padding: 4px 12px; }"
+            "QPushButton:hover { background-color: #9b59b6; }"
+        )
+        tbl.addWidget(proto_test_btn)
         conn_btn = QPushButton("连通测试", clicked=self._on_connectivity_test_requested)
         conn_btn.setStyleSheet("background-color: #3498db; color: white; font-weight: bold;")
         tbl.addWidget(conn_btn)
@@ -1189,51 +1522,56 @@ class _CollectionDetailTab(QWidget):
             refresh_tooltips(self._target_table)
             return
         targets = self._db.get_protocol_targets(self._coll.id)
+        # 预先解析 display_info 以便搜索/排序
+        target_infos = [(t, target_display_info(t)) for t in targets]
         # 搜索过滤
         search = self._target_search.text().strip().lower()
         if search:
-            targets = [t for t in targets if
-                       search in t.ip.lower() or
-                       search in str(t.port) or
-                       search in (t.name or "").lower() or
-                       search in (t.encoding or "").lower() or
-                       search in _target_proto_label(t).lower()]
+            target_infos = [
+                (t, info) for t, info in target_infos
+                if search in info["ip"].lower() or
+                   search in str(info["port"]) or
+                   search in (t.name or "").lower() or
+                   search in info["encoding"].lower() or
+                   search in _target_proto_label(t).lower()
+            ]
         # 排序
         if self._target_sort_col >= 0:
             key_map = {
-                0: lambda t: (t.name or "").lower(),
-                1: lambda t: tuple(int(o) for o in t.ip.split(".")),
-                2: lambda t: t.port,
-                3: lambda t: (t.encoding or "").lower(),
-                4: lambda t: (t.recv_encoding or "").lower(),
-                5: lambda t: t.head_length,
-                6: lambda t: t.timeout,
-                7: lambda t: _target_proto_label(t),
+                0: lambda ti: (ti[0].name or "").lower(),
+                1: lambda ti: tuple(int(o) for o in ti[1]["ip"].split(".")),
+                2: lambda ti: ti[1]["port"],
+                3: lambda ti: ti[1]["encoding"].lower(),
+                4: lambda ti: ti[1]["recv_encoding"].lower(),
+                5: lambda ti: ti[1]["head_length"],
+                6: lambda ti: ti[1]["timeout"],
+                7: lambda ti: _target_proto_label(ti[0]),
             }
             key_fn = key_map.get(self._target_sort_col)
             if key_fn:
-                targets.sort(key=key_fn, reverse=not self._target_sort_asc)
-        self._target_count_label.setText(f"<b>目标列表</b> ({len(targets)})")
+                target_infos.sort(key=key_fn, reverse=not self._target_sort_asc)
+        self._target_count_label.setText(f"<b>目标列表</b> ({len(target_infos)})")
         t = self._target_table
         t.setColumnCount(8)
         t.setHorizontalHeaderLabels(["名称", "IP", "端口", "发送编码", "接收编码", "HeadLen", "超时", "类型"])
         self._update_target_sort_indicator()
 
-        t.setRowCount(len(targets))
-        for row, target in enumerate(targets):
+        t.setRowCount(len(target_infos))
+        for row, (target, info) in enumerate(target_infos):
             name_item = QTableWidgetItem(target.name or "")
             name_item.setData(Qt.UserRole, target.id)
             t.setItem(row, 0, name_item)
-            t.setItem(row, 1, QTableWidgetItem(target.ip))
-            pi = QTableWidgetItem(str(target.port)); pi.setTextAlignment(Qt.AlignCenter)
+            t.setItem(row, 1, QTableWidgetItem(info["ip"]))
+            pi = QTableWidgetItem(str(info["port"])); pi.setTextAlignment(Qt.AlignCenter)
             t.setItem(row, 2, pi)
-            t.setItem(row, 3, QTableWidgetItem(target.encoding))
-            t.setItem(row, 4, QTableWidgetItem(target.recv_encoding))
-            t.setItem(row, 5, QTableWidgetItem(str(target.head_length)))
-            ti = QTableWidgetItem(f"{target.timeout}s"); ti.setTextAlignment(Qt.AlignCenter)
-            t.setItem(row, 6, ti)
+            t.setItem(row, 3, QTableWidgetItem(info["encoding"]))
+            t.setItem(row, 4, QTableWidgetItem(info["recv_encoding"]))
+            t.setItem(row, 5, QTableWidgetItem(str(info["head_length"])))
+            ti_w = QTableWidgetItem(f"{info['timeout']}s"); ti_w.setTextAlignment(Qt.AlignCenter)
+            t.setItem(row, 6, ti_w)
             t.setItem(row, 7, QTableWidgetItem(_target_proto_label(target)))
         refresh_tooltips(t)
+        self._restore_target_column_widths()
 
     def _invert_target_selection(self):
         model = self._target_table.model()
@@ -1273,6 +1611,39 @@ class _CollectionDetailTab(QWidget):
                         " ▼" if c == self._target_sort_col else ""
                 item.setText(base + arrow)
 
+    # ── 列宽持久化 ──────────────────────────────────────
+
+    # 协议测试目标表格默认列宽（比连通测试紧凑）
+    _DEFAULT_TARGET_COL_WIDTHS = {
+        0: 120,  # 名称
+        1: 100,  # IP
+        2: 50,   # 端口
+        3: 65,   # 发送编码
+        4: 65,   # 接收编码
+        5: 55,   # HeadLen
+        6: 50,   # 超时
+        7: 60,   # 类型
+    }
+
+    def _save_target_column_widths(self):
+        """保存用户调整后的列宽到 QSettings。"""
+        settings = QSettings("TestTool", "TestTool")
+        t = self._target_table
+        for col in range(t.columnCount()):
+            settings.setValue(f"proto_target_col_{col}", t.columnWidth(col))
+
+    def _restore_target_column_widths(self):
+        """从 QSettings 恢复列宽，首次运行时使用默认紧凑列宽。"""
+        settings = QSettings("TestTool", "TestTool")
+        t = self._target_table
+        hh = t.horizontalHeader()
+        for col in range(t.columnCount()):
+            saved = settings.value(f"proto_target_col_{col}")
+            if saved is not None:
+                hh.resizeSection(col, int(saved))
+            elif col in self._DEFAULT_TARGET_COL_WIDTHS:
+                hh.resizeSection(col, self._DEFAULT_TARGET_COL_WIDTHS[col])
+
     def _on_target_double_clicked(self, row: int, col: int):
         if not self._coll:
             return
@@ -1293,7 +1664,30 @@ class _CollectionDetailTab(QWidget):
             cid = dlg.collection_id
             if cid is None:
                 cid = self._ensure_uncat_collection()
-            self._db.add_protocol_target(collection_id=cid, **dlg.get_data())
+            d = dlg.get_data()
+            proto = d.pop("proto", "tcp_client")
+            name = d.pop("name", "")
+            url = d.pop("url", "")
+            http_method = d.pop("http_method", "GET")
+
+            # 构建默认预设配置
+            if proto == "http_client":
+                cfg = {"method": http_method, "url": url, "proto": proto}
+                preset_msg = json.dumps(cfg, ensure_ascii=False)
+            else:
+                cfg = d
+                cfg["proto"] = proto
+                preset_msg = json.dumps(cfg, ensure_ascii=False)
+
+            send_presets = json.dumps(
+                {"_active_proto": proto,
+                 proto: [{"name": "默认配置", "message": preset_msg}]},
+                ensure_ascii=False)
+
+            self._db.add_protocol_target(
+                collection_id=cid, name=name,
+                send_presets=send_presets,
+            )
             self._refresh_targets()
             self.targets_changed.emit()
 
@@ -1315,15 +1709,65 @@ class _CollectionDetailTab(QWidget):
         t = self._db.get_protocol_target(tid)
         if not t:
             return
+        # 从发送预设中提取当前协议和配置
+        info = target_display_info(t)
+        proto = info.get("proto", "tcp_client")
+        http_method = info.get("http_method", "GET")
+
         dlg = _TargetDialog("编辑目标", self._db, default_collection_id=t.collection_id,
-                            ip=t.ip, port=t.port, name=t.name,
-                            encoding=t.encoding, recv_encoding=t.recv_encoding,
-                            head_length=t.head_length, timeout=t.timeout,
-                            ws_path=t.ws_path, ws_use_ssl=t.ws_use_ssl,
-                            send_message=t.send_message, parent=self)
+                            ip=info["ip"], port=info["port"], name=t.name,
+                            encoding=info["encoding"], recv_encoding=info["recv_encoding"],
+                            head_length=info["head_length"], timeout=info["timeout"],
+                            ws_path=info.get("ws_url", ""), ws_use_ssl=info.get("ws_ssl", False),
+                            url=info.get("url", ""), http_method=http_method, parent=self)
         if dlg.exec() == QDialog.Accepted:
             d = dlg.get_data()
-            self._db.update_protocol_target(target_id=tid, **d, send_presets=t.send_presets)
+            new_proto = d.pop("proto", "tcp_client")
+            new_name = d.pop("name", "")
+            url = d.pop("url", "")
+            http_method = d.pop("http_method", "GET")
+
+            # 保留现有预设结构，更新默认配置
+            try:
+                all_presets = json.loads(t.send_presets) if t.send_presets else {}
+            except json.JSONDecodeError:
+                all_presets = {}
+            if not isinstance(all_presets, dict):
+                # 旧格式迁移
+                all_presets = {proto: all_presets} if isinstance(all_presets, list) else {}
+
+            # 构建新默认配置
+            if new_proto == "http_client":
+                cfg = {"method": http_method, "url": url, "proto": new_proto}
+            else:
+                cfg = d
+                cfg["proto"] = new_proto
+            preset_msg = json.dumps(cfg, ensure_ascii=False)
+
+            # 协议变更：清空旧协议预设，为新协议创建
+            if new_proto != proto:
+                all_presets = {"_active_proto": new_proto,
+                               new_proto: [{"name": "默认配置", "message": preset_msg}]}
+            else:
+                # 同协议：更新"默认配置"预设
+                proto_presets = all_presets.get(new_proto, [])
+                if not isinstance(proto_presets, list):
+                    proto_presets = []
+                updated = False
+                for p in proto_presets:
+                    if p.get("name") == "默认配置":
+                        p["message"] = preset_msg
+                        updated = True
+                        break
+                if not updated:
+                    proto_presets.insert(0, {"name": "默认配置", "message": preset_msg})
+                all_presets[new_proto] = proto_presets
+                all_presets["_active_proto"] = new_proto
+
+            self._db.update_protocol_target(
+                target_id=tid, name=new_name,
+                send_presets=json.dumps(all_presets, ensure_ascii=False),
+            )
             new_cid = dlg.collection_id
             if new_cid is not None and new_cid != t.collection_id:
                 self._db.move_protocol_target_ids_to_collection([tid], new_cid)
@@ -1365,11 +1809,8 @@ class _CollectionDetailTab(QWidget):
         for t in targets:
             new_name = unique_copy_name(t.name or "", existing)
             new_tid = self._db.add_protocol_target(
-                collection_id=self._coll.id, ip=t.ip, port=t.port, name=new_name,
-                encoding=t.encoding, recv_encoding=t.recv_encoding,
-                head_length=t.head_length, timeout=t.timeout,
-                ws_path=t.ws_path, ws_use_ssl=t.ws_use_ssl,
-                send_message=t.send_message, send_presets=t.send_presets,
+                collection_id=self._coll.id, name=new_name,
+                send_presets=t.send_presets,
                 stress_params=t.stress_params)
             for s in self._db.get_protocol_servers_by_target(t.id):
                 self._db.add_protocol_server(
@@ -1392,13 +1833,18 @@ class _CollectionDetailTab(QWidget):
         for t in (self._db.get_protocol_target(tid) for tid in ids):
             if not t:
                 continue
+            info = target_display_info(t)
             payload.append({
-                "ip": t.ip, "port": t.port, "name": t.name or "",
-                "encoding": t.encoding, "recv_encoding": t.recv_encoding,
-                "head_length": t.head_length, "timeout": t.timeout,
-                "ws_path": t.ws_path, "ws_use_ssl": t.ws_use_ssl,
-                "send_message": t.send_message, "send_presets": t.send_presets,
+                "name": t.name or "",
+                "send_presets": t.send_presets,
                 "stress_params": t.stress_params,
+                # 兼容旧版剪贴板格式：冗余字段
+                "ip": info["ip"], "port": info["port"],
+                "encoding": info["encoding"], "recv_encoding": info["recv_encoding"],
+                "head_length": info["head_length"], "timeout": info["timeout"],
+                "ws_path": info.get("ws_url", ""), "ws_use_ssl": info.get("ws_ssl", False),
+                "send_message": info.get("send_message", ""),
+                "url": info.get("url", ""),
                 "servers": [
                     {"name": s.name, "server_type": s.server_type,
                      "ip": s.ip, "port": s.port, "encoding": s.encoding or "",
@@ -1424,13 +1870,8 @@ class _CollectionDetailTab(QWidget):
         for p in payload:
             new_name = unique_copy_name(p.get("name", ""), existing)
             new_tid = self._db.add_protocol_target(
-                collection_id=self._coll.id, ip=p["ip"], port=p["port"], name=new_name,
-                encoding=p.get("encoding", "UTF-8"),
-                recv_encoding=p.get("recv_encoding", "UTF-8"),
-                head_length=p.get("head_length", 5), timeout=p.get("timeout", 30.0),
-                ws_path=p.get("ws_path", ""), ws_use_ssl=p.get("ws_use_ssl", False),
-                send_message=p.get("send_message", ""),
-                send_presets=p.get("send_presets", "[]"),
+                collection_id=self._coll.id, name=new_name,
+                send_presets=p.get("send_presets", "{}"),
                 stress_params=p.get("stress_params", "{}"))
             for s in p.get("servers", []):
                 self._db.add_protocol_server(
@@ -1469,7 +1910,7 @@ class _CollectionDetailTab(QWidget):
             menu.addAction("复制", self._copy_target)
             menu.addAction("删除", self._on_delete_target)
         menu.addSeparator()
-        menu.addAction("全选", lambda: self._target_table.selectAll())
+        menu.addAction("全选", lambda *_: self._target_table.selectAll())
         menu.addAction("反选", self._invert_target_selection)
         menu.addAction("刷新", self._refresh_targets)
         menu.exec(self._target_table.mapToGlobal(pos))
@@ -1494,9 +1935,12 @@ class _CollectionDetailTab(QWidget):
         for tid in ids:
             t = self._db.get_protocol_target(tid)
             if t:
+                info = target_display_info(t)
+                ip = info["ip"]
+                port = info["port"]
                 targets.append({
-                    "ip": t.ip, "port": t.port,
-                    "description": t.name or f"{t.ip}:{t.port}",
+                    "ip": ip, "port": port,
+                    "description": t.name or f"{ip}:{port}",
                 })
         if targets:
             self.connectivity_test_requested.emit(targets)
@@ -1547,7 +1991,10 @@ class _ServerTab(ServerPanelBase):
     def _target_cell(self, s) -> str:
         if s.target_id:
             target = self._db.get_protocol_target(s.target_id)
-            return f"{target.ip}:{target.port}" if target else f"ID:{s.target_id}"
+            if target:
+                info = target_display_info(target)
+                return f"{info['ip']}:{info['port']}"
+            return f"ID:{s.target_id}"
         return "(全局)"
 
     def _center_columns(self):
@@ -1608,6 +2055,7 @@ class _GlobalHistoryTab(QWidget):
         self._proto_filter.addItem("全部", None)
         self._proto_filter.addItem("TCP", "tcp_client")
         self._proto_filter.addItem("WebSocket", "ws_client")
+        self._proto_filter.addItem("HTTP", "http_client")
         self._proto_filter.currentIndexChanged.connect(self.refresh)
         fl.addWidget(self._proto_filter)
         self._search = QLineEdit()
@@ -1691,7 +2139,7 @@ class _GlobalHistoryTab(QWidget):
             key_map = {
                 0: lambda s: s.started_at,
                 1: lambda s: (s.collection_name or "").lower(),
-                2: lambda s: ("TCP" if "tcp" in s.protocol_type else "WS"),
+                2: lambda s: ("HTTP" if "http" in s.protocol_type else ("WS" if "ws" in s.protocol_type else "TCP")),
                 3: lambda s: s.target_ip,
                 4: lambda s: s.target_port,
                 5: lambda s: s.success,
@@ -1788,7 +2236,7 @@ class _GlobalHistoryTab(QWidget):
         for row, s in enumerate(sessions):
             self._table.setItem(row, 0, QTableWidgetItem(s.started_at))
             self._table.setItem(row, 1, QTableWidgetItem(s.collection_name or "-"))
-            proto_label = "TCP" if "tcp" in s.protocol_type else "WS"
+            proto_label = "HTTP" if "http" in s.protocol_type else ("WS" if "ws" in s.protocol_type else "TCP")
             self._table.setItem(row, 2, QTableWidgetItem(proto_label))
             self._table.setItem(row, 3, QTableWidgetItem(s.target_ip))
             self._table.setItem(row, 4, QTableWidgetItem(str(s.target_port)))
@@ -1870,7 +2318,7 @@ class _GlobalHistoryTab(QWidget):
             [
                 s.started_at,
                 s.collection_name or "-",
-                "TCP" if "tcp" in s.protocol_type else "WS",
+                "HTTP" if "http" in s.protocol_type else ("WS" if "ws" in s.protocol_type else "TCP"),
                 s.target_ip,
                 s.target_port,
                 "OK" if s.success else "FAIL",
@@ -1915,21 +2363,58 @@ class _GlobalHistoryTab(QWidget):
 
 
 class _StandaloneClientTab(ClientPanelBase):
-    """独立客户端 —— 不依赖集合/目标，快速测试连接。"""
+    """独立客户端 —— 不依赖集合/目标，快速测试连接。
+
+    每个协议（TCP / WS / HTTP）的配置和预设报文独立持久化，切换协议时不丢失。
+    """
 
     target_saved = Signal()  # 目标保存到集合后通知集合详情刷新
     test_finished = Signal()
 
+    # 协议 → settings key 后缀映射
+    _PROTO_KEY = {"tcp_client": "tcp", "ws_client": "ws", "http_client": "http"}
+
     def __init__(self, db: Database, parent=None):
         super().__init__(db, parent=parent)
-        raw = self._db.get_setting("standalone_presets", "")
-        try:
-            self._presets = json.loads(raw) if raw else []
-        except (json.JSONDecodeError, TypeError):
-            self._presets = []
+        self._prev_proto = self._proto_combo.currentData()
+        self._presets = self._load_presets_for(self._prev_proto)
         self._load_config()
         self._apply_stress_params(self._load_stress_from_store())
         self._refresh_preset_list()
+        # 恢复上次使用的协议
+        last_proto = self._db.get_setting("standalone_last_proto", "")
+        if last_proto and last_proto != self._prev_proto:
+            idx = self._proto_combo.findData(last_proto)
+            if idx >= 0:
+                self._proto_combo.setCurrentIndex(idx)
+
+    # ── 协议切换时保存/恢复配置 ──────────────────────────
+
+    def _on_proto_changed(self, idx: int):
+        new_proto = self._proto_combo.currentData()
+        if new_proto == self._prev_proto:
+            super()._on_proto_changed(idx)
+            return
+        # 保存旧协议的预设（配置已随每次参数变更自动保存，无需额外保存）
+        self._db.set_setting(f"standalone_presets_{self._PROTO_KEY[self._prev_proto]}",
+                             json.dumps(self._presets, ensure_ascii=False))
+        # 记住最后使用的协议
+        self._db.set_setting("standalone_last_proto", new_proto)
+        # 切换 UI
+        self._prev_proto = new_proto
+        super()._on_proto_changed(idx)
+        # 加载新协议的配置和预设
+        self._presets = self._load_presets_for(new_proto)
+        self._refresh_preset_list()
+        self._load_config()
+        self.reset_dirty()
+
+    def _load_presets_for(self, proto: str) -> list:
+        raw = self._db.get_setting(f"standalone_presets_{self._PROTO_KEY[proto]}", "")
+        try:
+            return json.loads(raw) if raw else []
+        except (json.JSONDecodeError, TypeError):
+            return []
 
     # ── 钩子：独立客户端与目标客户端的差异 ──────────────────
 
@@ -1937,9 +2422,11 @@ class _StandaloneClientTab(ClientPanelBase):
         proto_row.addWidget(QPushButton("保存到集合", clicked=self._save_to_collection))
 
     def _on_ctrl_s_no_focus(self):
-        self._save_to_collection()
+        self._save_config()
 
     def _on_param_changed(self):
+        if self._loading:
+            return
         self._save_config()
 
     def _build_client_worker(self, msg, proto):
@@ -1972,24 +2459,34 @@ class _StandaloneClientTab(ClientPanelBase):
         self._db.set_setting("standalone_stress",
                              json.dumps(sp, ensure_ascii=False))
 
-    # ── 配置持久化（settings 表）────────────────────────────
+    # ── 配置持久化（settings 表，按协议分 key）────────────
 
     def _load_config(self):
-        raw = self._db.get_setting("standalone_config", "")
+        proto = self._proto_combo.currentData()
+        raw = self._db.get_setting(f"standalone_config_{self._PROTO_KEY[proto]}", "")
         if not raw:
             return
         try:
             cfg = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
             return
+        # 防御：如果存储的配置 proto 与当前协议不匹配，说明数据已被交叉污染，
+        # 跳过加载（使用默认值），并清除脏数据
+        stored_proto = cfg.get("proto", "")
+        if stored_proto and stored_proto != proto:
+            self._db.set_setting(f"standalone_config_{self._PROTO_KEY[proto]}", "")
+            return
         self.set_params(cfg)
 
     def _save_config(self):
-        self._db.set_setting("standalone_config",
+        proto = self._proto_combo.currentData()
+        self._db.set_setting(f"standalone_config_{self._PROTO_KEY[proto]}",
                              json.dumps(self.collect_params(), ensure_ascii=False))
+        self.reset_config_dirty()
 
     def _save_presets_to_settings(self):
-        self._db.set_setting("standalone_presets",
+        proto = self._proto_combo.currentData()
+        self._db.set_setting(f"standalone_presets_{self._PROTO_KEY[proto]}",
                              json.dumps(self._presets, ensure_ascii=False))
 
     # ── 保存到集合 ──────────────────────────────────────────
@@ -2006,20 +2503,26 @@ class _StandaloneClientTab(ClientPanelBase):
             return
         coll = collections[names.index(name)]
         proto = self._proto_combo.currentData()
-        ip = self._param_ip.text().strip()
-        port = self._param_port.value()
+        cfg = self.collect_params()
+        cfg["proto"] = proto
+        preset_msg = json.dumps(cfg, ensure_ascii=False)
+        send_presets = json.dumps(
+            {"_active_proto": proto, proto: [{"name": "默认配置", "message": preset_msg}]},
+            ensure_ascii=False)
+        stress = json.dumps(self.collect_stress_params(), ensure_ascii=False)
+
+        if proto == "http_client":
+            url = cfg.get("url", "")
+            target_name = (cfg.get("method", "GET") + " " + url) if url else "HTTP"
+        else:
+            ip = cfg.get("ip", "")
+            port = cfg.get("port", 0)
+            target_name = f"{ip}:{port}" if ip else "新目标"
+
         self._db.add_protocol_target(
-            collection_id=coll.id,
-            ip=ip, port=port,
-            name=f"{ip}:{port}",
-            encoding=self._param_enc.currentText(),
-            recv_encoding=self._resp_enc_combo.currentText(),
-            head_length=self._param_hl.value(),
-            timeout=self._param_timeout.value(),
-            ws_path=self._param_ws_url.text().strip(),
-            ws_use_ssl=self._param_ws_ssl.isChecked(),
-            send_message=self._send_edit.toPlainText() if proto == "tcp_client" else "",
-            stress_params=json.dumps(self.collect_stress_params(), ensure_ascii=False),
+            collection_id=coll.id, name=target_name,
+            send_presets=send_presets,
+            stress_params=stress,
         )
         QMessageBox.information(self, "保存完成", f"已保存到集合 [{coll.name}]")
         self.target_saved.emit()
@@ -2097,7 +2600,7 @@ class ProtocolPanel(QWidget):
         splitter.addWidget(self._tabs)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 3)
-        splitter.setSizes([220, 880])
+        splitter.setSizes([170, 930])
 
         layout.addWidget(splitter)
 
@@ -2144,13 +2647,17 @@ class ProtocolPanel(QWidget):
         detail.config_dirty_changed.connect(
             lambda dirty: self._tabs.setTabText(
                 self._tabs.indexOf(tab_w),
-                (target.name if target.name else f"{target.ip}:{target.port}") + (" *" if dirty else "")
+                label + (" *" if dirty else "")
             )
         )
         layout.addWidget(detail)
 
-        # 详情标签页名称：描述非空用描述，否则用 ip:port
-        label = target.name if target.name else f"{target.ip}:{target.port}"
+        # 详情标签页名称：描述非空用描述，否则从预设提取 ip:port
+        if target.name:
+            label = target.name
+        else:
+            info = target_display_info(target)
+            label = f"{info['ip']}:{info['port']}"
         idx = self._tabs.addTab(tab_w, label)
         self._tabs.setCurrentIndex(idx)
         self._target_tabs[target.id] = (tab_w, detail)
@@ -2188,8 +2695,7 @@ class ProtocolPanel(QWidget):
                         return
                     if reply == QMessageBox.Yes:
                         client.save_all_drafts()
-                        if client._config_dirty:
-                            detail._save_params()
+                        client._save_as_default_preset()
                 detail.stop_all_servers()
                 del self._target_tabs[tid]
                 break
