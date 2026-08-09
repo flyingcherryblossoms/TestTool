@@ -5,7 +5,7 @@
 ![Windows](https://img.shields.io/badge/Windows-x64-blue)
 ![Linux](https://img.shields.io/badge/Linux-x64%20%7C%20ARM64%20%7C%20Compat-orange)
 ![macOS](https://img.shields.io/badge/macOS-ARM64-silver)
-![Python](https://img.shields.io/badge/Python-3.11+-green)
+![Python](https://img.shields.io/badge/Python-3.8.2+-green)
 ![License](https://img.shields.io/badge/License-MIT-yellow)
 
 ## 功能特性

@@ -113,6 +113,16 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
 
         self._tabs = QTabWidget()
+        self._tabs.currentChanged.connect(self._on_main_tab_changed)
+
+        # Tab 0: 协议测试
+        self._proto_panel = ProtocolPanel(self._db)
+        self._proto_panel.test_finished.connect(self._update_statusbar)
+        # 协议测试选中目标 → 连通测试临时列表
+        self._proto_panel.connectivity_test_requested.connect(
+            self._on_connectivity_test_requested
+        )
+        self._tabs.addTab(self._proto_panel, "协议测试")
 
         # Tab 1: 连通测试
         self._conn_panel = ConnectivityPanel(self._db)
@@ -122,16 +132,16 @@ class MainWindow(QMainWindow):
         )
         self._tabs.addTab(self._conn_panel, "连通测试")
 
-        # Tab 2: 协议测试
-        self._proto_panel = ProtocolPanel(self._db)
-        self._proto_panel.test_finished.connect(self._update_statusbar)
-        # 协议测试选中目标 → 连通测试临时列表
-        self._proto_panel.connectivity_test_requested.connect(
-            self._on_connectivity_test_requested
-        )
-        self._tabs.addTab(self._proto_panel, "协议测试")
-
         layout.addWidget(self._tabs)
+
+        # 恢复上次打开的标签页
+        last_tab = self._db.get_setting("last_main_tab", "0")
+        try:
+            idx = int(last_tab)
+            if 0 <= idx < self._tabs.count():
+                self._tabs.setCurrentIndex(idx)
+        except ValueError:
+            pass
 
     # ── 状态栏 ─────────────────────────────────────────────
 
@@ -173,13 +183,17 @@ class MainWindow(QMainWindow):
         if dlg.exec() == QDialog.Accepted:
             self._conn_panel.refresh_collection_list()
 
+    def _on_main_tab_changed(self, idx: int):
+        """记住当前打开的标签页。"""
+        self._db.set_setting("last_main_tab", str(idx))
+
     def _on_protocol_test_selected(self, ip: str, port: int):
-        self._tabs.setCurrentIndex(1)  # 协议测试
+        self._tabs.setCurrentIndex(0)  # 协议测试
         self._proto_panel.prefill_client_target(ip, port)
 
     def _on_connectivity_test_requested(self, targets: list):
         """协议测试选中的目标 → 切到连通测试并加载为临时列表。"""
-        self._tabs.setCurrentIndex(0)  # 连通测试
+        self._tabs.setCurrentIndex(1)  # 连通测试
         self._conn_panel.load_temporary_targets(targets)
 
     # ── 窗口关闭 ───────────────────────────────────────────

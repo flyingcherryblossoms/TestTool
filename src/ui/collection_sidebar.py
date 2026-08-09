@@ -181,7 +181,11 @@ class CollectionSidebarBase(QWidget):
 
         custom_parent.setExpanded(True)
         if not restored:
-            self._tree.setCurrentItem(u)
+            # 默认选中第一个自定义集合，没有自定义集合才选中未分类
+            if custom_parent.childCount() > 0:
+                self._tree.setCurrentItem(custom_parent.child(0))
+            else:
+                self._tree.setCurrentItem(u)
 
         # 重建期间 blockSignals 屏蔽了 setCurrentItem，刷新后需手动同步选中集合
         self._tree.blockSignals(False)
@@ -260,7 +264,7 @@ class CollectionSidebarBase(QWidget):
         if is_custom:
             menu.addSeparator()
             self._build_collection_menu(menu, item, cid)
-            menu.addAction("复制集合", lambda cid=cid: self._copy_collection(cid))
+            menu.addAction("复制集合", lambda *_, cid=cid: self._copy_collection(cid))
         else:
             # 空白 / 未分类 / 自定义集合父节点：统一提供"刷新集合"
             self._build_blank_menu(menu)

@@ -774,7 +774,7 @@ class TargetPanel(QWidget):
             model = self._table.model()
             if not self._table.selectionModel().isSelected(model.index(row, 0)):
                 self._table.selectRow(row)
-            menu.addAction("测试连通性", lambda: self._on_double_click(model.index(row, 0)))
+            menu.addAction("测试连通性", lambda *_, r=row: self._on_double_click(model.index(r, 0)))
             menu.addAction("协议测试", self._on_protocol_test_selected)
             menu.addSeparator()
             menu.addAction("复制", self._copy_targets)
