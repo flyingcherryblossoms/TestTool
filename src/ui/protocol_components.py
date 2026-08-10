@@ -57,12 +57,14 @@ from src.scanner import ScanTarget, ScannerWorker
 from src.ui import shortcuts
 from src.ui.http_client import HttpParamWidget, HttpRequestWorker
 from src.ui.protocol_workers import (
+    HttpServerWorker,
     StressTestWorker,
     TcpClientWorker,
     TcpServerWorker,
     WsClientWorker,
     WsServerWorker,
 )
+from src.ui.server_response_panel import ResponseMessageSection
 from src.ui.clipboard import (
     KIND_PRESET,
     KIND_PROTO_SERVER,
@@ -89,20 +91,40 @@ def _hex_dump(data: bytes) -> str:
 
 
 class ServerDialog(QDialog):
-    """添加/编辑服务端监听器的对话框。"""
+    """添加/编辑服务端监听器的对话框（类型可切换，编辑时锁定类型）。
+
+    响应内容与 HTTP 状态码/响应头已移入面板返回报文区，对话框只负责
+    服务端身份 / 协议参数 / 响应模式 / 响应延迟。
+    """
+
+    _TYPE_ITEMS = [
+        ("TCP", "tcp_server"),
+        ("WebSocket", "ws_server"),
+        ("HTTP", "http_server"),
+    ]
 
     def __init__(self, title: str, server_type: str,
                  server: dict | None = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setMinimumWidth(420)
-        self._server_type = server_type
-        self._is_tcp = server_type == "tcp_server"
+        self._server = server
+        self._is_edit = server is not None
         layout = QFormLayout(self)
 
         self._name_edit = QLineEdit(server.get("name", "") if server else "")
         self._name_edit.setPlaceholderText("例如: 生产环境监听")
         layout.addRow("名称:", self._name_edit)
+
+        self._type_combo = QComboBox()
+        for text, data in self._TYPE_ITEMS:
+            self._type_combo.addItem(text, data)
+        self._type_combo.setCurrentIndex(
+            max(0, self._type_combo.findData(server_type)))
+        if self._is_edit:
+            self._type_combo.setEnabled(False)
+        layout.addRow("类型:", self._type_combo)
+
         self._ip_edit = QLineEdit(server.get("ip", "0.0.0.0") if server else "0.0.0.0")
         layout.addRow("监听地址:", self._ip_edit)
         self._port_spin = QSpinBox()
@@ -110,38 +132,47 @@ class ServerDialog(QDialog):
         self._port_spin.setValue(server.get("port", 80) if server else 80)
         layout.addRow("端口:", self._port_spin)
 
-        if self._is_tcp:
-            self._encoding_combo = QComboBox()
-            self._encoding_combo.setEditable(True)
-            self._encoding_combo.addItems(ENCODINGS)
-            enc = server.get("encoding", "UTF-8") if server else "UTF-8"
-            self._encoding_combo.setCurrentText(enc)
-            layout.addRow("发送编码:", self._encoding_combo)
-            self._recv_encoding_combo = QComboBox()
-            self._recv_encoding_combo.setEditable(True)
-            self._recv_encoding_combo.addItems(ENCODINGS)
-            recv_enc = server.get("recv_encoding", "UTF-8") if server else "UTF-8"
-            self._recv_encoding_combo.setCurrentText(recv_enc)
-            layout.addRow("接收编码:", self._recv_encoding_combo)
-            self._head_len_spin = QSpinBox()
-            self._head_len_spin.setRange(0, 20)
-            self._head_len_spin.setToolTip("0=原始模式")
-            self._head_len_spin.setSuffix(" 位")
-            self._head_len_spin.setValue(server.get("head_length", 5) if server else 5)
-            layout.addRow("HeadLen:", self._head_len_spin)
-        else:
-            self._encoding_combo = None
-            self._recv_encoding_combo = None
-            self._head_len_spin = None
-            self._ws_path_edit = QLineEdit(server.get("ws_path", "/") if server else "/")
-            layout.addRow("路径:", self._ws_path_edit)
+        # 协议参数区（TCP / WS / HTTP 各一页，参考客户端协议切换）
+        self._proto_stack = QStackedWidget()
+        tcp_page = QWidget()
+        tcp_form = QFormLayout(tcp_page)
+        tcp_form.setContentsMargins(0, 0, 0, 0)
+        self._encoding_combo = QComboBox()
+        self._encoding_combo.setEditable(True)
+        self._encoding_combo.addItems(ENCODINGS)
+        self._encoding_combo.setCurrentText(
+            server.get("encoding", "UTF-8") if server else "UTF-8")
+        tcp_form.addRow("发送编码:", self._encoding_combo)
+        self._recv_encoding_combo = QComboBox()
+        self._recv_encoding_combo.setEditable(True)
+        self._recv_encoding_combo.addItems(ENCODINGS)
+        self._recv_encoding_combo.setCurrentText(
+            server.get("recv_encoding", "UTF-8") if server else "UTF-8")
+        tcp_form.addRow("接收编码:", self._recv_encoding_combo)
+        self._head_len_spin = QSpinBox()
+        self._head_len_spin.setRange(0, 20)
+        self._head_len_spin.setToolTip("0=原始模式")
+        self._head_len_spin.setSuffix(" 位")
+        self._head_len_spin.setValue(server.get("head_length", 5) if server else 5)
+        tcp_form.addRow("HeadLen:", self._head_len_spin)
+        self._proto_stack.addWidget(tcp_page)          # 0: TCP
+
+        ws_page = QWidget()
+        ws_form = QFormLayout(ws_page)
+        ws_form.setContentsMargins(0, 0, 0, 0)
+        self._ws_path_edit = QLineEdit(server.get("ws_path", "/") if server else "/")
+        ws_form.addRow("路径:", self._ws_path_edit)
+        self._proto_stack.addWidget(ws_page)           # 1: WebSocket
+
+        http_page = QWidget()                          # 2: HTTP（无额外参数）
+        self._proto_stack.addWidget(http_page)
+        layout.addRow(self._proto_stack)
 
         self._response_mode_combo = QComboBox()
         self._response_mode_combo.addItem("固定响应", "fixed")
         self._response_mode_combo.addItem("回显模式", "echo")
         if server and server.get("response_mode") == "echo":
             self._response_mode_combo.setCurrentIndex(1)
-        self._response_mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         layout.addRow("响应模式:", self._response_mode_combo)
         self._delay_spin = QSpinBox()
         self._delay_spin.setRange(0, 600000)
@@ -149,22 +180,24 @@ class ServerDialog(QDialog):
         self._delay_spin.setToolTip("响应延迟（毫秒），0 表示不延迟。")
         self._delay_spin.setValue(server.get("response_delay", 0) if server else 0)
         layout.addRow("响应延迟:", self._delay_spin)
-        self._response_edit = FormatTextEdit()
-        self._response_edit.setPlaceholderText("输入固定响应内容...")
-        self._response_edit.setMaximumHeight(120)
-        if server:
-            self._response_edit.setPlainText(server.get("response_message", ""))
-        layout.addRow("内容格式:", self._response_edit.format_combo)
-        layout.addRow("响应内容:", self._response_edit)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._on_accept)
         buttons.rejected.connect(self.reject)
         layout.addRow(buttons)
 
-    def _on_mode_changed(self, idx: int):
-        is_echo = self._response_mode_combo.currentData() == "echo"
-        self._response_edit.setVisible(not is_echo)
+        self._type_combo.currentIndexChanged.connect(self._on_type_changed)
+        self._on_type_changed()
+
+    def _on_type_changed(self):
+        """切换协议参数页；HTTP 恒「固定响应」（响应模式隐藏）。"""
+        self._proto_stack.setCurrentIndex(self._type_combo.currentIndex())
+        is_http = self._type_combo.currentData() == "http_server"
+        self._response_mode_combo.setVisible(not is_http)
+        if is_http:
+            self._response_mode_combo.blockSignals(True)
+            self._response_mode_combo.setCurrentIndex(0)
+            self._response_mode_combo.blockSignals(False)
 
     def _on_accept(self):
         if not self._name_edit.text().strip():
@@ -173,23 +206,31 @@ class ServerDialog(QDialog):
         self.accept()
 
     def get_data(self) -> dict:
+        st = self._type_combo.currentData()
         data = {
             "name": self._name_edit.text().strip(),
-            "server_type": self._server_type,
+            "server_type": st,
             "ip": self._ip_edit.text().strip(),
             "port": self._port_spin.value(),
-            "response_mode": self._response_mode_combo.currentData(),
-            "response_message": self._response_edit.toPlainText(),
+            "response_mode": ("fixed" if st == "http_server"
+                              else self._response_mode_combo.currentData()),
             "response_delay": self._delay_spin.value(),
         }
-        if self._is_tcp:
+        if st == "tcp_server":
             data["encoding"] = self._encoding_combo.currentText()
             data["recv_encoding"] = self._recv_encoding_combo.currentText()
             data["head_length"] = self._head_len_spin.value()
-        else:
+            data["ws_path"] = "/"
+        elif st == "ws_server":
             data["encoding"] = "UTF-8"
+            data["recv_encoding"] = "UTF-8"
             data["head_length"] = 0
             data["ws_path"] = self._ws_path_edit.text().strip() or "/"
+        else:  # http_server
+            data["encoding"] = "UTF-8"
+            data["recv_encoding"] = "UTF-8"
+            data["head_length"] = 0
+            data["ws_path"] = "/"
         return data
 
 
@@ -1480,6 +1521,7 @@ class ServerPanelBase(QWidget):
         self._db = db
         self._tcp_workers: dict[int, TcpServerWorker] = {}
         self._ws_workers: dict[int, WsServerWorker] = {}
+        self._http_workers: dict[int, HttpServerWorker] = {}
         self._servers: list = []          # 当前加载的服务端
         self._logs: dict[int, QPlainTextEdit] = {}
         self._log_tab_to_sid: dict[int, int] = {}
@@ -1525,8 +1567,12 @@ class ServerPanelBase(QWidget):
     def _server_columns(self) -> list:
         return ["名称", "监听地址", "端口", "发送编码", "接收编码", "响应模式"]
 
-    def _row_cells(self, s, is_tcp: bool) -> list:
-        return []
+    def _row_cells(self, s) -> list:
+        """按 server_type 渲染行单元格（TCP/WS/HTTP）。"""
+        if s.server_type == "http_server":
+            return [s.name, s.ip, s.port, "-", "-", "固定"]
+        return [s.name, s.ip, s.port, s.encoding or "UTF-8",
+                s.recv_encoding or "UTF-8", s.response_mode or "echo"]
 
     def _target_cell(self, s) -> str:
         return ""
@@ -1571,6 +1617,20 @@ class ServerPanelBase(QWidget):
     def _on_stop_all(self):
         """全部停止后的清理（子类可重写）。"""
 
+    # ── 辅助 ─────────────────────────────────────────────────
+
+    def _workers_for_type(self, st: str):
+        """按类型返回 worker 字典（tcp/ws/http）。"""
+        if st == "tcp_server":
+            return self._tcp_workers
+        if st == "ws_server":
+            return self._ws_workers
+        return self._http_workers
+
+    def _all_workers(self) -> dict:
+        """合并全部类型的运行中 worker。"""
+        return {**self._tcp_workers, **self._ws_workers, **self._http_workers}
+
     # ── UI ───────────────────────────────────────────────────
 
     def _setup_ui(self):
@@ -1585,6 +1645,7 @@ class ServerPanelBase(QWidget):
                 self._type_filter.addItem("全部", None)
                 self._type_filter.addItem("TCP", "tcp_server")
                 self._type_filter.addItem("WebSocket", "ws_server")
+                self._type_filter.addItem("HTTP", "http_server")
                 self._type_filter.currentIndexChanged.connect(self._refresh)
                 fl.addWidget(self._type_filter)
             if self._show_search():
@@ -1612,14 +1673,21 @@ class ServerPanelBase(QWidget):
 
         srv_splitter = QSplitter(Qt.Vertical)
         srv_splitter.addWidget(self._table)
+        self._response_section = ResponseMessageSection(self._db)
+        self._response_section.set_panel(self)
+        self._response_section.setMinimumHeight(170)
+        self._response_section.saved.connect(self._on_response_saved)
+        srv_splitter.addWidget(self._response_section)
         self._log_tabs = QTabWidget()
         self._log_tabs.setTabsClosable(True)
         self._log_tabs.tabCloseRequested.connect(self._on_log_tab_close)
         srv_splitter.addWidget(self._log_tabs)
         srv_splitter.setStretchFactor(0, 1)
-        srv_splitter.setStretchFactor(1, 1)
-        srv_splitter.setSizes([300, 300])
+        srv_splitter.setStretchFactor(1, 0)
+        srv_splitter.setStretchFactor(2, 1)
+        srv_splitter.setSizes([320, 190, 320])
         layout.addWidget(srv_splitter)
+        self._table.itemSelectionChanged.connect(self._on_server_selection_changed)
 
         bl = QHBoxLayout()
         bl.addWidget(QPushButton("添加", clicked=self._add_server))
@@ -1663,11 +1731,10 @@ class ServerPanelBase(QWidget):
         t.setColumnWidth(len(cols) - 1, 80)
 
         t.setRowCount(len(self._servers))
-        all_workers = {**self._tcp_workers, **self._ws_workers}
+        all_workers = self._all_workers()
         center = self._center_columns()
         for row, s in enumerate(self._servers):
-            is_tcp = s.server_type == "tcp_server"
-            cells = self._row_cells(s, is_tcp)
+            cells = self._row_cells(s)
             for col, text in enumerate(cells):
                 item = QTableWidgetItem(str(text))
                 if col == 0:
@@ -1741,7 +1808,7 @@ class ServerPanelBase(QWidget):
         from src.database import ProtocolServer
         s: ProtocolServer = srv
         st = s.server_type
-        workers = self._tcp_workers if st == "tcp_server" else self._ws_workers
+        workers = self._workers_for_type(st)
         if s.id in workers:
             w = workers.pop(s.id); w.stop_server()
             self._log_to_server(s.id, f"Stop [{s.name}] {s.ip}:{s.port}")
@@ -1830,7 +1897,7 @@ class ServerPanelBase(QWidget):
                                     response_delay_ms=s.response_delay)
                 w.message_received.connect(partial(self._on_srv_msg, s.id, s.name))
                 w.message_received_raw.connect(partial(self._on_srv_msg_raw, s.id))
-            else:
+            elif st == "ws_server":
                 w = WsServerWorker(server_id=s.id, ip=s.ip, port=s.port, path=s.ws_path,
                                    response_mode=s.response_mode, response_message=s.response_message,
                                    response_delay_ms=s.response_delay)
@@ -1838,6 +1905,17 @@ class ServerPanelBase(QWidget):
                                            self._on_srv_msg(sid, nm, addr, msg))
                 w.message_received_raw.connect(partial(self._on_srv_msg_raw, s.id))
                 w.client_event.connect(partial(self._log_to_server, s.id))
+            else:
+                active = s.active_response()
+                w = HttpServerWorker(server_id=s.id, ip=s.ip, port=s.port,
+                                     response_mode=s.response_mode,
+                                     status_code=active["status_code"],
+                                     headers=active["headers"],
+                                     response_message=active["body"],
+                                     response_delay_ms=s.response_delay)
+                w.message_received.connect(lambda addr, msg, sid=s.id, nm=s.name:
+                                           self._on_srv_msg(sid, nm, addr, msg))
+                w.message_received_raw.connect(partial(self._on_srv_msg_raw, s.id))
             w.status_changed.connect(partial(self._log_to_server, s.id))
             w.error_occurred.connect(lambda err, sid=s.id: self._log_to_server(sid, f"[ERR] {err}"))
             w.finished.connect(partial(self._on_worker_finished, st, s.id))
@@ -1935,8 +2013,7 @@ class ServerPanelBase(QWidget):
             log.setPlainText("\n".join(parts))
 
     def _on_worker_finished(self, st: str, sid: int):
-        workers = self._tcp_workers if st == "tcp_server" else self._ws_workers
-        workers.pop(sid, None)
+        self._workers_for_type(st).pop(sid, None)
         self._refresh()
 
     def _on_log_tab_close(self, idx: int):
@@ -1949,7 +2026,8 @@ class ServerPanelBase(QWidget):
         self._recv_combos.pop(sid, None)
         self._hex_toggles.pop(sid, None)
         if sid is not None:
-            for workers in (self._tcp_workers, self._ws_workers):
+            for workers in (self._tcp_workers, self._ws_workers,
+                            self._http_workers):
                 w = workers.pop(sid, None)
                 if w:
                     w.stop_server()
@@ -1976,6 +2054,7 @@ class ServerPanelBase(QWidget):
         dlg = ServerDialog(self._add_dialog_title(), st, parent=self)
         if dlg.exec() == QDialog.Accepted:
             d = dlg.get_data()
+            st = d["server_type"]
             self._db.add_protocol_server(
                 name=d["name"], server_type=st, ip=d["ip"], port=d["port"],
                 encoding=d.get("encoding", "UTF-8"), recv_encoding=d.get("recv_encoding", "UTF-8"), head_length=d.get("head_length", 0),
@@ -2002,7 +2081,7 @@ class ServerPanelBase(QWidget):
         srv = self._db.get_protocol_server(sid)
         if not srv:
             return
-        all_workers = {**self._tcp_workers, **self._ws_workers}
+        all_workers = self._all_workers()
         if sid in all_workers:
             return QMessageBox.warning(self, "提示", "请先停止该监听器再编辑。")
         data = dict(name=srv.name, ip=srv.ip, port=srv.port, encoding=srv.encoding,
@@ -2039,7 +2118,7 @@ class ServerPanelBase(QWidget):
         ids = self._get_selected_server_ids()
         if not ids:
             return QMessageBox.information(self, "提示", "请选择要删除的监听器。")
-        all_workers = {**self._tcp_workers, **self._ws_workers}
+        all_workers = self._all_workers()
         running = [sid for sid in ids if sid in all_workers]
         if running:
             return QMessageBox.warning(self, "提示", self._running_delete_warning(running))
@@ -2068,6 +2147,7 @@ class ServerPanelBase(QWidget):
                 encoding=s.encoding, recv_encoding=s.recv_encoding,
                 head_length=s.head_length, ws_path=s.ws_path,
                 response_mode=s.response_mode, response_message=s.response_message,
+                response_messages=s.response_messages or None,
                 response_delay=s.response_delay,
                 target_id=s.target_id)
             existing.add(new_name)
@@ -2088,6 +2168,7 @@ class ServerPanelBase(QWidget):
                 "recv_encoding": s.recv_encoding or "", "head_length": s.head_length,
                 "ws_path": s.ws_path or "", "response_mode": s.response_mode,
                 "response_message": s.response_message or "",
+                "response_messages": s.response_messages or "",
                 "response_delay": s.response_delay,
                 "target_id": s.target_id,
             })
@@ -2112,6 +2193,7 @@ class ServerPanelBase(QWidget):
                 head_length=p.get("head_length", 5), ws_path=p.get("ws_path", ""),
                 response_mode=p.get("response_mode", "echo"),
                 response_message=p.get("response_message", ""),
+                response_messages=p.get("response_messages") or None,
                 response_delay=p.get("response_delay", 0),
                 target_id=p.get("target_id"))
             existing.add(new_name)
@@ -2131,7 +2213,8 @@ class ServerPanelBase(QWidget):
         if not ids:
             return QMessageBox.information(self, "提示", "请选择要停止的监听器。")
         for sid in ids:
-            for workers in (self._tcp_workers, self._ws_workers):
+            for workers in (self._tcp_workers, self._ws_workers,
+                            self._http_workers):
                 w = workers.pop(sid, None)
                 if w:
                     w.stop_server()
@@ -2153,25 +2236,66 @@ class ServerPanelBase(QWidget):
 
     def _start_all(self):
         for s in self._servers:
-            all_workers = {**self._tcp_workers, **self._ws_workers}
+            all_workers = self._all_workers()
             if s.id not in all_workers:
                 self._toggle_server(s)
 
     def _stop_all(self):
-        for w in list(self._tcp_workers.values()):
-            w.stop_server()
-        self._tcp_workers.clear()
-        for w in list(self._ws_workers.values()):
-            w.stop_server()
-        self._ws_workers.clear()
+        for workers in (self._tcp_workers, self._ws_workers,
+                        self._http_workers):
+            for w in list(workers.values()):
+                w.stop_server()
+            workers.clear()
         self._on_stop_all()
         self._refresh()
 
     def has_active_servers(self) -> bool:
-        return bool(self._tcp_workers) or bool(self._ws_workers)
+        return bool(self._all_workers())
 
     def stop_all_servers(self):
         self._stop_all()
+
+    # ── 返回报文联动 ─────────────────────────────────────────
+
+    def _on_server_selection_changed(self):
+        """表格选中变化时同步返回报文区；仅单行选中时加载。"""
+        rows = set(i.row() for i in self._table.selectedIndexes())
+        if len(rows) != 1:
+            self._response_section.set_server(None)
+            return
+        row = rows.pop()
+        item = self._table.item(row, 0)
+        sid = item.data(Qt.UserRole) if item else None
+        if sid is None:
+            self._response_section.set_server(None)
+            return
+        srv = self._db.get_protocol_server(sid)
+        self._response_section.set_server(srv)
+
+    def _restore_selection(self, sid: int):
+        """恢复表格选中行（返回报文区取消切换时调用）。"""
+        for row in range(self._table.rowCount()):
+            item = self._table.item(row, 0)
+            if item and item.data(Qt.UserRole) == sid:
+                self._table.selectRow(row)
+                return
+
+    def _on_response_saved(self, sid: int):
+        """返回报文保存/切换当前后，热推运行中的 Worker。"""
+        srv = self._db.get_protocol_server(sid)
+        if srv is None:
+            return
+        st = srv.server_type
+        workers = self._workers_for_type(st)
+        w = workers.get(sid)
+        if w is None:
+            return
+        active = srv.active_response()
+        if st == "http_server":
+            w.set_active_response(active["status_code"], active["headers"],
+                                  active["body"])
+        else:
+            w.set_active_message(active["body"])
 
     def keyPressEvent(self, event):
         if shortcuts.event_matches(event, "copy"):

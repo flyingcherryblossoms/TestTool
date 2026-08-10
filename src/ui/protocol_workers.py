@@ -13,6 +13,7 @@ import time
 from PySide6.QtCore import QThread, Signal
 
 from src.protocol import (
+    HttpServerEngine,
     TcpServerEngine,
     WsServerEngine,
     tcp_send_and_receive,
@@ -118,6 +119,10 @@ class TcpServerWorker(QThread):
     def _on_error(self, error: str) -> None:
         self.error_occurred.emit(error)
 
+    def set_active_message(self, text: str) -> None:
+        """运行时热更新固定响应内容（服务端运行中生效）。"""
+        self._response_message = text
+
     def stop_server(self) -> None:
         """从主线程停止服务端。"""
         if self._engine:
@@ -203,8 +208,88 @@ class WsServerWorker(QThread):
     def _on_error(self, error: str) -> None:
         self.error_occurred.emit(error)
 
+    def set_active_message(self, text: str) -> None:
+        """运行时热更新固定响应内容（服务端运行中生效）。"""
+        self._response_message = text
+
     def stop_server(self) -> None:
         """从主线程停止 WebSocket 服务端。"""
+        if self._engine:
+            self._engine.stop()
+        self.wait(3000)
+
+
+class HttpServerWorker(QThread):
+    """HTTP 服务端监听 Worker（mock server）。
+
+    run() 调用 HttpServerEngine.start()（阻塞），
+    直到 stop_server() 从主线程调用 engine.stop()。
+    """
+
+    message_received = Signal(str, str)
+    message_received_raw = Signal(str, bytes)
+    status_changed = Signal(str)
+    error_occurred = Signal(str)
+
+    def __init__(self, server_id: int, ip: str, port: int,
+                 response_mode: str, status_code: int, headers: list,
+                 response_message: str, response_delay_ms: int = 0,
+                 parent=None):
+        super().__init__(parent)
+        self._server_id = server_id
+        self._ip = ip
+        self._port = port
+        self._response_mode = response_mode
+        self._status_code = status_code
+        self._headers = list(headers or [])
+        self._response_message = response_message
+        self._response_delay_ms = response_delay_ms
+        self._engine: HttpServerEngine | None = None
+        self._pending_raw: bytes | None = None
+
+    def run(self) -> None:
+        """在 QThread 中阻塞运行 accept 循环。"""
+        self._engine = HttpServerEngine(
+            ip=self._ip,
+            port=self._port,
+            on_request=self._on_request,
+            on_message_raw=self._on_raw_received,
+            on_status=self._on_status,
+            on_error=self._on_error,
+        )
+        self._engine.start()
+
+    def set_active_response(self, status_code: int, headers: list,
+                            body: str) -> None:
+        """运行时热更新当前返回响应（服务端运行中生效）。"""
+        self._status_code = int(status_code)
+        self._headers = list(headers or [])
+        self._response_message = body
+
+    def _on_raw_received(self, client_addr: str, raw: bytes) -> None:
+        self._pending_raw = raw
+
+    def _on_request(self, client_addr: str, req: dict) -> tuple[int, list, str]:
+        raw = self._pending_raw
+        self._pending_raw = None
+        self.message_received.emit(client_addr, req["text"])
+        if raw is not None:
+            self.message_received_raw.emit(client_addr, raw)
+        if self._response_delay_ms > 0:
+            time.sleep(self._response_delay_ms / 1000.0)
+        if self._response_mode == "echo":
+            body = req["body"].decode("utf-8", errors="replace")
+            return 200, list(self._headers), body
+        return self._status_code, list(self._headers), self._response_message
+
+    def _on_status(self, status: str) -> None:
+        self.status_changed.emit(status)
+
+    def _on_error(self, error: str) -> None:
+        self.error_occurred.emit(error)
+
+    def stop_server(self) -> None:
+        """从主线程停止 HTTP 服务端。"""
         if self._engine:
             self._engine.stop()
         self.wait(3000)

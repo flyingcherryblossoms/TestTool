@@ -86,7 +86,7 @@ class ProtocolServer:
     """持久化的协议服务端监听器配置。"""
     id: int
     name: str = ""
-    server_type: str = ""             # "tcp_server" | "ws_server"
+    server_type: str = ""             # "tcp_server" | "ws_server" | "http_server"
     ip: str = "0.0.0.0"
     port: int = 0
     encoding: str = "UTF-8"
@@ -95,10 +95,65 @@ class ProtocolServer:
     ws_path: str = ""
     response_mode: str = "fixed"      # "fixed" | "echo"
     response_message: str = ""
+    response_messages: str = ""       # JSON: [{name, active, status_code, headers, body}, ...]
     response_delay: int = 0           # 响应延迟（毫秒）
     target_id: int | None = None      # 关联的协议目标
     sort_order: int = 0
     created_at: str = ""
+
+    @property
+    def response_list(self) -> list:
+        """解析返回报文列表（为空时按 response_message 回填默认单条）。"""
+        return parse_server_responses(self)
+
+    def active_response(self) -> dict:
+        """当前返回报文（active 标记；无标记取第一条）。"""
+        items = parse_server_responses(self)
+        return next((it for it in items if it["active"]), items[0])
+
+    def active_message(self) -> str:
+        """当前返回报文的内容。"""
+        return self.active_response()["body"]
+
+
+def default_response_messages(body: str = "") -> list:
+    """返回单条「默认响应」的返回报文列表（新建服务端时的初始值）。"""
+    return [{"name": "默认响应", "active": True, "status_code": 200,
+             "headers": [], "body": body or ""}]
+
+
+def _json_dumps(obj) -> str:
+    """序列化为 JSON 字符串（返回报文列表存储用）。"""
+    import json as _json
+    return _json.dumps(obj, ensure_ascii=False)
+
+
+def parse_server_responses(srv) -> list:
+    """解析服务端返回报文列表并规范化字段；为空时按 response_message 回填。"""
+    import json as _json
+    raw = getattr(srv, "response_messages", "") or ""
+    try:
+        items = _json.loads(raw)
+    except (_json.JSONDecodeError, TypeError):
+        items = []
+    if not isinstance(items, list) or not items:
+        items = default_response_messages(getattr(srv, "response_message", "") or "")
+    normalized = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        normalized.append({
+            "name": str(it.get("name", "") or "返回报文"),
+            "active": bool(it.get("active", False)),
+            "status_code": int(it.get("status_code", 200) or 200),
+            "headers": it.get("headers", []) or [],
+            "body": it.get("body", "") or "",
+        })
+    if not normalized:
+        normalized = default_response_messages(getattr(srv, "response_message", "") or "")
+    if not any(n["active"] for n in normalized):
+        normalized[0]["active"] = True
+    return normalized
 
 
 @dataclass
@@ -221,6 +276,7 @@ CREATE TABLE IF NOT EXISTS protocol_servers (
     ws_path TEXT DEFAULT '',
     response_mode TEXT DEFAULT 'fixed',
     response_message TEXT DEFAULT '',
+    response_messages TEXT DEFAULT '',
     response_delay INTEGER DEFAULT 0,
     target_id INTEGER,
     sort_order INTEGER DEFAULT 0,
@@ -387,6 +443,14 @@ class Database:
                 conn.execute(
                     "ALTER TABLE protocol_servers "
                     "ADD COLUMN response_delay INTEGER DEFAULT 0"
+                )
+            except sqlite3.OperationalError:
+                pass  # 列已存在
+            # 服务端返回报文列表列：老库缺列时幂等补列（空则读取时按 response_message 回填）
+            try:
+                conn.execute(
+                    "ALTER TABLE protocol_servers "
+                    "ADD COLUMN response_messages TEXT DEFAULT ''"
                 )
             except sqlite3.OperationalError:
                 pass  # 列已存在
@@ -1020,6 +1084,7 @@ class Database:
                 head_length=r["head_length"], ws_path=r["ws_path"],
                 response_mode=r["response_mode"],
                 response_message=r["response_message"],
+                response_messages=r["response_messages"] if "response_messages" in r.keys() else "",
                 response_delay=r["response_delay"] if "response_delay" in r.keys() else 0,
                 target_id=r["target_id"],
                 sort_order=r["sort_order"], created_at=r["created_at"]
@@ -1042,6 +1107,7 @@ class Database:
                     head_length=r["head_length"], ws_path=r["ws_path"],
                     response_mode=r["response_mode"],
                     response_message=r["response_message"],
+                    response_messages=r["response_messages"] if "response_messages" in r.keys() else "",
                     response_delay=r["response_delay"] if "response_delay" in r.keys() else 0,
                     target_id=r["target_id"],
                     sort_order=r["sort_order"], created_at=r["created_at"]
@@ -1056,31 +1122,38 @@ class Database:
                             ws_path: str = "",
                             response_mode: str = "fixed",
                             response_message: str = "",
+                            response_messages: str | None = None,
                             response_delay: int = 0,
                             target_id: int | None = None) -> int:
-        """添加协议服务端配置，返回新 ID。"""
+        """添加协议服务端配置，返回新 ID。
+
+        response_messages 传 JSON 串（None 时按 response_message 回填默认列表）。
+        """
+        if response_messages is None:
+            response_messages = _json_dumps(
+                default_response_messages(response_message))
         with self._connect() as conn:
             if self._servers_have_delay:
                 cur = conn.execute("""
                     INSERT INTO protocol_servers
                         (name, server_type, ip, port, encoding, recv_encoding,
                          head_length, ws_path, response_mode, response_message,
-                         response_delay, target_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         response_messages, response_delay, target_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (name, server_type, ip, port, encoding, recv_encoding,
                       head_length, ws_path, response_mode, response_message,
-                      response_delay, target_id))
+                      response_messages, response_delay, target_id))
             else:
                 # 老库无 response_delay 列，插入时省略（默认 0）
                 cur = conn.execute("""
                     INSERT INTO protocol_servers
                         (name, server_type, ip, port, encoding, recv_encoding,
                          head_length, ws_path, response_mode, response_message,
-                         target_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         response_messages, target_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (name, server_type, ip, port, encoding, recv_encoding,
                       head_length, ws_path, response_mode, response_message,
-                      target_id))
+                      response_messages, target_id))
             return cur.lastrowid
 
     def update_protocol_server(self, server_id: int, name: str,
@@ -1091,32 +1164,43 @@ class Database:
                                ws_path: str = "",
                                response_mode: str = "fixed",
                                response_message: str = "",
+                               response_messages: str | None = None,
                                response_delay: int = 0,
                                target_id: int | None = None) -> None:
         """更新协议服务端配置。"""
         with self._connect() as conn:
+            if response_messages is None:
+                # 未显式指定时保留已有返回报文列表（避免覆盖用户编辑）
+                cur = conn.execute(
+                    "SELECT response_messages FROM protocol_servers WHERE id = ?",
+                    (server_id,)).fetchone()
+                if cur and cur["response_messages"]:
+                    response_messages = cur["response_messages"]
+                else:
+                    response_messages = _json_dumps(
+                        default_response_messages(response_message))
             if self._servers_have_delay:
                 conn.execute("""
                     UPDATE protocol_servers SET
                         name = ?, server_type = ?, ip = ?, port = ?,
                         encoding = ?, recv_encoding = ?, head_length = ?,
                         ws_path = ?, response_mode = ?, response_message = ?,
-                        response_delay = ?, target_id = ?
+                        response_messages = ?, response_delay = ?, target_id = ?
                     WHERE id = ?
                 """, (name, server_type, ip, port, encoding, recv_encoding,
                       head_length, ws_path, response_mode, response_message,
-                      response_delay, target_id, server_id))
+                      response_messages, response_delay, target_id, server_id))
             else:
                 conn.execute("""
                     UPDATE protocol_servers SET
                         name = ?, server_type = ?, ip = ?, port = ?,
                         encoding = ?, recv_encoding = ?, head_length = ?,
                         ws_path = ?, response_mode = ?, response_message = ?,
-                        target_id = ?
+                        response_messages = ?, target_id = ?
                     WHERE id = ?
                 """, (name, server_type, ip, port, encoding, recv_encoding,
                       head_length, ws_path, response_mode, response_message,
-                      target_id, server_id))
+                      response_messages, target_id, server_id))
 
     def delete_protocol_server(self, server_id: int) -> None:
         """删除协议服务端配置。"""
