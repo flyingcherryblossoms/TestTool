@@ -224,6 +224,8 @@ def _validate_server_dict(s: dict, path: str, is_ws: bool = False) -> dict | str
         "ws_path": s.get("ws_path", "/"),
         "response_mode": s.get("response_mode", "fixed"),
         "response_message": s.get("response_message", ""),
+        # None 时由 add_protocol_server 按 response_message 回填默认列表
+        "response_messages": s.get("response_messages") or None,
         "response_delay": s.get("response_delay", 0),
     }
 

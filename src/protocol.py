@@ -424,3 +424,178 @@ class WsServerEngine:
 
     def is_running(self) -> bool:
         return self._running
+
+
+# ── HTTP 服务端（mock server）───────────────────────────────
+
+MAX_HTTP_HEADER_BYTES = 64 * 1024  # 请求头上限
+
+
+def read_http_request(client_sock: socket.socket) -> Optional[dict]:
+    """读取并解析一个 HTTP 请求。
+
+    Returns:
+        dict(method, path, headers, body, text)，解析失败或连接异常返回 None。
+    headers 为小写 key -> 值；仅支持 Content-Length 请求体（无 chunked）。
+    """
+    raw = b""
+    while b"\r\n\r\n" not in raw:
+        if len(raw) > MAX_HTTP_HEADER_BYTES:
+            return None
+        try:
+            chunk = client_sock.recv(READ_CHUNK_SIZE)
+        except (socket.timeout, ConnectionError, OSError):
+            return None
+        if not chunk:
+            return None
+        raw += chunk
+    header_blob, _, rest = raw.partition(b"\r\n\r\n")
+    lines = header_blob.split(b"\r\n")
+    if not lines or b" " not in lines[0]:
+        return None
+    try:
+        method, path, _ver = lines[0].decode("latin-1").split(" ", 2)
+    except ValueError:
+        return None
+    headers: dict[str, str] = {}
+    for line in lines[1:]:
+        if b":" not in line:
+            continue
+        k, _, v = line.partition(b":")
+        headers[k.decode("latin-1").strip().lower()] = v.decode("latin-1").strip()
+    body = rest
+    try:
+        content_length = int(headers.get("content-length", "0") or 0)
+    except ValueError:
+        content_length = 0
+    if content_length > MAX_MESSAGE_BYTES:
+        content_length = MAX_MESSAGE_BYTES
+    while len(body) < content_length:
+        try:
+            chunk = client_sock.recv(min(READ_CHUNK_SIZE, content_length - len(body)))
+        except (socket.timeout, ConnectionError, OSError):
+            break
+        if not chunk:
+            break
+        body += chunk
+    text = (header_blob + b"\r\n\r\n" + body).decode("latin-1", errors="replace")
+    return {"method": method, "path": path, "headers": headers,
+            "body": body, "text": text}
+
+
+def build_http_response(status_code: int, headers: list, body: str) -> bytes:
+    """组装 HTTP 响应字节：状态行 + 响应头 + 空行 + body，自动补 Content-Length。"""
+    from http.client import responses
+    reason = responses.get(status_code, "")
+    body_bytes = body.encode("utf-8") if isinstance(body, str) else bytes(body)
+    lines = [f"HTTP/1.1 {status_code} {reason}".encode("latin-1")]
+    has_cl = False
+    for k, v in headers or []:
+        lines.append(f"{k}: {v}".encode("latin-1"))
+        if str(k).lower() == "content-length":
+            has_cl = True
+    if not has_cl:
+        lines.append(f"Content-Length: {len(body_bytes)}".encode("ascii"))
+    lines.append(b"")
+    lines.append(b"")
+    return b"\r\n".join(lines) + body_bytes
+
+
+class HttpServerEngine:
+    """HTTP 服务端引擎（mock server）。
+
+    start() 阻塞运行 accept 循环，每个连接读取一个 HTTP 请求，
+    调用 on_request(addr, req) -> (status_code, headers_list, body) 生成响应。
+    仅处理基础 HTTP/1.1：Content-Length 请求体，无 chunked/keep-alive。
+    """
+
+    def __init__(
+        self,
+        ip: str,
+        port: int,
+        on_request: Callable[[str, dict], tuple[int, list, str]],
+        on_status: Callable[[str], None],
+        on_error: Callable[[str], None],
+        on_message_raw: Optional[Callable[[str, bytes], None]] = None,
+    ):
+        self._ip = ip
+        self._port = port
+        self._on_request = on_request
+        self._on_status = on_status
+        self._on_error = on_error
+        self._on_message_raw = on_message_raw
+        self._server_sock: Optional[socket.socket] = None
+        self._stop_event = threading.Event()
+        self._running = False
+
+    def start(self) -> None:
+        """启动监听（阻塞当前线程，直到 stop() 被调用）。"""
+        if self._running:
+            return
+        try:
+            self._server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self._server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self._server_sock.bind((self._ip, self._port))
+            self._server_sock.listen(5)
+            self._server_sock.settimeout(ACCEPT_TIMEOUT)
+        except OSError as e:
+            self._on_error(f"启动监听失败 {self._ip}:{self._port}: {e}")
+            self._running = False
+            return
+        self._running = True
+        self._stop_event.clear()
+        self._on_status(f"HTTP 服务已启动 http://{self._ip}:{self._port}")
+        try:
+            while self._running and not self._stop_event.is_set():
+                try:
+                    client_sock, client_addr = self._server_sock.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                if not self._running:
+                    try:
+                        client_sock.close()
+                    except OSError:
+                        pass
+                    break
+                self._handle_client(client_sock, client_addr)
+        finally:
+            self._running = False
+
+    def stop(self) -> None:
+        """停止监听（从另一个线程调用，解除 start() 的阻塞）。"""
+        if not self._running:
+            return
+        self._running = False
+        self._stop_event.set()
+        if self._server_sock:
+            try:
+                self._server_sock.close()
+            except OSError:
+                pass
+        self._on_status(f"HTTP 服务已停止 {self._ip}:{self._port}")
+
+    def is_running(self) -> bool:
+        return self._running
+
+    def _handle_client(self, client_sock: socket.socket,
+                       client_addr: tuple) -> None:
+        """处理单个 HTTP 请求（同步，短连接）。"""
+        addr_str = f"{client_addr[0]}:{client_addr[1]}"
+        try:
+            with client_sock:
+                client_sock.settimeout(30)
+                req = read_http_request(client_sock)
+                if req is None:
+                    client_sock.sendall(build_http_response(
+                        400, [("Content-Type", "text/plain")], "Bad Request"))
+                    self._on_status("已回复:\nHTTP 400 Bad Request")
+                    return
+                if self._on_message_raw:
+                    self._on_message_raw(addr_str, req["text"].encode("latin-1"))
+                status, headers, body = self._on_request(addr_str, req)
+                client_sock.sendall(build_http_response(status, headers, body))
+                self._on_status(f"已回复:\nHTTP {status} {body}")
+        except (ConnectionError, socket.timeout, OSError) as e:
+            self._on_error(f"处理客户端 {addr_str} 时出错: {e}")

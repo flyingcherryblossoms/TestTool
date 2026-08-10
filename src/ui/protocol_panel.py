@@ -454,6 +454,7 @@ class _CollectionSidebar(CollectionSidebarBase):
                     recv_encoding=s.recv_encoding, head_length=s.head_length,
                     ws_path=s.ws_path, response_mode=s.response_mode,
                     response_message=s.response_message,
+                    response_messages=s.response_messages or None,
                     response_delay=s.response_delay, target_id=tid,
                 )
 
@@ -518,6 +519,7 @@ class _CollectionSidebar(CollectionSidebarBase):
                             head_length=s["head_length"], ws_path=s["ws_path"],
                             response_mode=s["response_mode"],
                             response_message=s["response_message"],
+                            response_messages=s.get("response_messages") or None,
                             response_delay=s.get("response_delay", 0), target_id=tid,
                         )
                 imported += 1
@@ -576,6 +578,7 @@ class _CollectionSidebar(CollectionSidebarBase):
                                  "head_length": s.head_length, "ws_path": s.ws_path,
                                  "response_mode": s.response_mode,
                                  "response_message": s.response_message,
+                                 "response_messages": s.response_messages or "",
                                  "response_delay": s.response_delay} for s in servers],
                 })
             collections_data.append({
@@ -943,7 +946,10 @@ class TargetMockServerPanel(ServerPanelBase):
     def _server_columns(self):
         return ["名称", "监听地址", "端口", "发送编码", "接收编码", "HeadLen", "响应模式", "延迟(ms)", "状态", "操作"]
 
-    def _row_cells(self, s, is_tcp: bool):
+    def _row_cells(self, s):
+        if s.server_type == "http_server":
+            return [s.name, s.ip, str(s.port), "-", "-", "-", "固定",
+                    str(s.response_delay)]
         return [s.name, s.ip, str(s.port), s.encoding or "", s.recv_encoding or "",
                 str(s.head_length), "回显" if s.response_mode == "echo" else "固定",
                 str(s.response_delay)]
@@ -1195,6 +1201,7 @@ class _TargetDetailPanel(QWidget):
                          "head_length": s.head_length, "ws_path": s.ws_path,
                          "response_mode": s.response_mode,
                          "response_message": s.response_message,
+                         "response_messages": s.response_messages or "",
                          "response_delay": s.response_delay} for s in servers],
         }
         if label == "HTTP":
@@ -1902,6 +1909,7 @@ class _CollectionDetailTab(QWidget):
                     recv_encoding=s.recv_encoding, head_length=s.head_length,
                     ws_path=s.ws_path, response_mode=s.response_mode,
                     response_message=s.response_message,
+                    response_messages=s.response_messages or None,
                     response_delay=s.response_delay, target_id=new_tid)
             existing.add(new_name)
         self._refresh_targets()
@@ -1935,6 +1943,7 @@ class _CollectionDetailTab(QWidget):
                      "head_length": s.head_length, "ws_path": s.ws_path or "",
                      "response_mode": s.response_mode,
                      "response_message": s.response_message or "",
+                     "response_messages": s.response_messages or "",
                      "response_delay": s.response_delay}
                     for s in self._db.get_protocol_servers_by_target(t.id)
                 ],
@@ -1964,6 +1973,7 @@ class _CollectionDetailTab(QWidget):
                     head_length=s.get("head_length", 5), ws_path=s.get("ws_path", ""),
                     response_mode=s.get("response_mode", "echo"),
                     response_message=s.get("response_message", ""),
+                    response_messages=s.get("response_messages") or None,
                     response_delay=s.get("response_delay", 0), target_id=new_tid)
             existing.add(new_name)
         self._refresh_targets()
@@ -2064,7 +2074,10 @@ class _ServerTab(ServerPanelBase):
     def _server_columns(self):
         return ["名称", "类型", "监听地址", "端口", "发送编码", "接收编码", "关联目标", "响应模式", "延迟(ms)", "状态", "操作"]
 
-    def _row_cells(self, s, is_tcp: bool):
+    def _row_cells(self, s):
+        if s.server_type == "http_server":
+            return [s.name, "HTTP", s.ip, str(s.port), "-", "-",
+                    self._target_cell(s), "固定", str(s.response_delay)]
         return [s.name, "TCP" if "tcp" in s.server_type else "WS",
                 s.ip, str(s.port), s.encoding or "", s.recv_encoding or "",
                 self._target_cell(s),
@@ -2094,7 +2107,7 @@ class _ServerTab(ServerPanelBase):
         return self._type_filter.currentData() or "tcp_server"
 
     def _check_port_conflict(self, s) -> bool:
-        for sid in {**self._tcp_workers, **self._ws_workers}:
+        for sid in self._all_workers():
             other = self._db.get_protocol_server(sid)
             if other and other.port == s.port:
                 QMessageBox.warning(self, "端口冲突", f"端口 {s.port} 已被 [{other.name}] 占用。")
