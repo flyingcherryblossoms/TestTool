@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.database import Database
+from src.ui import shortcuts
 from src.ui.clipboard import KIND_COLLECTION, copy_items, paste_items
 from src.ui.table_utils import ReorderableTree, unique_copy_name
 
@@ -376,14 +377,13 @@ class CollectionSidebarBase(QWidget):
             self.refresh()
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_C and event.modifiers() == Qt.ControlModifier:
+        if shortcuts.event_matches(event, "copy"):
             self._copy_collections_to_clip()
-        elif event.key() == Qt.Key_V and event.modifiers() == Qt.ControlModifier:
+        elif shortcuts.event_matches(event, "paste"):
             self._paste_collections_from_clip()
-        elif event.key() == Qt.Key_F5:
+        elif shortcuts.event_matches(event, "refresh"):
             self.refresh()
-        elif (event.key() == Qt.Key_Delete
-              or (event.key() == Qt.Key_D and event.modifiers() == Qt.ControlModifier)):
+        elif shortcuts.event_matches(event, "delete"):
             self._on_delete()
         else:
             super().keyPressEvent(event)

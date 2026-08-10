@@ -329,6 +329,13 @@ def target_display_info(target: ProtocolTarget) -> dict:
                 continue
             if isinstance(cfg, dict):
                 cfg["_proto"] = proto
+                # WS 目标字段以 ws_* 为准；兼容旧数据（对话框曾存 ws_path / timeout）
+                if proto == "ws_client":
+                    ws_url = cfg.get("ws_url", "") or cfg.get("ws_path", "")
+                    timeout = cfg.get("ws_timeout", cfg.get("timeout", 30.0))
+                else:
+                    ws_url = cfg.get("ws_url", "")
+                    timeout = cfg.get("timeout", 30.0)
                 return {
                     "proto": proto,
                     "ip": cfg.get("ip", ""),
@@ -336,8 +343,9 @@ def target_display_info(target: ProtocolTarget) -> dict:
                     "encoding": cfg.get("encoding", "UTF-8"),
                     "recv_encoding": cfg.get("recv_encoding", "UTF-8"),
                     "head_length": cfg.get("head_length", 0),
-                    "timeout": cfg.get("timeout", 30.0),
-                    "ws_url": cfg.get("ws_url", ""),
+                    "timeout": timeout,
+                    "ws_timeout": timeout,
+                    "ws_url": ws_url,
                     "ws_ssl": cfg.get("ws_ssl", False),
                     "send_message": cfg.get("send_message", ""),
                     "url": cfg.get("url", ""),
@@ -350,7 +358,7 @@ def _empty_display_info() -> dict:
     return {
         "proto": "tcp_client", "ip": "", "port": 0,
         "encoding": "UTF-8", "recv_encoding": "UTF-8",
-        "head_length": 0, "timeout": 30.0,
+        "head_length": 0, "timeout": 30.0, "ws_timeout": 30.0,
         "ws_url": "", "ws_ssl": False,
         "send_message": "", "url": "", "http_method": "GET",
     }

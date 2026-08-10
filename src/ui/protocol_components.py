@@ -54,6 +54,7 @@ from PySide6.QtWidgets import (
 from src.database import Database
 from src.protocol import compute_length_header
 from src.scanner import ScanTarget, ScannerWorker
+from src.ui import shortcuts
 from src.ui.http_client import HttpParamWidget, HttpRequestWorker
 from src.ui.protocol_workers import (
     StressTestWorker,
@@ -579,9 +580,12 @@ class ClientPanelBase(QWidget):
         v_splitter.setStretchFactor(1, 1)
         layout.addWidget(v_splitter)
 
-        # Ctrl+S 快捷键（不依赖焦点位置）
-        self._ctrl_s_shortcut = QShortcut(QKeySequence("Ctrl+S"), self)
-        self._ctrl_s_shortcut.activated.connect(self._on_ctrl_s)
+        # 快捷键（集中注册，可在设置中修改）
+        self._ctrl_s_shortcut = shortcuts.make_shortcut(self, "save", self._on_ctrl_s)
+        # 发送按钮绑定 Ctrl+Enter：焦点在客户端面板内任意子控件即触发
+        self._send_shortcut = shortcuts.make_shortcut(
+            self, "send", self._send_message,
+            context=Qt.WidgetWithChildrenShortcut)
 
     # ── 协议切换 / 参数收集 ──────────────────────────────────
 
@@ -630,8 +634,13 @@ class ClientPanelBase(QWidget):
                 self._param_enc.setCurrentText(cfg.get("encoding", "UTF-8"))
                 self._resp_enc_combo.setCurrentText(cfg.get("recv_encoding", "UTF-8"))
                 self._param_hl.setValue(cfg.get("head_length", 5))
-                self._param_timeout.setValue(cfg.get("timeout", 5.0))
-                self._param_ws_url.setText(cfg.get("ws_url", "ws://127.0.0.1:80/ws"))
+                # WS 配置中 TCP 超时字段以 ws_timeout 为准，避免残留旧 TCP 值
+                timeout = cfg.get("ws_timeout", cfg.get("timeout", 5.0)) \
+                    if proto == "ws_client" else cfg.get("timeout", 5.0)
+                self._param_timeout.setValue(timeout)
+                # ws_url / ws_path 两种存储键都兼容（对话框曾存 ws_path）
+                ws_url = cfg.get("ws_url") or cfg.get("ws_path") or "ws://127.0.0.1:80/ws"
+                self._param_ws_url.setText(ws_url)
                 self._param_ws_timeout.setValue(cfg.get("ws_timeout", 5.0))
                 self._param_ws_ssl.setChecked(cfg.get("ws_ssl", False))
                 self._send_edit.setPlainText(cfg.get("send_message", ""))
@@ -1427,19 +1436,17 @@ class ClientPanelBase(QWidget):
                 self._on_ctrl_s_no_focus()
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_C and event.modifiers() == Qt.ControlModifier:
+        if shortcuts.event_matches(event, "copy"):
             self._copy_preset_to_clip()
-        elif event.key() == Qt.Key_V and event.modifiers() == Qt.ControlModifier:
+        elif shortcuts.event_matches(event, "paste"):
             self._paste_preset_from_clip()
-        elif event.key() == Qt.Key_F2:
+        elif shortcuts.event_matches(event, "edit_preset"):
             self._edit_preset()
-        elif event.key() == Qt.Key_F5:
+        elif shortcuts.event_matches(event, "refresh"):
             self._refresh_preset_list()
-        elif event.key() == Qt.Key_Delete or (
-            event.key() == Qt.Key_D and event.modifiers() == Qt.ControlModifier
-        ):
+        elif shortcuts.event_matches(event, "delete"):
             self._delete_preset()
-        elif event.key() == Qt.Key_S and event.modifiers() == Qt.ControlModifier:
+        elif shortcuts.event_matches(event, "save"):
             self._on_ctrl_s()
         else:
             super().keyPressEvent(event)
@@ -2167,13 +2174,13 @@ class ServerPanelBase(QWidget):
         self._stop_all()
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_C and event.modifiers() == Qt.ControlModifier:
+        if shortcuts.event_matches(event, "copy"):
             self._copy_servers_to_clip()
-        elif event.key() == Qt.Key_V and event.modifiers() == Qt.ControlModifier:
+        elif shortcuts.event_matches(event, "paste"):
             self._paste_servers_from_clip()
-        elif event.key() == Qt.Key_F5:
+        elif shortcuts.event_matches(event, "refresh"):
             self._refresh()
-        elif event.key() == Qt.Key_Delete or (event.key() == Qt.Key_D and event.modifiers() == Qt.ControlModifier):
+        elif shortcuts.event_matches(event, "delete"):
             self._delete_selected_servers()
         else:
             super().keyPressEvent(event)

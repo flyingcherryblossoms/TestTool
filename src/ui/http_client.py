@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.ui import shortcuts
 from src.ui.message_format import format_payload
 
 
@@ -204,7 +205,7 @@ class _CompactKvTable(QWidget):
             self._table.setItem(r, 1, QTableWidgetItem(v))
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Delete:
+        if shortcuts.event_matches(event, "delete"):
             self._delete_rows()
         else:
             super().keyPressEvent(event)
@@ -290,9 +291,9 @@ class HttpParamWidget(QWidget):
         # ── 所有参数变更统一通知父组件 ──
         self._connect_change_signals()
 
-        # 快捷键：Ctrl+Shift+F 格式化 Body 内容
-        self._format_shortcut = QShortcut(QKeySequence("Ctrl+Shift+F"), self)
-        self._format_shortcut.activated.connect(self._format_body)
+        # 快捷键：格式化 Body 内容（可在设置中修改）
+        self._format_shortcut = shortcuts.make_shortcut(
+            self, "format_body", self._format_body)
 
     # ── 变更通知：所有可编辑控件统一连接 config_changed ──
 

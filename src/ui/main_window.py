@@ -21,9 +21,11 @@ from PySide6.QtWidgets import (
 )
 
 from src.database import Database
+from src.ui import shortcuts
 from src.ui.connectivity_panel import ConnectivityPanel
 from src.ui.port_scan_dialog import PortScanDialog
 from src.ui.protocol_panel import ProtocolPanel
+from src.ui.shortcut_settings_dialog import ShortcutSettingsDialog
 
 
 class CollectionDialog(QDialog):
@@ -65,6 +67,8 @@ class MainWindow(QMainWindow):
     def __init__(self, db_path: str = ""):
         super().__init__()
         self._db = Database(db_path)
+        # 先加载快捷键绑定，面板创建时即读到已存配置
+        shortcuts.load(self._db)
         self.setWindowTitle("测试工具")
         self.setMinimumSize(1100, 700)
         self.resize(1300, 850)
@@ -99,10 +103,24 @@ class MainWindow(QMainWindow):
         exit_action.triggered.connect(self.close)
         tools_menu.addAction(exit_action)
 
+        # 设置：作为菜单栏项插在「帮助」左侧
+        settings_action = QAction("设置(&S)", self)
+        settings_action.triggered.connect(self._open_shortcut_settings)
+
         help_menu = menubar.addMenu("帮助(&H)")
         about_action = QAction("关于", self)
         about_action.triggered.connect(self._show_about)
         help_menu.addAction(about_action)
+
+        menubar.insertAction(help_menu.menuAction(), settings_action)
+
+    def _open_shortcut_settings(self):
+        """打开快捷键设置对话框，保存后热更新全部快捷键。"""
+        dlg = ShortcutSettingsDialog(self._db, self)
+        if dlg.exec() == QDialog.Accepted:
+            shortcuts.save(self._db, dlg.shortcuts)
+            shortcuts.set_active(dlg.shortcuts)
+            shortcuts.apply_shortcuts()
 
     # ── 主布局 ─────────────────────────────────────────────
 
