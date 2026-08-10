@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 
 from src.csv_handler import export_targets_to_csv, parse_targets_csv
 from src.database import Database, Target
+from src.ui import shortcuts
 from src.ui.clipboard import KIND_CONN_TARGET, copy_items, paste_items
 from src.ui.table_utils import (
     TargetDragTable,
@@ -1124,11 +1125,11 @@ class TargetPanel(QWidget):
             QMessageBox.critical(self, "导出失败", f"导出失败:\n{err}")
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_C and event.modifiers() == Qt.ControlModifier:
+        if shortcuts.event_matches(event, "copy"):
             self._copy_targets_to_clip()
-        elif event.key() == Qt.Key_V and event.modifiers() == Qt.ControlModifier:
+        elif shortcuts.event_matches(event, "paste"):
             self._paste_targets_from_clip()
-        elif event.key() == Qt.Key_Delete or (event.key() == Qt.Key_D and event.modifiers() == Qt.ControlModifier):
+        elif shortcuts.event_matches(event, "delete"):
             self._delete_targets()
         else:
             super().keyPressEvent(event)

@@ -28,6 +28,7 @@ from pathlib import Path
 from src.csv_handler import export_results_to_csv
 from src.database import Database
 from src.excel_handler import export_results_to_excel
+from src.ui import shortcuts
 from src.ui.table_utils import enable_stretch_fill, refresh_tooltips
 
 
@@ -371,7 +372,7 @@ class ResultPanel(QWidget):
             QMessageBox.critical(self, "导出失败", f"导出失败:\n{err}")
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Delete or (event.key() == Qt.Key_D and event.modifiers() == Qt.ControlModifier):
+        if shortcuts.event_matches(event, "delete"):
             self._delete_sessions()
         else:
             super().keyPressEvent(event)

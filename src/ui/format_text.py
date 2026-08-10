@@ -19,6 +19,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont, QSyntaxHighlighter, QTextCharFormat
 from PySide6.QtWidgets import QComboBox, QPlainTextEdit
 
+from src.ui import shortcuts
+
 
 def _fmt(color: str, bold: bool = False) -> QTextCharFormat:
     f = QTextCharFormat()
@@ -149,17 +151,15 @@ class FormatTextEdit(QPlainTextEdit):
         super().wheelEvent(event)
 
     def keyPressEvent(self, event):
-        if event.modifiers() & Qt.ControlModifier:
-            key = event.key()
-            if key in (Qt.Key_Plus, Qt.Key_Equal):
-                self._zoom(1)
-                return
-            if key == Qt.Key_Minus:
-                self._zoom(-1)
-                return
-            if key == Qt.Key_0:
-                self._reset_zoom()
-                return
+        if shortcuts.event_matches(event, "zoom_in"):
+            self._zoom(1)
+            return
+        if shortcuts.event_matches(event, "zoom_out"):
+            self._zoom(-1)
+            return
+        if shortcuts.event_matches(event, "zoom_reset"):
+            self._reset_zoom()
+            return
         super().keyPressEvent(event)
 
     def _zoom(self, step: int) -> None:

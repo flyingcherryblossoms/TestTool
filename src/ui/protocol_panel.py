@@ -55,6 +55,7 @@ from PySide6.QtWidgets import (
 
 from src.database import Database, target_display_info
 from src.protocol import compute_length_header
+from src.ui import shortcuts
 from src.ui.clipboard import KIND_PROTO_TARGET, copy_items, paste_items
 from src.ui.collection_sidebar import CollectionSidebarBase
 from src.ui.table_utils import (
@@ -629,32 +630,38 @@ class TargetClientPanel(ClientPanelBase):
         self._save_as_default_preset()
 
     def _on_proto_changed(self, idx: int):
-        """协议切换时自动保存旧协议配置到默认预设、加载新协议预设。"""
+        """协议切换：保存旧协议配置到旧协议默认预设，再加载新协议已有默认配置。
+
+        旧实现会把当前参数误存进「新协议」的默认配置（随后又被 _update_active_proto
+        用过期内存数据还原，面板却显示默认值），这里改为：旧协议草稿/参数写回旧协议，
+        再加载新协议已存在的默认配置，没有才从当前参数新建。
+        """
         new_proto = self._proto_combo.currentData()
         if new_proto == self._prev_proto:
             ClientPanelBase._on_proto_changed(self, idx)
             return
-        # 保存旧协议的预设草稿，并把当前配置存入"默认配置"预设
-        self._sync_current_draft()
+        old_proto = self._prev_proto
+        # 1) 把旧协议下已缓存的未保存草稿写回旧协议预设（索引基于旧协议列表）
         if self._dirty:
-            self.save_all_drafts()
+            self._flush_drafts(old_proto)
+        # 2) 把当前（旧协议）参数存入旧协议"默认配置"预设
         if self._owner._target:
-            self._save_as_default_preset()
-        # 切换 UI
+            self._save_as_default_preset(proto=old_proto)
+        # 3) 切换 UI
         self._prev_proto = new_proto
         ClientPanelBase._on_proto_changed(self, idx)
-        # 重置草稿/脏状态，加载新协议预设
+        # 4) 重置草稿/脏状态，加载新协议已有默认配置（没有则从当前参数创建）
         self._drafts.clear()
         self._dirty.clear()
         self._selected_preset_idx = None
         self._msg_dirty = False
+        if self._owner._target:
+            self._load_active_proto_default()
+            # 更新 _active_proto，确保下次加载按最近使用的协议展示
+            self._owner._update_active_proto(new_proto)
+            self._msg_dirty = False
         self._refresh_preset_list()
         self._update_send_label()
-        # 新协议确保存在"默认配置"预设
-        if self._owner._target:
-            self._ensure_default_preset()
-            # 更新 _active_proto，确保下次加载按最近使用的协议展示
-            self._update_active_proto(new_proto)
 
     def _can_send(self) -> bool:
         return bool(self._owner._target)
@@ -662,15 +669,15 @@ class TargetClientPanel(ClientPanelBase):
     def _can_edit_presets(self) -> bool:
         return bool(self._owner._target)
 
-    def get_presets(self):
+    def get_presets(self, proto: str = ""):
         t = self._owner._target
         if not t:
             return []
-        proto = self._proto_combo.currentData()
+        proto = proto or self._proto_combo.currentData()
         return self._owner._load_presets(t.send_presets, proto)
 
-    def save_presets(self, presets):
-        proto = self._proto_combo.currentData()
+    def save_presets(self, presets, proto: str = ""):
+        proto = proto or self._proto_combo.currentData()
         self._owner._save_presets_to_target(presets, proto)
 
     def _ensure_default_preset(self):
@@ -688,25 +695,94 @@ class TargetClientPanel(ClientPanelBase):
             self.save_presets(presets)
             self._refresh_preset_list()
 
-    def _save_as_default_preset(self):
-        """将当前参数保存到"默认配置"预设（没有则新建）。"""
-        default_name = "默认配置"
-        presets = list(self.get_presets())
-        proto = self._proto_combo.currentData()
+    def _collect_params_for(self, proto: str) -> dict:
+        """按目标协议收集参数（协议切换时组合框已指向新协议，不能依赖 currentData）。"""
         if proto == "http_client":
-            config = json.dumps(self._http_params.get_config(), ensure_ascii=False)
-        else:
-            config = json.dumps(self.collect_params(), ensure_ascii=False)
+            cfg = self._http_params.get_config()
+            cfg["proto"] = proto
+            return cfg
+        cfg = {
+            "proto": proto,
+            "ip": self._param_ip.text().strip(),
+            "port": self._param_port.value(),
+            "encoding": self._param_enc.currentText(),
+            "recv_encoding": self._resp_enc_combo.currentText(),
+            "head_length": self._param_hl.value(),
+            "timeout": self._param_timeout.value(),
+            "ws_url": self._param_ws_url.text().strip(),
+            "ws_timeout": self._param_ws_timeout.value(),
+            "ws_ssl": self._param_ws_ssl.isChecked(),
+            "send_message": self._send_edit.toPlainText(),
+        }
+        return cfg
+
+    def _save_as_default_preset(self, proto: str = ""):
+        """将当前参数保存到指定协议（默认当前协议）的"默认配置"预设（没有则新建）。"""
+        default_name = "默认配置"
+        target_proto = proto or self._proto_combo.currentData()
+        presets = list(self.get_presets(proto=target_proto))
+        config = json.dumps(self._collect_params_for(target_proto), ensure_ascii=False)
         for p in presets:
             if p.get("name") == default_name:
                 p["message"] = config
-                self.save_presets(presets)
+                self.save_presets(presets, proto=target_proto)
                 self._refresh_preset_list()
                 return
         # 不存在则新建
         presets.append({"name": default_name, "message": config})
-        self.save_presets(presets)
+        self.save_presets(presets, proto=target_proto)
         self._refresh_preset_list()
+
+    def _flush_drafts(self, proto: str):
+        """把未保存草稿按指定协议列表写回（协议切换时使用，索引基于该协议列表）。"""
+        if not self._dirty:
+            return
+        presets = list(self.get_presets(proto=proto))
+        changed = False
+        for idx in list(self._dirty):
+            if 0 <= idx < len(presets) and idx in self._drafts:
+                presets[idx]["message"] = self._drafts[idx]
+                changed = True
+        if changed:
+            self.save_presets(presets, proto=proto)
+        self._dirty.clear()
+        self._drafts.clear()
+        self._msg_dirty = False
+
+    def _load_active_proto_default(self):
+        """加载当前协议的"默认配置"到面板；没有则从当前参数创建默认预设。"""
+        presets = list(self.get_presets())
+        default_name = "默认配置"
+        idx = next((i for i, p in enumerate(presets)
+                    if p.get("name") == default_name), None)
+        if idx is not None:
+            self._selected_preset_idx = idx
+            self._load_preset_config(presets[idx].get("message", ""))
+            self._preset_selected_label.setText("✓ 已选择: 默认配置")
+        else:
+            self._selected_preset_idx = None
+            self._ensure_default_preset()
+
+    def _load_preset_config(self, msg: str):
+        """把预设 message 应用到面板参数（与 _on_preset_clicked 相同逻辑）。"""
+        proto = self._proto_combo.currentData()
+        if proto == "http_client":
+            try:
+                config = json.loads(msg)
+            except json.JSONDecodeError:
+                config = {}
+            self._http_params.set_config(config)
+            return
+        try:
+            config = json.loads(msg)
+            if isinstance(config, dict) and "proto" in config:
+                self.set_params(config)  # 新格式：完整配置
+            else:
+                # JSON 解析成功但不是配置 dict（例如纯 JSON 报文）
+                self._send_edit.setPlainText(msg)
+        except json.JSONDecodeError:
+            # 旧格式：纯文本报文
+            self._send_edit.setPlainText(msg)
 
     def _build_client_worker(self, msg, proto):
         if proto == "tcp_client":
@@ -818,7 +894,8 @@ class TargetClientPanel(ClientPanelBase):
                 "encoding": info["encoding"], "recv_encoding": info["recv_encoding"],
                 "head_length": info["head_length"], "timeout": info["timeout"],
                 "ws_url": info.get("ws_url", "") or "ws://127.0.0.1:80/ws",
-                "ws_timeout": info["timeout"], "ws_ssl": info.get("ws_ssl", False),
+                "ws_timeout": info.get("ws_timeout", info["timeout"]),
+                "ws_ssl": info.get("ws_ssl", False),
                 "send_message": info.get("send_message", ""),
             }
         self.set_params(cfg)
@@ -1051,11 +1128,14 @@ class _TargetDetailPanel(QWidget):
         if proto:
             all_presets[proto] = presets
             all_presets["_active_proto"] = proto
+        presets_json = json.dumps(all_presets, ensure_ascii=False)
         self._db.update_protocol_target(
             self._target.id,
             name=self._target.name,
-            send_presets=json.dumps(all_presets, ensure_ascii=False),
+            send_presets=presets_json,
         )
+        # 同步内存对象，避免后续读取/回写使用过期数据覆盖本次写入
+        self._target.send_presets = presets_json
 
     def _update_active_proto(self, proto: str):
         """更新 presets JSON 中的 _active_proto 提示，不改变预设内容。"""
@@ -1069,11 +1149,13 @@ class _TargetDetailPanel(QWidget):
             all_presets = {proto: all_presets} if proto else {}
         if isinstance(all_presets, dict) and all_presets.get("_active_proto") != proto:
             all_presets["_active_proto"] = proto
+            presets_json = json.dumps(all_presets, ensure_ascii=False)
             self._db.update_protocol_target(
                 self._target.id,
                 name=self._target.name,
-                send_presets=json.dumps(all_presets, ensure_ascii=False),
+                send_presets=presets_json,
             )
+            self._target.send_presets = presets_json
 
     def _on_presets_saved(self):
         if self._target:
@@ -1407,23 +1489,23 @@ class _TargetDetailPanel(QWidget):
         self._server_panel.stop_all_servers()
 
     def keyPressEvent(self, event):
-        # 左右并排下：客户端 / Mock服务端 各自的 keyPressEvent 会自行处理 F5/删除，
+        # 左右并排下：客户端 / Mock服务端 各自的 keyPressEvent 会自行处理刷新/删除，
         # 此处按焦点所在面板分发，未聚焦子面板时归到测试历史。
-        if event.key() == Qt.Key_F5:
+        if shortcuts.event_matches(event, "refresh"):
             if self._focus_in(self._client_panel):
                 self._client_panel._refresh_preset_list()
             elif self._focus_in(self._server_panel):
                 self._server_panel.refresh()
             else:
                 self._refresh_history()
-        elif event.key() == Qt.Key_Delete or (event.key() == Qt.Key_D and event.modifiers() == Qt.ControlModifier):
+        elif shortcuts.event_matches(event, "delete"):
             if self._focus_in(self._client_panel):
                 self._client_panel._delete_preset()
             elif self._focus_in(self._server_panel):
                 self._server_panel._delete_selected_servers()
             else:
                 self._delete_hist_sessions()
-        elif event.key() == Qt.Key_S and event.modifiers() == Qt.ControlModifier:
+        elif shortcuts.event_matches(event, "save"):
             cp = self._client_panel
             if cp._selected_preset_idx is not None:
                 cp._save_preset()
@@ -1539,7 +1621,8 @@ class _CollectionDetailTab(QWidget):
         if self._target_sort_col >= 0:
             key_map = {
                 0: lambda ti: (ti[0].name or "").lower(),
-                1: lambda ti: tuple(int(o) for o in ti[1]["ip"].split(".")),
+                1: lambda ti: tuple(int(o) if o.strip().isdigit() else -1
+                                    for o in ti[1]["ip"].split(".")),
                 2: lambda ti: ti[1]["port"],
                 3: lambda ti: ti[1]["encoding"].lower(),
                 4: lambda ti: ti[1]["recv_encoding"].lower(),
@@ -1946,13 +2029,13 @@ class _CollectionDetailTab(QWidget):
             self.connectivity_test_requested.emit(targets)
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_C and event.modifiers() == Qt.ControlModifier:
+        if shortcuts.event_matches(event, "copy"):
             self._copy_target_to_clip()
-        elif event.key() == Qt.Key_V and event.modifiers() == Qt.ControlModifier:
+        elif shortcuts.event_matches(event, "paste"):
             self._paste_target_from_clip()
-        elif event.key() == Qt.Key_F5:
+        elif shortcuts.event_matches(event, "refresh"):
             self._refresh_targets()
-        elif event.key() == Qt.Key_Delete or (event.key() == Qt.Key_D and event.modifiers() == Qt.ControlModifier):
+        elif shortcuts.event_matches(event, "delete"):
             self._on_delete_target()
         else:
             super().keyPressEvent(event)
@@ -2351,9 +2434,9 @@ class _GlobalHistoryTab(QWidget):
             QMessageBox.critical(self, "导出失败", str(e))
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key_F5:
+        if shortcuts.event_matches(event, "refresh"):
             self.refresh()
-        elif event.key() == Qt.Key_Delete or (event.key() == Qt.Key_D and event.modifiers() == Qt.ControlModifier):
+        elif shortcuts.event_matches(event, "delete"):
             self._delete_selected()
         else:
             super().keyPressEvent(event)
@@ -2671,19 +2754,15 @@ class ProtocolPanel(QWidget):
             if tw == tab_w:
                 detail = self._target_tabs[tid][1]
                 client = detail._client_panel
-                unsaved = client.has_unsaved_presets() or (
-                    client._selected_preset_idx is None
-                    and client._send_edit.toPlainText().strip()
-                )
-                unsaved = unsaved or client._config_dirty
+                # 未保存判定统一走 has_unsaved_presets()（含"未选预设 + 发送框被修改"），
+                # 避免仅因发送框残留文本（加载/切换协议带入）就误报未保存
+                presets_unsaved = client.has_unsaved_presets()
+                unsaved = presets_unsaved or client._config_dirty
                 if unsaved:
                     msg_parts = []
                     if client._config_dirty:
                         msg_parts.append("参数修改")
-                    if client.has_unsaved_presets() or (
-                        client._selected_preset_idx is None
-                        and client._send_edit.toPlainText().strip()
-                    ):
+                    if presets_unsaved:
                         msg_parts.append("报文内容")
                     reply = QMessageBox.question(
                         self, "未保存的内容",
