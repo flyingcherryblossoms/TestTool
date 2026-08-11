@@ -16,11 +16,31 @@ from pathlib import Path
 # 确保项目根目录在 Python 路径中
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QtMsgType, qFormatLogMessage, qInstallMessageHandler
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication
 
 from src.ui.main_window import MainWindow
+
+
+def _install_qt_message_filter() -> None:
+    """过滤 Qt 已知无害的 DirectWrite 字体警告，保持控制台干净。
+
+    中文 Windows 上 Qt 探测遗留的 Fixedsys 字体时，DirectWrite 会打印
+    "CreateFontFaceFromHDC() failed" 警告并自动回退，不影响功能。
+    仅针对该条已知警告做过滤，其余 Qt 日志原样输出。
+    """
+    import sys
+
+    def handler(mode, context, message):
+        if mode in (QtMsgType.QtWarningMsg, QtMsgType.QtDebugMsg,
+                    QtMsgType.QtInfoMsg) and "DirectWrite" in message \
+                and ("Fixedsys" in message or "CreateFontFaceFromHDC" in message):
+            return  # 已知无害的字体回退警告，忽略
+        sys.stderr.write(qFormatLogMessage(mode, context, message))
+        sys.stderr.flush()
+
+    qInstallMessageHandler(handler)
 
 
 def _get_icon_path() -> str:
@@ -71,6 +91,7 @@ def _load_icon() -> QIcon:
 
 def run_gui(db_path: str) -> None:
     """启动图形界面。"""
+    _install_qt_message_filter()
     app = QApplication(sys.argv)
     app.setApplicationName("TestTool")
     app.setOrganizationName("TestTool")
