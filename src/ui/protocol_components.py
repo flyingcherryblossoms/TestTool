@@ -2097,7 +2097,10 @@ class ServerPanelBase(QWidget):
                 ip=d["ip"], port=d["port"], encoding=d.get("encoding", "UTF-8"),
                 recv_encoding=d.get("recv_encoding", "UTF-8"),
                 head_length=d.get("head_length", 0), ws_path=d.get("ws_path", "/"),
-                response_mode=d["response_mode"], response_message=d.get("response_message", ""),
+                response_mode=d["response_mode"],
+                # 对话框不编辑返回报文内容，沿用原 response_message（旧字段镜像），
+                # 避免编辑后 update_protocol_server 按空串回填导致旧报文丢失
+                response_message=srv.response_message,
                 response_delay=d.get("response_delay", 0),
                 target_id=self._edit_target_id(srv),
             )
