@@ -2059,7 +2059,7 @@ class ServerPanelBase(QWidget):
                 name=d["name"], server_type=st, ip=d["ip"], port=d["port"],
                 encoding=d.get("encoding", "UTF-8"), recv_encoding=d.get("recv_encoding", "UTF-8"), head_length=d.get("head_length", 0),
                 ws_path=d.get("ws_path", "/"), response_mode=d["response_mode"],
-                response_message=d["response_message"],
+                response_message=d.get("response_message", ""),
                 response_delay=d.get("response_delay", 0),
                 target_id=self._add_target_id(),
             )
@@ -2097,7 +2097,7 @@ class ServerPanelBase(QWidget):
                 ip=d["ip"], port=d["port"], encoding=d.get("encoding", "UTF-8"),
                 recv_encoding=d.get("recv_encoding", "UTF-8"),
                 head_length=d.get("head_length", 0), ws_path=d.get("ws_path", "/"),
-                response_mode=d["response_mode"], response_message=d["response_message"],
+                response_mode=d["response_mode"], response_message=d.get("response_message", ""),
                 response_delay=d.get("response_delay", 0),
                 target_id=self._edit_target_id(srv),
             )
