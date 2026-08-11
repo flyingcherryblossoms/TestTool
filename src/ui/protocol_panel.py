@@ -684,11 +684,15 @@ class TargetClientPanel(ClientPanelBase):
         self._owner._save_presets_to_target(presets, proto)
 
     def _ensure_default_preset(self):
-        """确保当前协议下存在"默认配置"预设；不存在则从当前参数创建。"""
+        """确保当前协议下存在"默认配置"预设；当前协议完全没有预设时才从当前参数创建。
+
+        若已有用户自建的预设（如改名的"配置1"），不再强行追加"默认配置"，
+        避免每次重新打开详情 tab 都在预设列表尾部多出一条。
+        """
         presets = list(self.get_presets())
         default_name = "默认配置"
         existing = next((p for p in presets if p.get("name") == default_name), None)
-        if existing is None:
+        if existing is None and not presets:
             proto = self._proto_combo.currentData()
             if proto == "http_client":
                 config = json.dumps(self._http_params.get_config(), ensure_ascii=False)
@@ -720,7 +724,12 @@ class TargetClientPanel(ClientPanelBase):
         return cfg
 
     def _save_as_default_preset(self, proto: str = ""):
-        """将当前参数保存到指定协议（默认当前协议）的"默认配置"预设（没有则新建）。"""
+        """将当前参数保存到指定协议（默认当前协议）的"默认配置"预设。
+
+        有"默认配置"则覆盖它；没有"默认配置"但有用户预设时，覆盖当前选中的预设
+        （无选中则覆盖第一条），避免切换协议/关闭时也强行追加"默认配置"；
+        完全没有预设才新建"默认配置"。
+        """
         default_name = "默认配置"
         target_proto = proto or self._proto_combo.currentData()
         presets = list(self.get_presets(proto=target_proto))
@@ -731,7 +740,16 @@ class TargetClientPanel(ClientPanelBase):
                 self.save_presets(presets, proto=target_proto)
                 self._refresh_preset_list()
                 return
-        # 不存在则新建
+        if presets:
+            # 无"默认配置"但有用户预设：覆盖当前选中预设，无选中则覆盖第一条
+            idx = (self._selected_preset_idx
+                   if self._selected_preset_idx is not None
+                   and 0 <= self._selected_preset_idx < len(presets) else 0)
+            presets[idx]["message"] = config
+            self.save_presets(presets, proto=target_proto)
+            self._refresh_preset_list()
+            return
+        # 完全没有预设才新建
         presets.append({"name": default_name, "message": config})
         self.save_presets(presets, proto=target_proto)
         self._refresh_preset_list()
@@ -753,7 +771,8 @@ class TargetClientPanel(ClientPanelBase):
         self._msg_dirty = False
 
     def _load_active_proto_default(self):
-        """加载当前协议的"默认配置"到面板；没有则从当前参数创建默认预设。"""
+        """加载当前协议的"默认配置"到面板；没有"默认配置"则优先选中第一个用户预设，
+        完全没有预设才从当前参数创建默认预设。"""
         presets = list(self.get_presets())
         default_name = "默认配置"
         idx = next((i for i, p in enumerate(presets)
@@ -762,6 +781,11 @@ class TargetClientPanel(ClientPanelBase):
             self._selected_preset_idx = idx
             self._load_preset_config(presets[idx].get("message", ""))
             self._preset_selected_label.setText("✓ 已选择: 默认配置")
+        elif presets:
+            # 无"默认配置"但有用户预设：选中第一个（与 target_display_info 展示兜底一致）
+            self._selected_preset_idx = 0
+            self._load_preset_config(presets[0].get("message", ""))
+            self._preset_selected_label.setText(f"✓ 已选择: {presets[0].get('name', '')}")
         else:
             self._selected_preset_idx = None
             self._ensure_default_preset()
