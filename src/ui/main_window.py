@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 from src.database import Database
 from src.ui import shortcuts
 from src.ui.connectivity_panel import ConnectivityPanel
+from src.ui.csp_parser_dialog import CspParserDialog
 from src.ui.port_scan_dialog import PortScanDialog
 from src.ui.protocol_panel import ProtocolPanel
 from src.ui.shortcut_settings_dialog import ShortcutSettingsDialog
@@ -97,6 +98,9 @@ class MainWindow(QMainWindow):
         port_scan_action = QAction("端口扫描...", self)
         port_scan_action.triggered.connect(self._open_port_scan)
         tools_menu.addAction(port_scan_action)
+        csp_parse_action = QAction("CSP 报文解析...", self)
+        csp_parse_action.triggered.connect(self._open_csp_parser)
+        tools_menu.addAction(csp_parse_action)
         tools_menu.addSeparator()
 
         exit_action = QAction("退出(&X)", self)
@@ -200,6 +204,11 @@ class MainWindow(QMainWindow):
         dlg = PortScanDialog(self._db, parent=self)
         if dlg.exec() == QDialog.Accepted:
             self._conn_panel.refresh_collection_list()
+
+    def _open_csp_parser(self):
+        """打开 CSP 报文解析对话框。"""
+        dlg = CspParserDialog(parent=self)
+        dlg.exec()
 
     def _on_main_tab_changed(self, idx: int):
         """记住当前打开的标签页。"""
