@@ -510,6 +510,8 @@ class _CollectionSidebar(CollectionSidebarBase):
                         collection_id=cid, name=t.get("name", ""),
                         send_presets=presets,
                         stress_params=stress,
+                        created_at=t.get("created_at", ""),
+                        modified_at=t.get("modified_at", ""),
                     )
                     for s in t.get("servers", []):
                         self._db.add_protocol_server(
@@ -563,6 +565,8 @@ class _CollectionSidebar(CollectionSidebarBase):
                 targets_data.append({
                     "name": t.name,
                     "send_presets": presets, "stress_params": stress,
+                    "created_at": getattr(t, "created_at", ""),
+                    "modified_at": getattr(t, "modified_at", ""),
                     # 兼容旧格式：冗余字段
                     "ip": info["ip"], "port": info["port"],
                     "encoding": info["encoding"], "recv_encoding": info["recv_encoding"],
@@ -656,6 +660,7 @@ class TargetClientPanel(ClientPanelBase):
         # 4) 重置草稿/脏状态，加载新协议已有默认配置（没有则从当前参数创建）
         self._drafts.clear()
         self._dirty.clear()
+        self._http_baseline.clear()
         self._selected_preset_idx = None
         self._msg_dirty = False
         if self._owner._target:
@@ -768,6 +773,7 @@ class TargetClientPanel(ClientPanelBase):
             self.save_presets(presets, proto=proto)
         self._dirty.clear()
         self._drafts.clear()
+        self._http_baseline.clear()
         self._msg_dirty = False
 
     def _load_active_proto_default(self):
@@ -780,11 +786,13 @@ class TargetClientPanel(ClientPanelBase):
         if idx is not None:
             self._selected_preset_idx = idx
             self._load_preset_config(presets[idx].get("message", ""))
+            self._capture_http_baseline(idx)
             self._preset_selected_label.setText("✓ 已选择: 默认配置")
         elif presets:
             # 无"默认配置"但有用户预设：选中第一个（与 target_display_info 展示兜底一致）
             self._selected_preset_idx = 0
             self._load_preset_config(presets[0].get("message", ""))
+            self._capture_http_baseline(0)
             self._preset_selected_label.setText(f"✓ 已选择: {presets[0].get('name', '')}")
         else:
             self._selected_preset_idx = None
@@ -890,6 +898,7 @@ class TargetClientPanel(ClientPanelBase):
         self._selected_preset_idx = None
         self._drafts.clear()
         self._dirty.clear()
+        self._http_baseline.clear()
         # 从预设中提取配置信息
         info = target_display_info(target)
         proto = info.get("proto", "tcp_client")
@@ -907,6 +916,13 @@ class TargetClientPanel(ClientPanelBase):
                 if default:
                     try:
                         cfg = json.loads(default.get("message", "{}"))
+                    except json.JSONDecodeError:
+                        pass
+                elif http_presets:
+                    # 无"默认配置"时加载第一个预设的完整配置（与 target_display_info 展示兜底一致），
+                    # 避免面板持有不完整配置，导致后续切换/保存时把半截配置覆盖回第一个预设
+                    try:
+                        cfg = json.loads(http_presets[0].get("message", "{}"))
                     except json.JSONDecodeError:
                         pass
             if "url" not in cfg:
@@ -1244,8 +1260,13 @@ class _TargetDetailPanel(QWidget):
                     except json.JSONDecodeError:
                         pass
             data["http_url"] = info.get("url", "")
+        # 默认文件名：目标名称_时间戳（时间戳格式与集合导出一致）
+        ts = datetime.now().strftime("%Y%m%d%H%M%S")
+        base_name = (t.name or "").strip()
+        if not base_name:
+            base_name = f"{info['ip']}_{info['port']}" if info.get("ip") else "目标"
         filepath, _ = QFileDialog.getSaveFileName(self, "导出目标",
-                                                   f"{info['ip']}_{info['port']}.json",
+                                                   f"{base_name}_{ts}.json",
                                                    "JSON 文件 (*.json);;所有文件 (*)")
         if not filepath:
             return
@@ -1660,14 +1681,18 @@ class _CollectionDetailTab(QWidget):
                 5: lambda ti: ti[1]["head_length"],
                 6: lambda ti: ti[1]["timeout"],
                 7: lambda ti: _target_proto_label(ti[0]),
+                8: lambda ti: ti[0].created_at or "",
+                9: lambda ti: ti[0].modified_at or "",
             }
             key_fn = key_map.get(self._target_sort_col)
             if key_fn:
                 target_infos.sort(key=key_fn, reverse=not self._target_sort_asc)
         self._target_count_label.setText(f"<b>目标列表</b> ({len(target_infos)})")
         t = self._target_table
-        t.setColumnCount(8)
-        t.setHorizontalHeaderLabels(["名称", "IP", "端口", "发送编码", "接收编码", "HeadLen", "超时", "类型"])
+        t.setColumnCount(10)
+        t.setHorizontalHeaderLabels(
+            ["名称", "IP", "端口", "发送编码", "接收编码", "HeadLen", "超时", "类型",
+             "创建时间", "修改时间"])
         self._update_target_sort_indicator()
 
         t.setRowCount(len(target_infos))
@@ -1684,6 +1709,8 @@ class _CollectionDetailTab(QWidget):
             ti_w = QTableWidgetItem(f"{info['timeout']}s"); ti_w.setTextAlignment(Qt.AlignCenter)
             t.setItem(row, 6, ti_w)
             t.setItem(row, 7, QTableWidgetItem(_target_proto_label(target)))
+            t.setItem(row, 8, QTableWidgetItem(target.created_at or ""))
+            t.setItem(row, 9, QTableWidgetItem(target.modified_at or ""))
         refresh_tooltips(t)
         self._restore_target_column_widths()
 
@@ -1737,6 +1764,8 @@ class _CollectionDetailTab(QWidget):
         5: 55,   # HeadLen
         6: 50,   # 超时
         7: 60,   # 类型
+        8: 150,  # 创建时间
+        9: 150,  # 修改时间
     }
 
     def _save_target_column_widths(self):

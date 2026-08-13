@@ -234,6 +234,30 @@ class ServerDialog(QDialog):
         return data
 
 
+class ReorderablePresetList(QListWidget):
+    """预设列表：支持拖拽排序（InternalMove）。
+
+    列表项的 Qt.UserRole 存预设索引（_refresh_preset_list 写入），拖拽移动时随项保留，
+    因此 dropEvent 后按 UserRole 读出的顺序即为"新顺序 = 原索引排列"，供外部重排预设。
+    """
+
+    order_changed = Signal(list)  # 新顺序：原预设索引列表，如 [1, 0, 2]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDragDropMode(QAbstractItemView.InternalMove)
+        self.setDefaultDropAction(Qt.MoveAction)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+
+    def dropEvent(self, event):
+        super().dropEvent(event)
+        if event.isAccepted():
+            order = [self.item(i).data(Qt.UserRole) for i in range(self.count())]
+            if all(i is not None for i in order):
+                self.order_changed.emit(order)
+
+
 # ── 客户端公共组件 ────────────────────────────────────────────
 
 
@@ -268,6 +292,9 @@ class ClientPanelBase(QWidget):
         self._selected_preset_idx: int | None = None
         self._drafts: dict[int, str] = {}  # 每个预设独立的未保存草稿（索引 → 内容）
         self._dirty: set[int] = set()      # 有未保存修改的预设索引
+        # HTTP：每个预设加载后的“干净基线”（规范化的 get_config），
+        # 旧/导入报文缺字段时 set_config 会按默认补齐，基线避免把补齐误判为“已修改”
+        self._http_baseline: dict[int, str] = {}
         self._last_response = ""
         self._last_raw = b""
         self._msg_dirty = False
@@ -402,7 +429,8 @@ class ClientPanelBase(QWidget):
         # 左侧：预设配置
         self._preset_group = QGroupBox("预设配置")
         pl = QVBoxLayout(self._preset_group)
-        self._preset_list = QListWidget()
+        self._preset_list = ReorderablePresetList()
+        self._preset_list.order_changed.connect(self._on_presets_reordered)
         self._preset_list.setAlternatingRowColors(False)
         self._preset_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._preset_list.itemClicked.connect(self._on_preset_clicked)
@@ -421,9 +449,13 @@ class ClientPanelBase(QWidget):
             "QPushButton { color: #fff; background-color: #e74c3c; }"
             "QPushButton:hover { background-color: #c0392b; }"
         )
+        self._preset_up_btn = QPushButton("上移", clicked=lambda: self._move_preset(-1))
+        self._preset_down_btn = QPushButton("下移", clicked=lambda: self._move_preset(1))
         pbl.addWidget(self._preset_add_btn, 0, 0)
         pbl.addWidget(self._preset_save_btn, 0, 1)
         pbl.addWidget(self._preset_delete_btn, 0, 2)
+        pbl.addWidget(self._preset_up_btn, 1, 0)
+        pbl.addWidget(self._preset_down_btn, 1, 1)
         pl.addLayout(pbl)
         self._top_splitter.addWidget(self._preset_group)
 
@@ -735,6 +767,7 @@ class ClientPanelBase(QWidget):
         self.reset_config_dirty()
         self._drafts.clear()
         self._dirty.clear()
+        self._http_baseline.clear()
         self._selected_preset_idx = None
         self._msg_dirty = False
         self._update_send_label()
@@ -782,6 +815,19 @@ class ClientPanelBase(QWidget):
         idx = self._selected_preset_idx
         return idx is not None and idx in self._dirty
 
+    def _capture_http_baseline(self, idx: int | None):
+        """把当前 HTTP 面板配置记为预设 idx 的干净基线（预设加载后调用）。
+
+        set_config 会把缺字段的旧/导入报文按默认补齐（如 headers、settings），
+        因此“加载后未编辑”的面板 get_config 可能与原始保存报文不一致；用加载后的
+        规范化输出作基线，_sync_current_draft 只与基线比较，避免误报“已修改”。
+        """
+        if idx is None:
+            return
+        if self._proto_combo.currentData() != "http_client":
+            return
+        self._http_baseline[idx] = json.dumps(self._http_params.get_config(), ensure_ascii=False)
+
     def _sync_current_draft(self):
         """把发送框内容缓存为当前预设的草稿，并同步脏标记。"""
         idx = self._selected_preset_idx
@@ -793,9 +839,11 @@ class ClientPanelBase(QWidget):
         proto = self._proto_combo.currentData()
         if proto == "http_client":
             text = json.dumps(self._http_params.get_config(), ensure_ascii=False)
+            # 以加载时捕获的干净基线为准；无基线（如新增预设）时回退到原始保存报文
+            saved = self._http_baseline.get(idx, presets[idx].get("message", ""))
         else:
             text = json.dumps(self.collect_params(), ensure_ascii=False)
-        saved = presets[idx].get("message", "")
+            saved = presets[idx].get("message", "")
         if text != saved:
             self._drafts[idx] = text
             self._dirty.add(idx)
@@ -836,6 +884,7 @@ class ClientPanelBase(QWidget):
             self.save_presets(presets)
         self._dirty.clear()
         self._drafts.clear()
+        self._http_baseline.clear()
         self._msg_dirty = False
         self._update_send_label()
         self._update_preset_stars()
@@ -861,6 +910,67 @@ class ClientPanelBase(QWidget):
             self._selected_preset_idx = None
             self._preset_selected_label.setText("")
 
+    def _reorder_presets(self, order: list[int]) -> bool:
+        """按新顺序（原索引排列）重建当前协议预设并持久化。
+
+        草稿/脏/基线按原索引快照后随预设移动到新索引，未保存内容不丢失。
+        返回是否实际发生了重排。
+        """
+        if not self._can_edit_presets():
+            return False
+        presets = list(self.get_presets())
+        if len(order) != len(presets) or order == list(range(len(presets))):
+            return False
+        # 先把当前编辑内容捕获到草稿，保证跟随预设移动
+        self._sync_current_draft()
+        old_drafts = dict(self._drafts)
+        old_dirty = set(self._dirty)
+        old_baseline = dict(self._http_baseline)
+        old_selected = self._selected_preset_idx
+        new_presets = [presets[i] for i in order]
+        new_drafts, new_dirty, new_baseline = {}, set(), {}
+        for new_pos, orig in enumerate(order):
+            if orig in old_drafts:
+                new_drafts[new_pos] = old_drafts[orig]
+            if orig in old_dirty:
+                new_dirty.add(new_pos)
+            if orig in old_baseline:
+                new_baseline[new_pos] = old_baseline[orig]
+        self._drafts = new_drafts
+        self._dirty = new_dirty
+        self._http_baseline = new_baseline
+        self._selected_preset_idx = (order.index(old_selected)
+                                     if old_selected is not None and old_selected in order
+                                     else None)
+        self.save_presets(new_presets)
+        self.presets_saved.emit()
+        self._refresh_preset_list()
+        self._msg_dirty = self._current_is_dirty()
+        self._update_send_label()
+        return True
+
+    def _move_preset(self, delta: int, idx: int | None = None):
+        """上移/下移当前选中（或指定）预设。
+
+        按钮走当前编辑中的预设（_selected_preset_idx），右键菜单显式传 idx。
+        """
+        if not self._can_edit_presets():
+            return
+        if idx is None:
+            idx = self._selected_preset_idx
+        presets = list(self.get_presets())
+        if idx is None or idx >= len(presets):
+            return
+        new_idx = idx + delta
+        if not (0 <= new_idx < len(presets)):
+            return
+        order = list(range(len(presets)))
+        order[idx], order[new_idx] = order[new_idx], order[idx]
+        self._reorder_presets(order)
+
+    def _on_presets_reordered(self, order: list):
+        self._reorder_presets(list(order))
+
     def _on_preset_menu(self, pos):
         item = self._preset_list.itemAt(pos)
         menu = QMenu(self)
@@ -870,6 +980,9 @@ class ClientPanelBase(QWidget):
             menu.addAction("复制", self._copy_preset)
             menu.addAction("重命名", self._edit_preset)
             menu.addAction("删除", self._delete_preset)
+            menu.addSeparator()
+            menu.addAction("上移", lambda: self._move_preset(-1, item.data(Qt.UserRole)))
+            menu.addAction("下移", lambda: self._move_preset(1, item.data(Qt.UserRole)))
             menu.addSeparator()
             menu.addAction("清空", self._clear_presets)
         menu.exec(self._preset_list.viewport().mapToGlobal(pos))
@@ -891,6 +1004,12 @@ class ClientPanelBase(QWidget):
             except json.JSONDecodeError:
                 config = {}
             self._http_params.set_config(config)
+            if draft is None:
+                # 从保存报文加载：把规范化后的面板状态记为干净基线，
+                # 并视为干净，避免旧/导入报文缺字段被默认补齐后误报“已修改”
+                self._capture_http_baseline(idx)
+                self._drafts.pop(idx, None)
+                self._dirty.discard(idx)
         else:
             config_str = draft if draft is not None else presets[idx].get("message", "")
             try:
@@ -931,6 +1050,8 @@ class ClientPanelBase(QWidget):
         self._dirty.discard(self._selected_preset_idx)
         self.save_presets(presets)
         self.presets_saved.emit()
+        if proto == "http_client":
+            self._http_baseline[self._selected_preset_idx] = message
         self._refresh_preset_list()
         # 新建后自动选中新预设（_refresh_preset_list 已设置），并清空发送框
         self._send_edit.clear()
@@ -1005,6 +1126,9 @@ class ClientPanelBase(QWidget):
             if 0 <= idx < len(presets) and self._drafts.get(idx) == presets[idx].get("message", ""):
                 self._drafts.pop(idx, None)
                 self._dirty.discard(idx)
+        if proto == "http_client" and self._selected_preset_idx is not None:
+            # 保存报文为完整规范化配置，把它记为新的干净基线
+            self._http_baseline[self._selected_preset_idx] = new_msg
         self._refresh_preset_list()
         self._msg_dirty = self._current_is_dirty()
         # 预设内容即完整配置，保存预设同时也清除配置脏标记
@@ -1037,6 +1161,8 @@ class ClientPanelBase(QWidget):
         self._dirty.discard(idx)
         self.save_presets(presets)
         self.presets_saved.emit()
+        if proto == "http_client":
+            self._http_baseline[idx] = json.dumps(self._http_params.get_config(), ensure_ascii=False)
         self._refresh_preset_list()
         self._msg_dirty = False
         self._update_send_label()
@@ -1067,6 +1193,9 @@ class ClientPanelBase(QWidget):
         self._selected_preset_idx = added_idxs[0]
         self._drafts.pop(self._selected_preset_idx, None)
         self._dirty.discard(self._selected_preset_idx)
+        if self._proto_combo.currentData() == "http_client":
+            for i in added_idxs:
+                self._http_baseline[i] = presets[i].get("message", "")
         self._refresh_preset_list()
         self._msg_dirty = self._current_is_dirty()
         self._update_send_label()
@@ -1109,6 +1238,9 @@ class ClientPanelBase(QWidget):
         if self._selected_preset_idx is not None:
             self._drafts.pop(self._selected_preset_idx, None)
             self._dirty.discard(self._selected_preset_idx)
+        if self._proto_combo.currentData() == "http_client":
+            for i in added_idxs:
+                self._http_baseline[i] = presets[i].get("message", "")
         self._refresh_preset_list()
         self._msg_dirty = self._current_is_dirty()
         self._update_send_label()
@@ -1134,8 +1266,8 @@ class ClientPanelBase(QWidget):
         deleted = set(idxs)
         for i in reversed(idxs):
             presets.pop(i)
-        # 删除后按剩余顺序重建草稿/脏索引
-        new_drafts, new_dirty = {}, set()
+        # 删除后按剩余顺序重建草稿/脏/基线索引
+        new_drafts, new_dirty, new_baseline = {}, set(), {}
         new_idx = 0
         for old_idx in range(original_len):
             if old_idx in deleted:
@@ -1144,9 +1276,12 @@ class ClientPanelBase(QWidget):
                 new_drafts[new_idx] = self._drafts[old_idx]
             if old_idx in self._dirty:
                 new_dirty.add(new_idx)
+            if old_idx in self._http_baseline:
+                new_baseline[new_idx] = self._http_baseline[old_idx]
             new_idx += 1
         self._drafts = new_drafts
         self._dirty = new_dirty
+        self._http_baseline = new_baseline
         if self._selected_preset_idx in deleted:
             self._selected_preset_idx = None
         self.save_presets(presets)
@@ -1168,6 +1303,7 @@ class ClientPanelBase(QWidget):
         self.save_presets([])
         self._drafts.clear()
         self._dirty.clear()
+        self._http_baseline.clear()
         self._selected_preset_idx = None
         self.presets_saved.emit()
         self._refresh_preset_list()
@@ -1177,8 +1313,24 @@ class ClientPanelBase(QWidget):
     # ── 发送消息 ─────────────────────────────────────────────
 
     def _run_connectivity_test(self):
-        """连通性测试：直接检测当前 IP:端口并显示结果，不跳转页面。"""
+        """连通性测试：HTTP 发一次 GET 探测请求，TCP/WS 检测 IP:端口。"""
         if self._conn_worker and self._conn_worker.isRunning():
+            return
+        if self._proto_combo.currentData() == "http_client":
+            url = self._http_params.get_url()
+            if not url:
+                QMessageBox.information(self, "提示", "URL 为空。")
+                return
+            settings = self._http_params.get_settings()
+            self._conn_worker = HttpRequestWorker(
+                method="GET", url=url,
+                timeout=settings.get("timeout", 30.0),
+                allow_redirects=settings.get("allow_redirects", True),
+                verify_ssl=settings.get("verify_ssl", True),
+                parent=self,
+            )
+            self._conn_worker.finished.connect(self._on_http_connectivity_done)
+            self._conn_worker.start()
             return
         ip, port = self._client_endpoint()
         if not ip:
@@ -1202,6 +1354,21 @@ class ClientPanelBase(QWidget):
         else:
             QMessageBox.warning(
                 self, "连通性测试", f"{r.ip}:{r.port} 未连通: {r.error_msg}")
+
+    def _on_http_connectivity_done(self, success: bool, response: str):
+        self._conn_worker = None
+        url = self._http_params.get_url()
+        if not success:
+            QMessageBox.warning(self, "连通性测试", f"{url}\n未连通: {response}")
+            return
+        lines = [ln for ln in response.splitlines() if ln.strip()]
+        status_line = next((ln for ln in lines if ln.startswith("HTTP/")),
+                           "HTTP 请求成功")
+        latency_line = next((ln for ln in lines if "耗时" in ln), "")
+        detail = f"{url}\n{status_line}"
+        if latency_line:
+            detail += f"\n{latency_line}"
+        QMessageBox.information(self, "连通性测试", detail)
 
     # ── 压测参数区 ─────────────────────────────────────────
 
@@ -1254,28 +1421,47 @@ class ClientPanelBase(QWidget):
             return
         if not self._can_send():
             return
-        msg = self._send_edit.toPlainText()
-        if not msg:
-            QMessageBox.information(self, "提示", "请输入要发送的报文。")
-            return
-        ip = self._param_ip.text().strip()
-        if not ip:
-            QMessageBox.information(self, "提示", "IP 地址为空。")
-            return
         proto = self._proto_combo.currentData()
-        self._stress_worker = StressTestWorker(
-            proto=proto, ip=ip, port=self._param_port.value(),
-            message=msg, encoding=self._param_enc.currentText(),
-            head_len=self._param_hl.value(), timeout=self._param_timeout.value(),
-            ws_url=self._param_ws_url.text().strip(),
-            concurrency=self._stress_conc.value(),
-            total_requests=self._stress_total.value(),
-            qps_limit=self._stress_qps.value(),
-            duration=self._stress_dur.value(),
-            warmup=self._stress_warm.value(),
-            ramp_step=self._stress_ramp.value(),
-            parent=self,
-        )
+        if proto == "http_client":
+            # HTTP: 使用当前 HTTP 面板完整配置（Method/URL/Headers/Body/Auth 等）
+            url = self._http_params.get_url()
+            if not url:
+                QMessageBox.information(self, "提示", "URL 为空。")
+                return
+            self._stress_worker = StressTestWorker(
+                proto=proto, ip="", port=0, message="", encoding="UTF-8",
+                head_len=0, timeout=self._stress_to.value(), ws_url="",
+                http_config=self._http_params.get_config(),
+                concurrency=self._stress_conc.value(),
+                total_requests=self._stress_total.value(),
+                qps_limit=self._stress_qps.value(),
+                duration=self._stress_dur.value(),
+                warmup=self._stress_warm.value(),
+                ramp_step=self._stress_ramp.value(),
+                parent=self,
+            )
+        else:
+            msg = self._send_edit.toPlainText()
+            if not msg:
+                QMessageBox.information(self, "提示", "请输入要发送的报文。")
+                return
+            ip = self._param_ip.text().strip()
+            if not ip:
+                QMessageBox.information(self, "提示", "IP 地址为空。")
+                return
+            self._stress_worker = StressTestWorker(
+                proto=proto, ip=ip, port=self._param_port.value(),
+                message=msg, encoding=self._param_enc.currentText(),
+                head_len=self._param_hl.value(), timeout=self._param_timeout.value(),
+                ws_url=self._param_ws_url.text().strip(),
+                concurrency=self._stress_conc.value(),
+                total_requests=self._stress_total.value(),
+                qps_limit=self._stress_qps.value(),
+                duration=self._stress_dur.value(),
+                warmup=self._stress_warm.value(),
+                ramp_step=self._stress_ramp.value(),
+                parent=self,
+            )
         self._stress_worker.progress.connect(self._on_stress_progress)
         self._stress_worker.finished.connect(self._on_stress_finished)
         self._stress_btn_run.setEnabled(False)
