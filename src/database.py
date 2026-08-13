@@ -170,6 +170,7 @@ class ProtocolTarget:
     stress_params: str = "{}"         # JSON: {"concurrency":..,"qps_limit":..,..}
     sort_order: int = 0
     created_at: str = ""
+    modified_at: str = ""
 
 
 @dataclass
@@ -297,6 +298,7 @@ CREATE TABLE IF NOT EXISTS protocol_targets (
     stress_params TEXT DEFAULT '{}',
     sort_order INTEGER DEFAULT 0,
     created_at TIMESTAMP DEFAULT (datetime('now', 'localtime')),
+    modified_at TIMESTAMP DEFAULT (datetime('now', 'localtime')),
     FOREIGN KEY (collection_id) REFERENCES protocol_collections(id) ON DELETE CASCADE
 );
 
@@ -346,6 +348,7 @@ def _protocol_target_from_row(r) -> ProtocolTarget:
         stress_params=_get("stress_params", "{}"),
         sort_order=_get("sort_order", 0),
         created_at=_get("created_at", ""),
+        modified_at=_get("modified_at", ""),
     )
 
 
@@ -462,6 +465,22 @@ class Database:
                 )
             except sqlite3.OperationalError:
                 pass  # 列已存在
+            # 目标修改时间列：老库缺列时幂等补列，并用创建时间回填历史行
+            # （ALTER TABLE ADD COLUMN 不允许非常量默认值，故先补 '' 再回填）
+            try:
+                conn.execute(
+                    "ALTER TABLE protocol_targets "
+                    "ADD COLUMN modified_at TIMESTAMP DEFAULT ''"
+                )
+            except sqlite3.OperationalError:
+                pass  # 列已存在
+            try:
+                conn.execute(
+                    "UPDATE protocol_targets SET modified_at = created_at "
+                    "WHERE modified_at IN ('', 'NULL') OR modified_at IS NULL"
+                )
+            except sqlite3.OperationalError:
+                pass  # created_at 列异常时忽略
             cols = [r["name"] for r in conn.execute(
                 "PRAGMA table_info(protocol_servers)").fetchall()]
             self._servers_have_delay = "response_delay" in cols
@@ -1231,9 +1250,12 @@ class Database:
                             name: str = "",
                             send_presets: str = "{}",
                             stress_params: str = "{}",
+                            created_at: str = "",
+                            modified_at: str = "",
                             **_kwargs) -> int:
         """添加协议目标，返回新 ID。
 
+        created_at / modified_at 可选：供导入时还原原始时间戳，为空时用数据库默认值。
         旧字段 (ip, port, encoding, ...) 通过 **_kwargs 兼容忽略。
         调用者应在创建目标后立即通过预设保存完整配置。
         """
@@ -1242,24 +1264,38 @@ class Database:
             cols = [r["name"] for r in conn.execute(
                 "PRAGMA table_info(protocol_targets)").fetchall()]
             has_old = "ip" in cols
+            # 时间戳列：仅当显式提供且列存在时写入（导入还原用）
+            ts_cols, ts_vals = [], []
+            if created_at and "created_at" in cols:
+                ts_cols.append("created_at")
+                ts_vals.append(created_at)
+            if modified_at and "modified_at" in cols:
+                ts_cols.append("modified_at")
+                ts_vals.append(modified_at)
+            ts_sql = ", " + ", ".join(ts_cols) if ts_cols else ""
+            ts_ph = ", " + ", ".join("?" for _ in ts_vals) if ts_vals else ""
             if has_old:
-                cur = conn.execute("""
+                cur = conn.execute(
+                    f"""
                     INSERT INTO protocol_targets
                         (collection_id, name, ip, port,
                          encoding, recv_encoding, head_length, timeout,
                          ws_path, ws_use_ssl, send_message,
-                         send_presets, stress_params, url, http_config)
+                         send_presets, stress_params, url, http_config{ts_sql})
                     VALUES (?, ?, '', 0,
                             'UTF-8', 'UTF-8', 0, 30.0,
                             '', 0, '',
-                            ?, ?, '', '{}')
-                """, (collection_id, name, send_presets, stress_params))
+                            ?, ?, '', '{{}}'{ts_ph})
+                    """,
+                    (collection_id, name, send_presets, stress_params, *ts_vals))
             else:
-                cur = conn.execute("""
+                cur = conn.execute(
+                    f"""
                     INSERT INTO protocol_targets
-                        (collection_id, name, send_presets, stress_params)
-                    VALUES (?, ?, ?, ?)
-                """, (collection_id, name, send_presets, stress_params))
+                        (collection_id, name, send_presets, stress_params{ts_sql})
+                    VALUES (?, ?, ?, ?{ts_ph})
+                    """,
+                    (collection_id, name, send_presets, stress_params, *ts_vals))
             return cur.lastrowid
 
     def add_protocol_targets_batch(self, targets: list[tuple]) -> int:
@@ -1304,25 +1340,27 @@ class Database:
                                **kwargs) -> None:
         """更新协议目标（配置已移入预设，仅更新名称/预设/压测参数）。
 
+        每次更新自动刷新 modified_at。
         旧字段 (ip, port, encoding, ...) 通过 **kwargs 兼容，直接忽略。
         """
         with self._connect() as conn:
-            fields = []
+            assigns = []
             values = []
             if name is not None:
-                fields.append("name")
+                assigns.append("name = ?")
                 values.append(name)
             if send_presets is not None:
-                fields.append("send_presets")
+                assigns.append("send_presets = ?")
                 values.append(send_presets)
             if stress_params is not None:
-                fields.append("stress_params")
+                assigns.append("stress_params = ?")
                 values.append(stress_params)
-            if fields:
+            if assigns:
+                # modified_at 为 SQL 表达式，不能参数化，直接拼入 SET 子句
+                assigns.append("modified_at = datetime('now', 'localtime')")
                 values.append(target_id)
                 conn.execute(
-                    f"UPDATE protocol_targets SET "
-                    f"{', '.join(f'{f} = ?' for f in fields)} "
+                    f"UPDATE protocol_targets SET {', '.join(assigns)} "
                     f"WHERE id = ?",
                     values)
 

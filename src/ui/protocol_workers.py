@@ -10,6 +10,7 @@ from __future__ import annotations
 import threading
 import time
 
+import requests
 from PySide6.QtCore import QThread, Signal
 
 from src.protocol import (
@@ -19,6 +20,7 @@ from src.protocol import (
     tcp_send_and_receive,
     ws_send_and_receive,
 )
+from src.ui.http_client import config_to_request_kwargs
 
 
 class TcpClientWorker(QThread):
@@ -341,7 +343,8 @@ class StressTestWorker(QThread):
                  encoding: str, head_len: int, timeout: float,
                  ws_url: str, concurrency: int, total_requests: int,
                  qps_limit: int, duration: int, warmup: int,
-                 ramp_step: int, parent=None):
+                 ramp_step: int, http_config: dict | None = None,
+                 parent=None):
         super().__init__(parent)
         self._proto = proto
         self._ip = ip
@@ -351,6 +354,7 @@ class StressTestWorker(QThread):
         self._head_len = head_len
         self._timeout = timeout
         self._ws_url = ws_url
+        self._http_config = http_config or {}
         self._concurrency = max(1, concurrency)
         self._total_requests = max(1, total_requests)
         self._qps_limit = max(0, qps_limit)
@@ -375,6 +379,13 @@ class StressTestWorker(QThread):
                 self._encoding, self._head_len, self._timeout,
             )
             return ok
+        if self._proto == "http_client":
+            try:
+                kwargs = config_to_request_kwargs(self._http_config)
+                requests.request(**kwargs)
+                return True
+            except Exception:
+                return False
         url = self._ws_url or f"ws://{self._ip}:{self._port}/ws"
         ok, _ = ws_send_and_receive(url, self._message, self._timeout)
         return ok

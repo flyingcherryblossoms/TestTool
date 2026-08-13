@@ -53,6 +53,123 @@ DEFAULT_HEADERS = [
 ]
 
 
+def config_to_request_kwargs(config: dict) -> dict:
+    """将序列化的 HTTP 配置（HttpParamWidget.get_config() 输出）转换为 requests.request 的 kwargs。
+
+    组装逻辑与 HttpParamWidget.build_worker() + HttpRequestWorker.run() 保持一致，
+    供压测 Worker 在后台线程中同步执行请求复用。
+    """
+    method = (config.get("method") or "GET").upper()
+    url = (config.get("url") or "").strip()
+    if url and not url.startswith(("http://", "https://")):
+        url = "http://" + url
+
+    headers = {k: v for k, v in (config.get("headers") or []) if (k or "").strip()}
+    params = {k: v for k, v in (config.get("params") or []) if (k or "").strip()}
+    cookies = {k: v for k, v in (config.get("cookies") or []) if (k or "").strip()}
+
+    settings = config.get("settings") or {}
+    timeout = float(settings.get("timeout", 30.0))
+    allow_redirects = settings.get("allow_redirects", True)
+    verify_ssl = settings.get("verify_ssl", True)
+
+    data = None
+    json_data = None
+    files = None
+    ct_hint = None
+
+    body = config.get("body") or {}
+    bt = body.get("type", "none")
+    if bt == "x-www-form-urlencoded":
+        data = {k: v for k, v in body.get("data", []) if (k or "").strip()}
+        ct_hint = "application/x-www-form-urlencoded"
+    elif bt == "form-data":
+        data = {k: v for k, v in body.get("data", []) if (k or "").strip()}
+        ct_hint = "multipart/form-data"
+    elif bt == "json":
+        text = (body.get("text") or "").strip()
+        if text:
+            try:
+                # 合法 JSON 以 json= 发送，避免被 data= 按表单编码
+                json_data = json.loads(text)
+            except json.JSONDecodeError:
+                data = text
+        ct_hint = "application/json"
+    elif bt == "xml":
+        data = body.get("text", "")
+        ct_hint = "application/xml"
+    elif bt == "text":
+        data = body.get("text", "")
+        ct_hint = "text/plain"
+    elif bt == "binary":
+        path = body.get("path", "")
+        if path:
+            try:
+                with open(path, "rb") as f:
+                    files = {"file": (path, f.read())}
+                ct_hint = "application/octet-stream"
+            except OSError:
+                pass
+
+    # 鉴权
+    auth = None
+    extra_headers = {}
+    extra_params = {}
+    auth_cfg = config.get("auth") or {}
+    at = auth_cfg.get("type", "No Auth")
+    if at == "Bearer Token":
+        extra_headers["Authorization"] = f"Bearer {auth_cfg.get('token', '')}"
+    elif at == "Basic Auth":
+        from requests.auth import HTTPBasicAuth
+        auth = HTTPBasicAuth(auth_cfg.get("username", ""), auth_cfg.get("password", ""))
+    elif at == "API Key":
+        key = auth_cfg.get("key", "")
+        value = auth_cfg.get("value", "")
+        if auth_cfg.get("location", "Header") == "Header":
+            extra_headers[key] = value
+        else:
+            extra_params[key] = value
+    elif at == "Digest Auth":
+        from requests.auth import HTTPDigestAuth
+        auth = HTTPDigestAuth(auth_cfg.get("username", ""), auth_cfg.get("password", ""))
+
+    headers.update(extra_headers)
+    params.update(extra_params)
+
+    if ct_hint and "content-type" not in {k.lower() for k in headers}:
+        headers["Content-Type"] = ct_hint
+
+    # JSON body 智能处理（与 build_worker 一致）
+    if data is not None and isinstance(data, str) and json_data is None:
+        ct = headers.get("Content-Type", "")
+        if "json" in ct and data.strip():
+            try:
+                json_data = json.loads(data)
+                data = None
+            except json.JSONDecodeError:
+                pass
+
+    kwargs = {
+        "method": method,
+        "url": url,
+        "headers": headers or None,
+        "params": params or None,
+        "cookies": cookies or None,
+        "timeout": timeout,
+        "allow_redirects": allow_redirects,
+        "verify": verify_ssl,
+    }
+    if json_data is not None:
+        kwargs["json"] = json_data
+    elif files is not None:
+        kwargs["files"] = files
+    elif data is not None:
+        kwargs["data"] = data
+    if auth is not None:
+        kwargs["auth"] = auth
+    return kwargs
+
+
 # ── HTTP Worker ────────────────────────────────────────────────
 
 
@@ -557,7 +674,8 @@ class HttpParamWidget(QWidget):
             text = self._json_edit.toPlainText().strip()
             if text:
                 try:
-                    return json.loads(text), None, None, "application/json"
+                    # 合法 JSON 以 json= 发送，避免被 data= 按表单编码
+                    return None, json.loads(text), None, "application/json"
                 except json.JSONDecodeError:
                     return text, None, None, "application/json"
             return None, None, None, "application/json"
