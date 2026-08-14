@@ -592,7 +592,6 @@ class ClientPanelBase(QWidget):
         run_l.addStretch()
         st_l.addLayout(run_l)
         self._stress_area.setVisible(False)
-        sl.addWidget(self._stress_area)
         # 压测参数变更 → 持久化（子类实现保存逻辑）
         for w in (self._stress_conc, self._stress_total, self._stress_qps,
                   self._stress_dur, self._stress_warm, self._stress_to,
@@ -610,10 +609,19 @@ class ClientPanelBase(QWidget):
         self._http_params.method_changed.connect(self._mark_msg_dirty)
         self._http_params._url_edit.textChanged.connect(self._mark_msg_dirty)
         self._http_params.config_changed.connect(self._mark_msg_dirty)
+        self._http_params.connectivity_requested.connect(self._run_connectivity_test)
+        self._http_params.stress_toggled.connect(self._toggle_stress_area)
         self._send_area_stack.addWidget(self._http_params)  # page 1
 
         self._send_area_stack.setCurrentIndex(0)
-        self._top_splitter.addWidget(self._send_area_stack)
+        # 压测参数区跨协议共享（TCP/WS 与 HTTP 均可展开，位于发送区下方）
+        self._right_area = QWidget()
+        rv = QVBoxLayout(self._right_area)
+        rv.setContentsMargins(0, 0, 0, 0)
+        rv.setSpacing(2)
+        rv.addWidget(self._send_area_stack)
+        rv.addWidget(self._stress_area)
+        self._top_splitter.addWidget(self._right_area)
 
         self._top_splitter.setStretchFactor(0, 0)
         self._top_splitter.setStretchFactor(1, 1)
@@ -1373,10 +1381,17 @@ class ClientPanelBase(QWidget):
     # ── 压测参数区 ─────────────────────────────────────────
 
     def _toggle_stress_area(self, checked: bool):
-        """点击"压力测试"按钮展开/收起压测参数区。"""
+        """点击"压力测试"按钮展开/收起压测参数区（TCP/WS 与 HTTP 按钮联动）。"""
         self._stress_area.setVisible(checked)
         if checked:
             self._apply_stress_params(self._load_stress_from_store())
+        # 同步 TCP/WS 与 HTTP 两个压力测试按钮的勾选状态（blockSignals 避免递归触发）
+        for btn in (self._stress_toggle_btn,
+                    getattr(self._http_params, "_stress_btn", None)):
+            if btn is not None and btn.isChecked() != checked:
+                btn.blockSignals(True)
+                btn.setChecked(checked)
+                btn.blockSignals(False)
 
     def _apply_stress_params(self, sp: dict):
         """把压测参数字典应用到控件（不触发保存/脏标记）。"""
