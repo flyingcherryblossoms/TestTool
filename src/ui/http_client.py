@@ -338,6 +338,8 @@ class HttpParamWidget(QWidget):
     config_changed = Signal()
     send_requested = Signal()
     cancel_requested = Signal()
+    connectivity_requested = Signal()
+    stress_toggled = Signal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -374,6 +376,17 @@ class HttpParamWidget(QWidget):
         self._http_cancel_btn.setVisible(False)
         self._http_cancel_btn.clicked.connect(self.cancel_requested.emit)
         method_url.addWidget(self._http_cancel_btn)
+        self._conn_btn = QPushButton("连通测试")
+        self._conn_btn.setFixedWidth(70)
+        self._conn_btn.setStyleSheet("background-color: #3498db; color: white; font-weight: bold;")
+        self._conn_btn.clicked.connect(self.connectivity_requested.emit)
+        method_url.addWidget(self._conn_btn)
+        self._stress_btn = QPushButton("压力测试")
+        self._stress_btn.setFixedWidth(70)
+        self._stress_btn.setCheckable(True)
+        self._stress_btn.setStyleSheet("background-color: #e74c3c; color: white; font-weight: bold;")
+        self._stress_btn.toggled.connect(self.stress_toggled.emit)
+        method_url.addWidget(self._stress_btn)
         layout.addLayout(method_url)
 
         # ── Row 2: 紧凑 Tab 页 ──
