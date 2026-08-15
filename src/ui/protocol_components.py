@@ -476,6 +476,7 @@ class ClientPanelBase(QWidget):
             self._len_label = QLabel("报文长度: 0 字节")
             sl.addWidget(self._len_label)
         sl.addWidget(self._send_edit)
+        # 第一行：编码/格式 + 发送（主操作）
         sh = QHBoxLayout()
         sh.addWidget(QLabel("发送编码:"))
         self._param_enc = QComboBox()
@@ -496,24 +497,29 @@ class ClientPanelBase(QWidget):
         self._terminate_btn.setVisible(False)
         self._terminate_btn.clicked.connect(self._cancel_client)
         sh.addWidget(self._terminate_btn)
+        sh.addStretch()
+        sl.addLayout(sh)
+
+        # 第二行：报文/压测辅助操作（拆行避免单行过宽、挤压左侧集合栏）
+        sh2 = QHBoxLayout()
         self._format_send_btn = QPushButton("格式化", clicked=lambda *_: self._format_editor(self._send_edit))
-        sh.addWidget(self._format_send_btn)
+        sh2.addWidget(self._format_send_btn)
         self._save_preset_btn = QPushButton("保存", clicked=self._save_preset)
-        sh.addWidget(self._save_preset_btn)
+        sh2.addWidget(self._save_preset_btn)
         self._clear_btn = QPushButton("清空", clicked=self._send_edit.clear)
-        sh.addWidget(self._clear_btn)
+        sh2.addWidget(self._clear_btn)
         self._conn_test_btn = QPushButton("连通测试", clicked=self._run_connectivity_test)
         self._conn_test_btn.setStyleSheet("background-color: #3498db; color: white; font-weight: bold;")
-        sh.addWidget(self._conn_test_btn)
+        sh2.addWidget(self._conn_test_btn)
         # 压力测试：点击展开/收起下方隐藏的压测参数区
         self._stress_toggle_btn = QPushButton("压力测试")
         self._stress_toggle_btn.setCheckable(True)
         self._stress_toggle_btn.setStyleSheet(
             "background-color: #e74c3c; color: white; font-weight: bold;")
         self._stress_toggle_btn.toggled.connect(self._toggle_stress_area)
-        sh.addWidget(self._stress_toggle_btn)
-        sh.addStretch()
-        sl.addLayout(sh)
+        sh2.addWidget(self._stress_toggle_btn)
+        sh2.addStretch()
+        sl.addLayout(sh2)
 
         # ── 压测参数区（隐藏，点击"压力测试"展开）──
         self._stress_area = QWidget()
@@ -860,16 +866,24 @@ class ClientPanelBase(QWidget):
             self._dirty.discard(idx)
         self._msg_dirty = idx in self._dirty
 
+    def _preset_item_text(self, idx: int) -> str:
+        """预设列表项文本：选中预设前加 ●（与服务端返回报文选中标记一致），
+        未保存修改的预设名后加 *。"""
+        presets = self.get_presets()
+        name = presets[idx].get("name", "") if 0 <= idx < len(presets) else ""
+        prefix = "● " if idx == self._selected_preset_idx else ""
+        star = " *" if idx in self._dirty else ""
+        return f"{prefix}{name}{star}"
+
     def _update_preset_stars(self):
-        """把列表项名称与脏标记同步（有未保存修改的预设名后加 *）。"""
+        """把列表项名称与选中/脏标记同步（选中预设前 ●，未保存修改名后 *）。"""
         presets = self.get_presets()
         for i in range(self._preset_list.count()):
             item = self._preset_list.item(i)
             idx = item.data(Qt.UserRole)
             if idx is None or idx >= len(presets):
                 continue
-            name = presets[idx].get("name", "")
-            item.setText(f"{name} *" if idx in self._dirty else name)
+            item.setText(self._preset_item_text(idx))
 
     def has_unsaved_presets(self) -> bool:
         """是否有预设报文存在未保存的修改（含未关联预设的发送框内容）。"""
@@ -906,8 +920,7 @@ class ClientPanelBase(QWidget):
         lst.clear()
         presets = self.get_presets()
         for i, p in enumerate(presets):
-            star = " *" if i in self._dirty else ""
-            item = QListWidgetItem(f"{p.get('name', '')}{star}")
+            item = QListWidgetItem(self._preset_item_text(i))
             item.setData(Qt.UserRole, i)
             lst.addItem(item)
         if self._selected_preset_idx is not None and self._selected_preset_idx < len(presets):

@@ -13,6 +13,10 @@ from pathlib import Path
 from typing import Optional
 
 
+# 协议测试「默认配置」预设的统一名称（新建/查找默认预设时统一使用）
+DEFAULT_PRESET_NAME = "配置1"
+
+
 # ── 数据模型 ──────────────────────────────────────────────
 
 
@@ -372,12 +376,12 @@ def target_display_info(target: ProtocolTarget) -> dict:
     active = all_presets.get("_active_proto", "")
     proto_order = [active] + [p for p in ("tcp_client", "ws_client", "http_client") if p != active] if active else ("tcp_client", "ws_client", "http_client")
 
-    # 按优先级查找有"默认配置"的协议
+    # 按优先级查找有默认预设的协议
     for proto in proto_order:
         proto_presets = all_presets.get(proto, [])
         if not isinstance(proto_presets, list):
             continue
-        default = next((p for p in proto_presets if p.get("name") == "默认配置"), None)
+        default = next((p for p in proto_presets if p.get("name") == DEFAULT_PRESET_NAME), None)
         if not default:
             # 取第一个预设作为展示数据
             default = proto_presets[0] if proto_presets else None
