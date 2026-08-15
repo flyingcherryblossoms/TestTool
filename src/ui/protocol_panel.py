@@ -53,7 +53,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.database import Database, target_display_info
+from src.database import Database, target_display_info, DEFAULT_PRESET_NAME
 from src.protocol import compute_length_header
 from src.ui import shortcuts
 from src.ui.clipboard import KIND_PROTO_TARGET, copy_items, paste_items
@@ -114,7 +114,7 @@ def _normalize_import_presets(t: dict) -> str:
     """将导入数据中的预设规范化为 {proto: [...]} JSON 字符串。
 
     兼容旧格式（扁平列表）和新格式（dict）。若数据中只有旧字段（ip/port 等），
-    自动构建"默认配置"预设。
+    自动构建默认预设。
     """
     raw = t.get("send_presets", [])
     if isinstance(raw, str):
@@ -151,7 +151,7 @@ def _normalize_import_presets(t: dict) -> str:
         }
     return json.dumps(
         {"_active_proto": proto,
-         proto: [{"name": "默认配置", "message": json.dumps(cfg, ensure_ascii=False)}]},
+         proto: [{"name": DEFAULT_PRESET_NAME, "message": json.dumps(cfg, ensure_ascii=False)}]},
         ensure_ascii=False)
 
 
@@ -651,8 +651,10 @@ class TargetClientPanel(ClientPanelBase):
         # 1) 把旧协议下已缓存的未保存草稿写回旧协议预设（索引基于旧协议列表）
         if self._dirty:
             self._flush_drafts(old_proto)
-        # 2) 把当前（旧协议）参数存入旧协议"默认配置"预设
-        if self._owner._target:
+        # 2) 仅当旧协议还存在"未关联预设"的浮动改动时才写回旧协议默认配置。
+        #    若当前参数只是某个已保存预设的内容（未编辑），盲目写回会把默认预设
+        #    覆盖成该预设的报文，导致切换协议后多个预设内容变成一样、报文丢失。
+        if self._owner._target and self._msg_dirty:
             self._save_as_default_preset(proto=old_proto)
         # 3) 切换 UI
         self._prev_proto = new_proto
@@ -689,13 +691,13 @@ class TargetClientPanel(ClientPanelBase):
         self._owner._save_presets_to_target(presets, proto)
 
     def _ensure_default_preset(self):
-        """确保当前协议下存在"默认配置"预设；当前协议完全没有预设时才从当前参数创建。
+        """确保当前协议下存在默认预设；当前协议完全没有预设时才从当前参数创建。
 
-        若已有用户自建的预设（如改名的"配置1"），不再强行追加"默认配置"，
+        若已有用户自建的预设，不再强行追加默认预设，
         避免每次重新打开详情 tab 都在预设列表尾部多出一条。
         """
         presets = list(self.get_presets())
-        default_name = "默认配置"
+        default_name = DEFAULT_PRESET_NAME
         existing = next((p for p in presets if p.get("name") == default_name), None)
         if existing is None and not presets:
             proto = self._proto_combo.currentData()
@@ -729,13 +731,12 @@ class TargetClientPanel(ClientPanelBase):
         return cfg
 
     def _save_as_default_preset(self, proto: str = ""):
-        """将当前参数保存到指定协议（默认当前协议）的"默认配置"预设。
+        """将当前参数保存到指定协议（默认当前协议）的默认预设。
 
-        有"默认配置"则覆盖它；没有"默认配置"但有用户预设时，覆盖当前选中的预设
-        （无选中则覆盖第一条），避免切换协议/关闭时也强行追加"默认配置"；
-        完全没有预设才新建"默认配置"。
+        有默认预设则覆盖它；没有则新建。绝不覆盖用户自建预设，
+        避免把某个非默认预设的报文写进别的预设、导致多预设内容互相覆盖丢失。
         """
-        default_name = "默认配置"
+        default_name = DEFAULT_PRESET_NAME
         target_proto = proto or self._proto_combo.currentData()
         presets = list(self.get_presets(proto=target_proto))
         config = json.dumps(self._collect_params_for(target_proto), ensure_ascii=False)
@@ -745,16 +746,7 @@ class TargetClientPanel(ClientPanelBase):
                 self.save_presets(presets, proto=target_proto)
                 self._refresh_preset_list()
                 return
-        if presets:
-            # 无"默认配置"但有用户预设：覆盖当前选中预设，无选中则覆盖第一条
-            idx = (self._selected_preset_idx
-                   if self._selected_preset_idx is not None
-                   and 0 <= self._selected_preset_idx < len(presets) else 0)
-            presets[idx]["message"] = config
-            self.save_presets(presets, proto=target_proto)
-            self._refresh_preset_list()
-            return
-        # 完全没有预设才新建
+        # 没有默认预设：新建，不覆盖已有用户预设
         presets.append({"name": default_name, "message": config})
         self.save_presets(presets, proto=target_proto)
         self._refresh_preset_list()
@@ -777,19 +769,19 @@ class TargetClientPanel(ClientPanelBase):
         self._msg_dirty = False
 
     def _load_active_proto_default(self):
-        """加载当前协议的"默认配置"到面板；没有"默认配置"则优先选中第一个用户预设，
+        """加载当前协议的默认预设到面板；没有则优先选中第一个用户预设，
         完全没有预设才从当前参数创建默认预设。"""
         presets = list(self.get_presets())
-        default_name = "默认配置"
+        default_name = DEFAULT_PRESET_NAME
         idx = next((i for i, p in enumerate(presets)
                     if p.get("name") == default_name), None)
         if idx is not None:
             self._selected_preset_idx = idx
             self._load_preset_config(presets[idx].get("message", ""))
             self._capture_http_baseline(idx)
-            self._preset_selected_label.setText("✓ 已选择: 默认配置")
+            self._preset_selected_label.setText(f"✓ 已选择: {default_name}")
         elif presets:
-            # 无"默认配置"但有用户预设：选中第一个（与 target_display_info 展示兜底一致）
+            # 无默认预设但有用户预设：选中第一个（与 target_display_info 展示兜底一致）
             self._selected_preset_idx = 0
             self._load_preset_config(presets[0].get("message", ""))
             self._capture_http_baseline(0)
@@ -912,14 +904,14 @@ class TargetClientPanel(ClientPanelBase):
                 all_p = {}
             if isinstance(all_p, dict):
                 http_presets = all_p.get("http_client", [])
-                default = next((p for p in http_presets if p.get("name") == "默认配置"), None)
+                default = next((p for p in http_presets if p.get("name") == DEFAULT_PRESET_NAME), None)
                 if default:
                     try:
                         cfg = json.loads(default.get("message", "{}"))
                     except json.JSONDecodeError:
                         pass
                 elif http_presets:
-                    # 无"默认配置"时加载第一个预设的完整配置（与 target_display_info 展示兜底一致），
+                    # 无默认预设时加载第一个预设的完整配置（与 target_display_info 展示兜底一致），
                     # 避免面板持有不完整配置，导致后续切换/保存时把半截配置覆盖回第一个预设
                     try:
                         cfg = json.loads(http_presets[0].get("message", "{}"))
@@ -948,7 +940,7 @@ class TargetClientPanel(ClientPanelBase):
         # 同步 _prev_proto 以正确跟踪协议切换
         self._prev_proto = cfg.get("proto", "tcp_client")
         self._refresh_preset_list()
-        # 确保当前协议存在"默认配置"预设
+        # 确保当前协议存在默认预设
         self._ensure_default_preset()
 
 
@@ -1253,7 +1245,7 @@ class _TargetDetailPanel(QWidget):
                 except json.JSONDecodeError:
                     all_p = {}
                 http_presets = all_p.get("http_client", []) if isinstance(all_p, dict) else []
-                default = next((p for p in http_presets if p.get("name") == "默认配置"), None)
+                default = next((p for p in http_presets if p.get("name") == DEFAULT_PRESET_NAME), None)
                 if default:
                     try:
                         data["http_config"] = json.loads(default.get("message", "{}"))
@@ -1824,7 +1816,7 @@ class _CollectionDetailTab(QWidget):
 
             send_presets = json.dumps(
                 {"_active_proto": proto,
-                 proto: [{"name": "默认配置", "message": preset_msg}]},
+                 proto: [{"name": DEFAULT_PRESET_NAME, "message": preset_msg}]},
                 ensure_ascii=False)
 
             self._db.add_protocol_target(
@@ -1890,20 +1882,20 @@ class _CollectionDetailTab(QWidget):
             # 协议变更：清空旧协议预设，为新协议创建
             if new_proto != proto:
                 all_presets = {"_active_proto": new_proto,
-                               new_proto: [{"name": "默认配置", "message": preset_msg}]}
+                               new_proto: [{"name": DEFAULT_PRESET_NAME, "message": preset_msg}]}
             else:
-                # 同协议：更新"默认配置"预设
+                # 同协议：更新默认预设
                 proto_presets = all_presets.get(new_proto, [])
                 if not isinstance(proto_presets, list):
                     proto_presets = []
                 updated = False
                 for p in proto_presets:
-                    if p.get("name") == "默认配置":
+                    if p.get("name") == DEFAULT_PRESET_NAME:
                         p["message"] = preset_msg
                         updated = True
                         break
                 if not updated:
-                    proto_presets.insert(0, {"name": "默认配置", "message": preset_msg})
+                    proto_presets.insert(0, {"name": DEFAULT_PRESET_NAME, "message": preset_msg})
                 all_presets[new_proto] = proto_presets
                 all_presets["_active_proto"] = new_proto
 
@@ -2656,7 +2648,7 @@ class _StandaloneClientTab(ClientPanelBase):
         cfg["proto"] = proto
         preset_msg = json.dumps(cfg, ensure_ascii=False)
         send_presets = json.dumps(
-            {"_active_proto": proto, proto: [{"name": "默认配置", "message": preset_msg}]},
+            {"_active_proto": proto, proto: [{"name": DEFAULT_PRESET_NAME, "message": preset_msg}]},
             ensure_ascii=False)
         stress = json.dumps(self.collect_stress_params(), ensure_ascii=False)
 
@@ -2749,7 +2741,7 @@ class ProtocolPanel(QWidget):
         splitter.addWidget(self._tabs)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 3)
-        splitter.setSizes([170, 930])
+        splitter.setSizes([240, 860])
 
         layout.addWidget(splitter)
 

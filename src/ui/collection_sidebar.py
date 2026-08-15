@@ -54,6 +54,8 @@ class CollectionSidebarBase(QWidget):
     def _setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
+        # 侧边栏最小宽度：拖拽低于该宽度时折叠隐藏，默认打开宽度应大于该值
+        self.setMinimumWidth(200)
 
         self._search = QLineEdit()
         self._search.setPlaceholderText("搜索集合...")

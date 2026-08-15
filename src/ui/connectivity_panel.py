@@ -378,7 +378,7 @@ class ConnectivityPanel(QWidget):
         splitter.addWidget(self._tabs)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 3)
-        splitter.setSizes([220, 880])
+        splitter.setSizes([240, 860])
 
         layout.addWidget(splitter)
 
