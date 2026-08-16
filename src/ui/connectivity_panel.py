@@ -4,23 +4,16 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, Signal
 
 from pathlib import Path
 
 from PySide6.QtWidgets import (
-    QAbstractItemView,
-    QDialog,
     QFileDialog,
-    QHBoxLayout,
-    QLineEdit,
-    QMenu,
     QMessageBox,
     QProgressDialog,
-    QPushButton,
     QSplitter,
     QTabWidget,
-    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )

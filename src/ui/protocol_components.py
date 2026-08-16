@@ -18,7 +18,7 @@ from datetime import datetime
 from functools import partial
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont, QKeySequence, QShortcut
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -52,7 +52,6 @@ from PySide6.QtWidgets import (
 )
 
 from src.database import Database
-from src.protocol import compute_length_header
 from src.scanner import ScanTarget, ScannerWorker
 from src.ui import shortcuts
 from src.ui.http_client import HttpParamWidget, HttpRequestWorker

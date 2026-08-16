@@ -12,7 +12,7 @@ import socket
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeout
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from PySide6.QtCore import QThread, Signal
 
