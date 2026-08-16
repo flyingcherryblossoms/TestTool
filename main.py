@@ -1,9 +1,7 @@
 """TestTool 入口 —— 网络端口连通性检测与协议测试工具。
 
-用法:
     python main.py                 # 启动 GUI
     python main.py --db <path>     # 指定数据库路径
-    python main.py --cli <ip> <port> [<ip> <port> ...]  # 命令行模式
 """
 
 from __future__ import annotations
@@ -114,67 +112,23 @@ def run_gui(db_path: str) -> None:
 
     sys.exit(app.exec())
 
-
-def run_cli(targets: list[tuple[str, int]], timeout: float = 3.0) -> None:
-    """命令行模式: 快速检测几个目标。"""
-    from src.scanner import ScanTarget, scan_targets_sync
-
-    scan_targets = [
-        ScanTarget(id=0, ip=ip, port=port, description=f"{ip}:{port}")
-        for ip, port in targets
-    ]
-
-    print(f"检测 {len(scan_targets)} 个目标 (超时: {timeout}s)...\n")
-
-    def progress(current, total, result):
-        status = "✓ 连通" if result.success else "✗ 未连通"
-        latency = f" {result.latency_ms:.1f}ms" if result.success else ""
-        error = f" - {result.error_msg}" if not result.success else ""
-        print(f"  [{current}/{total}] {result.ip}:{result.port} {status}{latency}{error}")
-
-    results = scan_targets_sync(scan_targets, timeout=timeout, progress_callback=progress)
-
-    success = sum(1 for r in results if r.success)
-    fail = len(results) - success
-    print(f"\n--- 完成: {success} 连通, {fail} 未连通 ---")
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="TestTool - 网络端口连通性检测与协议测试工具"
     )
     parser.add_argument("--db", type=str, default="", help="SQLite 数据库路径")
-    parser.add_argument("--cli", nargs="+", help="命令行模式: IP1 Port1 [IP2 Port2 ...]")
-    parser.add_argument("--timeout", type=float, default=3.0, help="连接超时秒数 (默认3s)")
 
     args = parser.parse_args()
 
-    if args.cli:
-        # 命令行模式
-        if len(args.cli) % 2 != 0:
-            print("错误: IP 和 Port 必须成对出现。")
-            sys.exit(1)
-        targets = []
-        for i in range(0, len(args.cli), 2):
-            ip = args.cli[i]
-            try:
-                port = int(args.cli[i + 1])
-            except ValueError:
-                print(f"错误: 端口无效 '{args.cli[i + 1]}'")
-                sys.exit(1)
-            targets.append((ip, port))
-        run_cli(targets, args.timeout)
+    if args.db:
+        db_path = args.db
+    elif getattr(sys, 'frozen', False):
+        # PyInstaller 打包后：存到 exe 同目录，数据不丢失
+        db_path = str(Path(sys.executable).parent / "testtool.db")
     else:
-        # GUI 模式
-        if args.db:
-            db_path = args.db
-        elif getattr(sys, 'frozen', False):
-            # PyInstaller 打包后：存到 exe 同目录，数据不丢失
-            db_path = str(Path(sys.executable).parent / "testtool.db")
-        else:
-            # 源码运行：存到项目目录
-            db_path = str(Path(__file__).resolve().parent / "testtool.db")
-        run_gui(db_path)
+        # 源码运行：存到项目目录
+        db_path = str(Path(__file__).resolve().parent / "testtool.db")
+    run_gui(db_path)
 
 
 if __name__ == "__main__":

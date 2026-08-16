@@ -80,12 +80,6 @@ pip install PySide6 openpyxl xlrd Pillow
 python main.py
 ```
 
-### 命令行模式
-
-```bash
-python main.py --cli 192.168.1.1 22 10.0.0.1 80 --timeout 3
-```
-
 ### 连通性测试
 
 - **按集合测试**：左侧选集合 → 切换到「连通测试」→ 勾选目标 → 点击开始
