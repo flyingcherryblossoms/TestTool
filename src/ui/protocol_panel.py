@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from functools import partial
 
 from PySide6.QtCore import Qt, QSettings, QTimer, Signal
 from PySide6.QtGui import QFont
@@ -48,7 +47,6 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
-    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -68,18 +66,14 @@ from src.ui.protocol_workers import (
     TcpClientWorker,
     WsClientWorker,
 )
-from src.ui.format_text import FormatTextEdit
 from src.json_handler import (
-    export_collection_to_json,
     export_collections_to_json,
     import_collection_from_json,
     export_client_config,
-    export_server_config,
 )
 from src.ui.protocol_components import (
     ClientPanelBase,
     ServerPanelBase,
-    ServerDialog,
     ENCODINGS,
     _hex_dump,
 )

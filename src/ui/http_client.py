@@ -9,14 +9,12 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime
 
 import requests
-from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QFont, QKeySequence, QShortcut
+from PySide6.QtCore import QThread, Signal
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QApplication,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
