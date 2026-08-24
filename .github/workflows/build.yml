@@ -17,7 +17,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install PySide6 openpyxl xlrd websocket-client websockets pyinstaller
+        run: pip install PySide6 openpyxl xlrd websocket-client websockets requests pyinstaller
 
       - name: Build
         run: |
@@ -55,10 +55,10 @@ jobs:
       - name: Install system deps
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq libegl1 libgl1 libopengl0 libxkbcommon0
+          sudo apt-get install -y -qq libegl1 libgl1 libopengl0 libxkbcommon0 libxcb-cursor0
 
       - name: Install Python deps
-        run: pip install PySide6 openpyxl xlrd websocket-client websockets pyinstaller
+        run: pip install PySide6 openpyxl xlrd websocket-client websockets requests pyinstaller
 
       - name: Build
         run: |
@@ -96,12 +96,12 @@ jobs:
           apt-get update -qq
           apt-get install -y -qq python3.8 python3.8-venv python3.8-dev python3.8-distutils
           apt-get install -y -qq libegl1 libgl1 libopengl0 libxkbcommon0 libdbus-1-3 binutils
-          apt-get install -y -qq libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-sync1 libxcb-xfixes0 libxcb-xinerama0 libxcb-xkb1 libxcb-util1 libx11-xcb1 libfontconfig1 libfreetype6
+          apt-get install -y -qq libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-cursor0 libxcb-render-util0 libxcb-shape0 libxcb-sync1 libxcb-xfixes0 libxcb-xinerama0 libxcb-xkb1 libxcb-util1 libx11-xcb1 libfontconfig1 libfreetype6
           wget -q https://bootstrap.pypa.io/pip/3.8/get-pip.py -O /tmp/get-pip.py
           python3.8 /tmp/get-pip.py -q
 
       - name: Install Python deps
-        run: python3.8 -m pip install PySide6 openpyxl xlrd websocket-client websockets pyinstaller
+        run: python3.8 -m pip install PySide6 openpyxl xlrd websocket-client websockets requests pyinstaller
 
       - name: Build
         run: |
@@ -138,10 +138,10 @@ jobs:
       - name: Install system deps
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq libegl1 libgl1 libopengl0 libxkbcommon0
+          sudo apt-get install -y -qq libegl1 libgl1 libopengl0 libxkbcommon0 libxcb-cursor0
 
       - name: Install Python deps
-        run: pip install PySide6 openpyxl xlrd websocket-client websockets pyinstaller
+        run: pip install PySide6 openpyxl xlrd websocket-client websockets requests pyinstaller
 
       - name: Build
         run: |
@@ -179,12 +179,12 @@ jobs:
           apt-get update -qq
           apt-get install -y -qq python3.8 python3.8-venv python3.8-dev python3.8-distutils
           apt-get install -y -qq libegl1 libgl1 libopengl0 libxkbcommon0 libdbus-1-3 binutils
-          apt-get install -y -qq libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-sync1 libxcb-xfixes0 libxcb-xinerama0 libxcb-xkb1 libxcb-util1 libx11-xcb1 libfontconfig1 libfreetype6
+          apt-get install -y -qq libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-cursor0 libxcb-render-util0 libxcb-shape0 libxcb-sync1 libxcb-xfixes0 libxcb-xinerama0 libxcb-xkb1 libxcb-util1 libx11-xcb1 libfontconfig1 libfreetype6
           wget -q https://bootstrap.pypa.io/pip/3.8/get-pip.py -O /tmp/get-pip.py
           python3.8 /tmp/get-pip.py -q
 
       - name: Install Python deps
-        run: python3.8 -m pip install PySide6 openpyxl xlrd websocket-client websockets pyinstaller
+        run: python3.8 -m pip install PySide6 openpyxl xlrd websocket-client websockets requests pyinstaller
 
       - name: Build
         run: |
@@ -219,7 +219,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install Python deps
-        run: pip install PySide6 openpyxl xlrd websocket-client websockets pyinstaller
+        run: pip install PySide6 openpyxl xlrd websocket-client websockets requests pyinstaller
 
       - name: Build
         run: |
