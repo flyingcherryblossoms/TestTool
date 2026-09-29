@@ -14,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from PySide6.QtCore import Qt, QtMsgType, qFormatLogMessage, qInstallMessageHandler
-from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication
 
 from src.ui.main_window import MainWindow
@@ -88,6 +88,10 @@ def _load_icon() -> QIcon:
 
 def run_gui(db_path: str) -> None:
     """启动图形界面。"""
+    # 保留 125% 等非整数 DPI 比例，避免跨高分屏时被取整。
+    QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+    )
     _install_qt_message_filter()
     app = QApplication(sys.argv)
     app.setApplicationName("TestTool")

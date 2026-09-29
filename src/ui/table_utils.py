@@ -20,14 +20,58 @@ from PySide6.QtCore import Qt, QMimeData, QPoint, Signal
 from PySide6.QtGui import QColor, QDrag, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
+    QHBoxLayout,
     QHeaderView,
+    QPushButton,
     QTableWidget,
     QTreeWidget,
+    QWidget,
 )
 
 
 # 拖动目标到集合时传递目标 ID 的自定义 MIME 类型
 TARGETS_MIME = "application/x-testtool-target-ids"
+
+
+def set_button_cell(table: QTableWidget, row: int, column: int,
+                    button: QPushButton) -> None:
+    """把按钮放入带内边距的单元格，避免按钮压住行边框。"""
+    cell = QWidget()
+    layout = QHBoxLayout(cell)
+    layout.setContentsMargins(4, 2, 4, 2)
+    layout.addWidget(button)
+    table.setCellWidget(row, column, cell)
+
+
+def fit_table_buttons(table: QTableWidget, scale_percent: int | None = None) -> None:
+    """根据当前主题/缩放更新含按钮的行高和固定按钮列宽。"""
+    if scale_percent is None:
+        scale_percent = getattr(QApplication.instance(), "_ui_scale_percent", 100)
+    factor = scale_percent / 100
+    base_widths = getattr(table, "_button_column_base_widths", None)
+    if base_widths is None:
+        base_widths = {}
+        table._button_column_base_widths = base_widths
+    required_widths = {}
+    for row in range(table.rowCount()):
+        for column in range(table.columnCount()):
+            cell = table.cellWidget(row, column)
+            if cell is None:
+                continue
+            button = cell if isinstance(cell, QPushButton) else cell.findChild(QPushButton)
+            if button is None:
+                continue
+            table.setRowHeight(row, max(round(30 * factor),
+                                        button.sizeHint().height() + round(6 * factor)))
+            required_widths[column] = max(required_widths.get(column, 0),
+                                          button.sizeHint().width() + round(10 * factor))
+    for column, required in required_widths.items():
+        if table.horizontalHeader().sectionResizeMode(column) != QHeaderView.Fixed:
+            continue
+        if column not in base_widths:
+            base_widths[column] = table.columnWidth(column)
+        table.setColumnWidth(column, max(round(base_widths[column] * factor), required))
 
 
 def unique_copy_name(name: str, existing: set[str]) -> str:

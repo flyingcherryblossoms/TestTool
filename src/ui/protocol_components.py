@@ -72,7 +72,10 @@ from src.ui.clipboard import (
 )
 from src.ui.format_text import FormatTextEdit
 from src.ui.message_format import format_payload
-from src.ui.table_utils import enable_stretch_fill, refresh_tooltips, unique_copy_name
+from src.ui.table_utils import (
+    enable_stretch_fill, fit_table_buttons, refresh_tooltips,
+    set_button_cell, unique_copy_name,
+)
 
 
 ENCODINGS = ["UTF-8", "GBK", "GB2312", "GB18030", "ISO-8859-1", "ASCII"]
@@ -445,8 +448,8 @@ class ClientPanelBase(QWidget):
         self._preset_save_btn = QPushButton("保存", clicked=self._save_preset)
         self._preset_delete_btn = QPushButton("删除", clicked=self._delete_preset)
         self._preset_delete_btn.setStyleSheet(
-            "QPushButton { color: #fff; background-color: #e74c3c; }"
-            "QPushButton:hover { background-color: #c0392b; }"
+            "QPushButton { color: #fff; background-color: #a82d26; }"
+            "QPushButton:hover { background-color: #92251d; }"
         )
         self._preset_up_btn = QPushButton("上移", clicked=lambda: self._move_preset(-1))
         self._preset_down_btn = QPushButton("下移", clicked=lambda: self._move_preset(1))
@@ -508,13 +511,13 @@ class ClientPanelBase(QWidget):
         self._clear_btn = QPushButton("清空", clicked=self._send_edit.clear)
         sh2.addWidget(self._clear_btn)
         self._conn_test_btn = QPushButton("连通测试", clicked=self._run_connectivity_test)
-        self._conn_test_btn.setStyleSheet("background-color: #3498db; color: white; font-weight: bold;")
+        self._conn_test_btn.setStyleSheet("background-color: #19689e; color: white; font-weight: bold;")
         sh2.addWidget(self._conn_test_btn)
         # 压力测试：点击展开/收起下方隐藏的压测参数区
         self._stress_toggle_btn = QPushButton("压力测试")
         self._stress_toggle_btn.setCheckable(True)
         self._stress_toggle_btn.setStyleSheet(
-            "background-color: #e74c3c; color: white; font-weight: bold;")
+            "background-color: #a82d26; color: white; font-weight: bold;")
         self._stress_toggle_btn.toggled.connect(self._toggle_stress_area)
         sh2.addWidget(self._stress_toggle_btn)
         sh2.addStretch()
@@ -582,7 +585,7 @@ class ClientPanelBase(QWidget):
         run_l = QHBoxLayout()
         self._stress_btn_run = QPushButton("开始压测")
         self._stress_btn_run.setStyleSheet(
-            "background-color: #e67e22; color: white; font-weight: bold;")
+            "background-color: #96500a; color: white; font-weight: bold;")
         self._stress_btn_run.clicked.connect(self._start_stress_test)
         run_l.addWidget(self._stress_btn_run)
         self._stress_btn_stop = QPushButton("停止")
@@ -1962,7 +1965,8 @@ class ServerPanelBase(QWidget):
             btn = QPushButton("Stop" if running else "Start")
             btn.setStyleSheet("color: #e74c3c;" if running else "color: #27ae60;")
             btn.clicked.connect(partial(self._toggle_server, s))
-            t.setCellWidget(row, len(cols) - 1, btn)
+            set_button_cell(t, row, len(cols) - 1, btn)
+        fit_table_buttons(t)
         refresh_tooltips(t)
         if hasattr(self, "_status_label"):
             self._status_label.setText(

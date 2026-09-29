@@ -142,8 +142,8 @@ class CspParserDialog(QDialog):
 
         self._parse_btn = QPushButton("解析")
         self._parse_btn.setStyleSheet(
-            "QPushButton { color: #fff; background-color: #2980b9; padding: 6px 18px; }"
-            "QPushButton:hover { background-color: #3498db; }"
+            "QPushButton { color: #fff; background-color: #185f91; padding: 6px 18px; }"
+            "QPushButton:hover { background-color: #19689e; }"
         )
         self._parse_btn.clicked.connect(self._parse)
         settings_layout.addWidget(self._parse_btn)

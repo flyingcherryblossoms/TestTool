@@ -34,9 +34,9 @@ ACTIONS = [
     ("paste",        "粘贴",           ["Ctrl+V"]),
     ("edit_preset",  "编辑预设",       ["F2"]),
     ("format_body",  "HTTP 报文格式化", ["Ctrl+Shift+F"]),
-    ("zoom_in",      "放大字号",       ["Ctrl++", "Ctrl+="]),
-    ("zoom_out",     "缩小字号",       ["Ctrl+-"]),
-    ("zoom_reset",   "恢复字号",       ["Ctrl+0"]),
+    ("zoom_in",      "放大界面",       ["Ctrl++", "Ctrl+="]),
+    ("zoom_out",     "缩小界面",       ["Ctrl+-"]),
+    ("zoom_reset",   "恢复界面缩放",   ["Ctrl+0"]),
 ]
 
 DEFAULTS: dict[str, list[str]] = {aid: list(seqs) for aid, _, seqs in ACTIONS}
@@ -109,6 +109,12 @@ def event_matches(event, action_id: str) -> bool:
             continue
         kc = ks[0]
         bkey = int(kc.key())
+        if ev_key in _PLUS_KEYS and bkey in _PLUS_KEYS:
+            # 多数键盘需要 Shift 才能输入 +，同时接受 Ctrl+= / Ctrl+Shift+=。
+            if (kc.keyboardModifiers() & _MOD_MASK) == Qt.ControlModifier and \
+                    (ev_mods & _MOD_MASK) in (Qt.ControlModifier,
+                                               Qt.ControlModifier | Qt.ShiftModifier):
+                return True
         if not _mods_match(ev_mods, kc.keyboardModifiers()):
             continue
         if ev_key == bkey:

@@ -5,8 +5,7 @@
 
 交互：
   - 格式下拉（text / json / xml）切换语法高亮
-  - Ctrl + 滚轮、Ctrl + 加号 / 减号 调整字号
-  - Ctrl + 0 恢复默认字号
+  - Ctrl + 滚轮调整当前编辑框字号
 
 供客户端发送报文、服务端响应内容、目标对话框发送报文统一使用。
 """
@@ -18,8 +17,6 @@ import re
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont, QSyntaxHighlighter, QTextCharFormat
 from PySide6.QtWidgets import QComboBox, QPlainTextEdit
-
-from src.ui import shortcuts
 
 
 def _fmt(color: str, bold: bool = False) -> QTextCharFormat:
@@ -98,14 +95,12 @@ class FormatHighlighter(QSyntaxHighlighter):
 
 
 class FormatTextEdit(QPlainTextEdit):
-    """协议文本编辑组件：格式下拉 + 语法高亮 + Ctrl 缩放。"""
+    """协议文本编辑组件：格式下拉 + 语法高亮 + Ctrl 滚轮缩放。"""
 
     FORMATS = ["text", "json", "xml"]
 
     def __init__(self, text: str = "", format_name: str = "text", parent=None):
         super().__init__(text, parent)
-        base = self.font().pointSize()
-        self._base_point_size = base if base > 0 else 10
         self._highlighter = FormatHighlighter(self.document())
         # 格式下拉（由外部布局决定摆放位置）
         self.format_combo = QComboBox()
@@ -150,27 +145,10 @@ class FormatTextEdit(QPlainTextEdit):
             return
         super().wheelEvent(event)
 
-    def keyPressEvent(self, event):
-        if shortcuts.event_matches(event, "zoom_in"):
-            self._zoom(1)
-            return
-        if shortcuts.event_matches(event, "zoom_out"):
-            self._zoom(-1)
-            return
-        if shortcuts.event_matches(event, "zoom_reset"):
-            self._reset_zoom()
-            return
-        super().keyPressEvent(event)
-
     def _zoom(self, step: int) -> None:
         f = self.font()
         if f.pointSize() > 0:
             f.setPointSize(max(5, min(72, f.pointSize() + step)))
         else:
             f.setPixelSize(max(6, min(96, f.pixelSize() + step)))
-        self.setFont(f)
-
-    def _reset_zoom(self) -> None:
-        f = self.font()
-        f.setPointSize(self._base_point_size)
         self.setFont(f)

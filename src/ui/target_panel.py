@@ -394,8 +394,8 @@ class TargetPanel(QWidget):
 
         self._proto_test_btn = QPushButton("协议测试")
         self._proto_test_btn.setStyleSheet(
-            "QPushButton { color: #fff; background-color: #8e44ad; padding: 4px 12px; }"
-            "QPushButton:hover { background-color: #9b59b6; }"
+            "QPushButton { color: #fff; background-color: #71338e; padding: 4px 12px; }"
+            "QPushButton:hover { background-color: #7c4198; }"
         )
         self._proto_test_btn.clicked.connect(self._on_protocol_test_selected)
         action_layout.addWidget(self._proto_test_btn)

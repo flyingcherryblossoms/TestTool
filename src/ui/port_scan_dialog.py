@@ -16,6 +16,8 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QDoubleSpinBox,
+    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -42,6 +44,8 @@ class PortScanDialog(QDialog):
         super().__init__(parent)
         self._db = db
         self._worker: ScannerWorker | None = None
+        self._stopping = False
+        self._close_when_finished = False
         self._results: list[ScanResult] = []
         self.setWindowTitle("端口扫描")
         self.setMinimumSize(650, 550)
@@ -69,16 +73,18 @@ class PortScanDialog(QDialog):
 
         h_layout = QHBoxLayout()
         h_layout.addWidget(QLabel("超时(秒):"))
-        self._timeout_spin = QComboBox()
-        self._timeout_spin.addItems(["0.2", "0.5", "1", "2", "3", "5"])
-        self._timeout_spin.setCurrentText("0.5")
-        self._timeout_spin.setEditable(True)  # 允许自定义输入
+        self._timeout_spin = QDoubleSpinBox()
+        self._timeout_spin.setRange(0.1, 60.0)
+        self._timeout_spin.setDecimals(1)
+        self._timeout_spin.setSingleStep(0.1)
+        self._timeout_spin.setValue(0.5)
+        self._timeout_spin.setSuffix(" s")
         h_layout.addWidget(self._timeout_spin)
 
         h_layout.addWidget(QLabel("并发数:"))
-        self._workers_spin = QComboBox()
-        self._workers_spin.addItems(["20", "50", "100", "200"])
-        self._workers_spin.setCurrentText("100")
+        self._workers_spin = QSpinBox()
+        self._workers_spin.setRange(1, 200)
+        self._workers_spin.setValue(100)
         h_layout.addWidget(self._workers_spin)
         h_layout.addStretch()
 
@@ -97,8 +103,8 @@ class PortScanDialog(QDialog):
         self._scan_btn = QPushButton("▶ 开始扫描")
         self._scan_btn.setMinimumWidth(130)
         self._scan_btn.setStyleSheet(
-            "QPushButton { color: #fff; background-color: #2980b9; padding: 6px 16px; }"
-            "QPushButton:hover { background-color: #3498db; }"
+            "QPushButton { color: #fff; background-color: #185f91; padding: 6px 16px; }"
+            "QPushButton:hover { background-color: #19689e; }"
         )
         self._scan_btn.clicked.connect(self._toggle_scan)
         ctrl_layout.addWidget(self._scan_btn)
@@ -168,8 +174,8 @@ class PortScanDialog(QDialog):
         self._import_btn = QPushButton("导入开放端口 →")
         self._import_btn.setEnabled(False)
         self._import_btn.setStyleSheet(
-            "QPushButton { color: #fff; background-color: #27ae60; padding: 6px 14px; }"
-            "QPushButton:hover { background-color: #2ecc71; }"
+            "QPushButton { color: #fff; background-color: #176b3a; padding: 6px 14px; }"
+            "QPushButton:hover { background-color: #1b7944; }"
             "QPushButton:disabled { background-color: #bbb; }"
         )
         self._import_btn.clicked.connect(self._import_results)
@@ -202,9 +208,10 @@ class PortScanDialog(QDialog):
 
     def _toggle_scan(self):
         if self._worker and self._worker.isRunning():
+            self._stopping = True
             self._worker.cancel()
-            self._worker.wait(2000)
-            self._scan_done()
+            self._scan_btn.setEnabled(False)
+            self._progress_label.setText("正在停止…")
             return
         self._start_scan()
 
@@ -242,6 +249,7 @@ class PortScanDialog(QDialog):
                 scan_targets.append(ScanTarget(id=0, ip=ip, port=port, description=f"{ip}:{port}"))
 
         self._results = []
+        self._stopping = False
         self._result_table.setRowCount(0)
         self._import_btn.setEnabled(False)
         self._open_label.setText("开放: 0")
@@ -254,12 +262,12 @@ class PortScanDialog(QDialog):
 
         self._worker = ScannerWorker(
             scan_targets,
-            timeout=float(self._timeout_spin.currentText()),
-            max_workers=int(self._workers_spin.currentText()),
+            timeout=self._timeout_spin.value(),
+            max_workers=self._workers_spin.value(),
         )
         self._worker.progress.connect(self._on_progress)
-        self._worker.finished_all.connect(self._scan_done)
         self._worker.error_occurred.connect(self._on_error)
+        self._worker.finished.connect(self._scan_done)
         self._worker.start()
 
     def _on_progress(self, current: int, total: int, result: ScanResult):
@@ -301,9 +309,15 @@ class PortScanDialog(QDialog):
 
     def _scan_done(self, results=None):
         self._scan_btn.setText("▶ 开始扫描")
+        self._scan_btn.setEnabled(True)
         self._progress_bar.setVisible(False)
-        self._progress_label.setText("")
+        self._progress_label.setText("已停止" if self._stopping else "扫描完成")
+        if self._worker:
+            self._worker.deleteLater()
         self._worker = None
+        if self._close_when_finished:
+            self.reject()
+            return
 
         open_count = sum(1 for r in self._results if r.success)
         if open_count > 0:
@@ -311,8 +325,23 @@ class PortScanDialog(QDialog):
             self._import_btn.setText(f"导入 {open_count} 个开放端口 →")
 
     def _on_error(self, error_msg: str):
-        self._scan_done()
         QMessageBox.critical(self, "扫描错误", f"扫描过程发生错误:\n{error_msg}")
+
+    def closeEvent(self, event):
+        """等待扫描线程自然退出，避免关闭窗口时销毁仍在运行的 QThread。"""
+        if self._worker and self._worker.isRunning():
+            self._close_when_finished = True
+            self._toggle_scan()
+            event.ignore()
+            return
+        super().closeEvent(event)
+
+    def reject(self):
+        if self._worker and self._worker.isRunning():
+            self._close_when_finished = True
+            self._toggle_scan()
+            return
+        super().reject()
 
     # ── 导入结果 ───────────────────────────────────────────
 

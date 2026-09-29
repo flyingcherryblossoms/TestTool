@@ -59,13 +59,14 @@ def expand_ip_range(ip_spec: str) -> list[str]:
     if "/" in ip_spec:
         try:
             network = ipaddress.ip_network(ip_spec, strict=False)
-            # 限制最多展开 65536 个地址
-            hosts = list(network.hosts())
-            if len(hosts) > 65536:
-                raise ValueError(f"IP 范围过大 ({len(hosts)} 个地址)，最多支持 65536 个")
-            return [str(ip) for ip in hosts]
-        except ValueError:
-            pass
+        except ValueError as e:
+            raise ValueError(f"无效的 CIDR 网段: {e}") from e
+        host_count = network.num_addresses
+        if network.version == 4 and network.prefixlen < 31:
+            host_count -= 2
+        if host_count > 65536:
+            raise ValueError(f"IP 范围过大 ({host_count} 个地址)，最多支持 65536 个")
+        return [str(ip) for ip in network.hosts()]
 
     # 范围格式: 192.168.1.1-192.168.1.10 或 192.168.1.1-10
     if "-" in ip_spec:
@@ -123,20 +124,17 @@ def expand_port_range(port_spec: str) -> list[int]:
                 raise ValueError(f"无效的端口范围: {part}")
             if start > end:
                 start, end = end, start
-            if end - start + 1 > 65536:
-                raise ValueError(f"端口范围过大: {part}")
-            for p in range(start, end + 1):
-                if 1 <= p <= 65535:
-                    ports.add(p)
+            if not (1 <= start <= 65535 and 1 <= end <= 65535):
+                raise ValueError(f"端口超出范围: {part}")
+            ports.update(range(start, end + 1))
         else:
             try:
                 p = int(part)
-                if 1 <= p <= 65535:
-                    ports.add(p)
-                else:
-                    raise ValueError(f"端口超出范围: {p}")
-            except ValueError:
+            except ValueError as e:
                 raise ValueError(f"无效的端口: {part}")
+            if not 1 <= p <= 65535:
+                raise ValueError(f"端口超出范围: {p}")
+            ports.add(p)
     if not ports:
         raise ValueError("端口规格为空")
     return sorted(ports)
@@ -202,17 +200,22 @@ def scan_targets_sync(targets: list[ScanTarget], timeout: float = 3.0,
     results: list[ScanResult] = []
     total = len(targets)
     completed = 0
-    skipped = 0
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_target = {}
         for t in targets:
             if cancel_event and cancel_event.is_set():
-                skipped += 1
-                continue
+                break
             future_to_target[executor.submit(test_tcp_connect, t.ip, t.port, timeout)] = t
 
+        cancelled_pending = False
         for future in as_completed(future_to_target):
+            if cancel_event and cancel_event.is_set():
+                if not cancelled_pending:
+                    for pending in future_to_target:
+                        pending.cancel()
+                    cancelled_pending = True
+                continue
             target = future_to_target[future]
             try:
                 success, latency, error = future.result(timeout=timeout + 2)
@@ -234,7 +237,7 @@ def scan_targets_sync(targets: list[ScanTarget], timeout: float = 3.0,
             completed += 1
             if progress_callback:
                 try:
-                    progress_callback(completed + skipped, total, result)
+                    progress_callback(completed, total, result)
                 except Exception:
                     pass  # 回调异常不影响检测
 
