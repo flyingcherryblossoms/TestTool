@@ -493,6 +493,7 @@ class ClientPanelBase(QWidget):
         sh.addWidget(self._send_edit.format_combo)
         self._send_btn = QPushButton("发送")
         self._send_btn.setMinimumWidth(80)
+        self._send_btn.setStyleSheet("background-color: #19689e; color: white; font-weight: bold;")
         self._send_btn.clicked.connect(self._send_message)
         sh.addWidget(self._send_btn)
         self._terminate_btn = QPushButton("终止")
@@ -511,13 +512,10 @@ class ClientPanelBase(QWidget):
         self._clear_btn = QPushButton("清空", clicked=self._send_edit.clear)
         sh2.addWidget(self._clear_btn)
         self._conn_test_btn = QPushButton("连通测试", clicked=self._run_connectivity_test)
-        self._conn_test_btn.setStyleSheet("background-color: #19689e; color: white; font-weight: bold;")
         sh2.addWidget(self._conn_test_btn)
         # 压力测试：点击展开/收起下方隐藏的压测参数区
         self._stress_toggle_btn = QPushButton("压力测试")
         self._stress_toggle_btn.setCheckable(True)
-        self._stress_toggle_btn.setStyleSheet(
-            "background-color: #a82d26; color: white; font-weight: bold;")
         self._stress_toggle_btn.toggled.connect(self._toggle_stress_area)
         sh2.addWidget(self._stress_toggle_btn)
         sh2.addStretch()
@@ -670,7 +668,9 @@ class ClientPanelBase(QWidget):
         layout.addWidget(v_splitter)
 
         # 快捷键（集中注册，可在设置中修改）
-        self._ctrl_s_shortcut = shortcuts.make_shortcut(self, "save", self._on_ctrl_s)
+        self._ctrl_s_shortcut = shortcuts.make_shortcut(
+            self, "save", self._on_ctrl_s,
+            context=Qt.WidgetWithChildrenShortcut)
         # 发送按钮绑定 Ctrl+Enter：焦点在客户端面板内任意子控件即触发
         self._send_shortcut = shortcuts.make_shortcut(
             self, "send", self._send_message,
@@ -1740,7 +1740,6 @@ class ServerPanelBase(QWidget):
         self._http_workers: dict[int, HttpServerWorker] = {}
         self._servers: list = []          # 当前加载的服务端
         self._logs: dict[int, QPlainTextEdit] = {}
-        self._log_tab_to_sid: dict[int, int] = {}
         self._send: dict[int, str] = {}
         self._recv: dict[int, str] = {}
         self._hex: dict[int, bool] = {}
@@ -2021,91 +2020,46 @@ class ServerPanelBase(QWidget):
 
     # ── 启停 + 日志 ──────────────────────────────────────────
 
+    def _log_tab_index(self, sid: int) -> int:
+        """按服务端 ID 查找日志页，避免关闭其他页后索引失效。"""
+        for idx in range(self._log_tabs.count()):
+            if self._log_tabs.widget(idx).property("server_id") == sid:
+                return idx
+        return -1
+
     def _toggle_server(self, srv, _checked=None):
         from src.database import ProtocolServer
         s: ProtocolServer = srv
         st = s.server_type
         workers = self._workers_for_type(st)
+        # 启动失败后 finished 信号可能尚未进入主线程事件队列。
+        if s.id in workers and workers[s.id].isFinished():
+            workers.pop(s.id)
         if s.id in workers:
             w = workers.pop(s.id); w.stop_server()
             self._log_to_server(s.id, f"Stop [{s.name}] {s.ip}:{s.port}")
-            for tab_idx, sid in list(self._log_tab_to_sid.items()):
-                if sid == s.id:
-                    self._log_tabs.removeTab(tab_idx)
-                    del self._log_tab_to_sid[tab_idx]
-                    # 清除临时日志数据，保留编码值以便重启后复用
-                    self._logs.pop(s.id, None)
-                    self._recv_raw.pop(s.id, None)
-                    self._status.pop(s.id, None)
-                    self._addr.pop(s.id, None)
-                    self._send_combos.pop(s.id, None)
-                    self._recv_combos.pop(s.id, None)
-                    self._hex_toggles.pop(s.id, None)
-                    break
+            tab_idx = self._log_tab_index(s.id)
+            if tab_idx >= 0:
+                self._log_tabs.removeTab(tab_idx)
+            # 清除临时日志数据，保留编码值以便重启后复用
+            self._logs.pop(s.id, None)
+            self._recv_raw.pop(s.id, None)
+            self._status.pop(s.id, None)
+            self._addr.pop(s.id, None)
+            self._send_combos.pop(s.id, None)
+            self._recv_combos.pop(s.id, None)
+            self._hex_toggles.pop(s.id, None)
         else:
             if self._check_port_conflict(s):
                 return
-            tab_w = QWidget()
-            tab_layout = QVBoxLayout(tab_w)
-            tab_layout.setContentsMargins(4, 4, 4, 4)
-            tab_tool = QHBoxLayout()
-            is_tcp_srv = st == "tcp_server"
-            if is_tcp_srv:
-                send_combo = QComboBox()
-                send_combo.setEditable(True)
-                send_combo.addItems(ENCODINGS)
-                send_combo.setCurrentText(self._send.get(s.id, s.encoding or "UTF-8"))
-                recv_combo = QComboBox()
-                recv_combo.setEditable(True)
-                recv_combo.addItems(ENCODINGS)
-                recv_combo.setCurrentText(self._recv.get(s.id, s.recv_encoding or "UTF-8"))
-                tab_tool.addWidget(QLabel("发送编码:"))
-                tab_tool.addWidget(send_combo)
-                tab_tool.addWidget(QLabel("接收编码:"))
-                tab_tool.addWidget(recv_combo)
+            tab_idx = self._log_tab_index(s.id)
+            if tab_idx >= 0:
+                self._log_tabs.setCurrentIndex(tab_idx)
+                self._addr[s.id] = f"{s.ip}:{s.port}"
+                self._log_to_server(s.id, f"Start [{s.name}] {s.ip}:{s.port}")
             else:
-                send_combo = None
-                recv_combo = QComboBox()
-                recv_combo.setEditable(True)
-                recv_combo.addItems(ENCODINGS)
-                recv_combo.setCurrentText(self._recv.get(s.id, "UTF-8"))
-                tab_tool.addWidget(QLabel("编码:"))
-                tab_tool.addWidget(recv_combo)
-            hex_toggle = QPushButton("十六进制")
-            hex_toggle.setCheckable(True)
-            hex_toggle.setChecked(self._hex.get(s.id, False))
-            tab_tool.addWidget(hex_toggle)
-            tab_tool.addStretch()
-            tab_tool.addWidget(QPushButton(
-                "清空", clicked=lambda _checked=False, sid=s.id: self._clear_log(sid)))
-            tab_layout.addLayout(tab_tool)
-            log_w = QPlainTextEdit()
-            log_w.setReadOnly(True)
-            log_w.setMaximumBlockCount(self._log_block_cap())
-            tab_layout.addWidget(log_w)
-            if send_combo is not None:
-                send_combo.currentTextChanged.connect(
-                    lambda text=None, sid=s.id, cb=send_combo: self._on_send_changed(sid, cb))
-            recv_combo.currentTextChanged.connect(
-                lambda text=None, sid=s.id, cb=recv_combo: self._on_recv_changed(sid, cb))
-            hex_toggle.toggled.connect(
-                lambda checked=None, sid=s.id, btn=hex_toggle: self._on_hex_changed(sid, btn))
-            tab_idx = self._log_tabs.addTab(tab_w, f"{s.name}:{s.port}")
-            self._log_tabs.setCurrentIndex(tab_idx)
-            self._logs[s.id] = log_w
-            self._log_tab_to_sid[tab_idx] = s.id
-            if send_combo is not None:
-                self._send_combos[s.id] = send_combo
-                self._send[s.id] = send_combo.currentText()
-            self._recv_combos[s.id] = recv_combo
-            self._hex_toggles[s.id] = hex_toggle
-            self._recv[s.id] = recv_combo.currentText()
-            self._hex[s.id] = hex_toggle.isChecked()
-            self._recv_raw.setdefault(s.id, b"")
-            self._status.setdefault(s.id, [])
-            self._addr[s.id] = f"{s.ip}:{s.port}"
-            self._log_to_server(s.id, f"Start [{s.name}] {s.ip}:{s.port}")
-            if is_tcp_srv:
+                self._create_log_tab(s)
+            if st == "tcp_server":
                 w = TcpServerWorker(server_id=s.id, ip=s.ip, port=s.port,
                                     encoding=self._send.get(s.id, s.encoding or "UTF-8"),
                                     recv_encoding=self._recv.get(s.id, s.recv_encoding or "UTF-8"),
@@ -2135,9 +2089,74 @@ class ServerPanelBase(QWidget):
                 w.message_received_raw.connect(partial(self._on_srv_msg_raw, s.id))
             w.status_changed.connect(partial(self._log_to_server, s.id))
             w.error_occurred.connect(lambda err, sid=s.id: self._log_to_server(sid, f"[ERR] {err}"))
-            w.finished.connect(partial(self._on_worker_finished, st, s.id))
+            w.finished.connect(lambda worker=w, kind=st, sid=s.id:
+                               self._on_worker_finished(kind, sid, worker))
             workers[s.id] = w; w.start()
         self._refresh()
+
+    def _create_log_tab(self, s):
+        """首次启动时创建服务端日志页。"""
+        st = s.server_type
+        tab_w = QWidget()
+        tab_w.setProperty("server_id", s.id)
+        tab_layout = QVBoxLayout(tab_w)
+        tab_layout.setContentsMargins(4, 4, 4, 4)
+        tab_tool = QHBoxLayout()
+        is_tcp_srv = st == "tcp_server"
+        if is_tcp_srv:
+            send_combo = QComboBox()
+            send_combo.setEditable(True)
+            send_combo.addItems(ENCODINGS)
+            send_combo.setCurrentText(self._send.get(s.id, s.encoding or "UTF-8"))
+            recv_combo = QComboBox()
+            recv_combo.setEditable(True)
+            recv_combo.addItems(ENCODINGS)
+            recv_combo.setCurrentText(self._recv.get(s.id, s.recv_encoding or "UTF-8"))
+            tab_tool.addWidget(QLabel("发送编码:"))
+            tab_tool.addWidget(send_combo)
+            tab_tool.addWidget(QLabel("接收编码:"))
+            tab_tool.addWidget(recv_combo)
+        else:
+            send_combo = None
+            recv_combo = QComboBox()
+            recv_combo.setEditable(True)
+            recv_combo.addItems(ENCODINGS)
+            recv_combo.setCurrentText(self._recv.get(s.id, "UTF-8"))
+            tab_tool.addWidget(QLabel("编码:"))
+            tab_tool.addWidget(recv_combo)
+        hex_toggle = QPushButton("十六进制")
+        hex_toggle.setCheckable(True)
+        hex_toggle.setChecked(self._hex.get(s.id, False))
+        tab_tool.addWidget(hex_toggle)
+        tab_tool.addStretch()
+        tab_tool.addWidget(QPushButton(
+            "清空", clicked=lambda _checked=False, sid=s.id: self._clear_log(sid)))
+        tab_layout.addLayout(tab_tool)
+        log_w = QPlainTextEdit()
+        log_w.setReadOnly(True)
+        log_w.setMaximumBlockCount(self._log_block_cap())
+        tab_layout.addWidget(log_w)
+        if send_combo is not None:
+            send_combo.currentTextChanged.connect(
+                lambda text=None, sid=s.id, cb=send_combo: self._on_send_changed(sid, cb))
+        recv_combo.currentTextChanged.connect(
+            lambda text=None, sid=s.id, cb=recv_combo: self._on_recv_changed(sid, cb))
+        hex_toggle.toggled.connect(
+            lambda checked=None, sid=s.id, btn=hex_toggle: self._on_hex_changed(sid, btn))
+        tab_idx = self._log_tabs.addTab(tab_w, f"{s.name}:{s.port}")
+        self._log_tabs.setCurrentIndex(tab_idx)
+        self._logs[s.id] = log_w
+        if send_combo is not None:
+            self._send_combos[s.id] = send_combo
+            self._send[s.id] = send_combo.currentText()
+        self._recv_combos[s.id] = recv_combo
+        self._hex_toggles[s.id] = hex_toggle
+        self._recv[s.id] = recv_combo.currentText()
+        self._hex[s.id] = hex_toggle.isChecked()
+        self._recv_raw.setdefault(s.id, b"")
+        self._status.setdefault(s.id, [])
+        self._addr[s.id] = f"{s.ip}:{s.port}"
+        self._log_to_server(s.id, f"Start [{s.name}] {s.ip}:{s.port}")
 
     def _log_to_server(self, sid: int, text: str):
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -2229,12 +2248,17 @@ class ServerPanelBase(QWidget):
                 parts.append(decoded)
             log.setPlainText("\n".join(parts))
 
-    def _on_worker_finished(self, st: str, sid: int):
-        self._workers_for_type(st).pop(sid, None)
+    def _on_worker_finished(self, st: str, sid: int, worker):
+        workers = self._workers_for_type(st)
+        if workers.get(sid) is worker:
+            workers.pop(sid)
         self._refresh()
 
     def _on_log_tab_close(self, idx: int):
-        sid = self._log_tab_to_sid.pop(idx, None)
+        tab = self._log_tabs.widget(idx)
+        if tab is None:
+            return
+        sid = tab.property("server_id")
         # 清除临时日志数据，保留编码值以便重启后复用
         self._recv_raw.pop(sid, None)
         self._status.pop(sid, None)
@@ -2250,16 +2274,7 @@ class ServerPanelBase(QWidget):
                     w.stop_server()
                     break
             self._logs.pop(sid, None)
-        if idx >= 0:
-            self._log_tabs.removeTab(idx)
-        # 重建索引映射
-        self._log_tab_to_sid = {}
-        for i in range(self._log_tabs.count()):
-            w = self._log_tabs.widget(i)
-            for _sid, _log in list(self._logs.items()):
-                if _log == w:
-                    self._log_tab_to_sid[i] = _sid
-                    break
+        self._log_tabs.removeTab(idx)
         self._refresh()
 
     # ── 增删改 ───────────────────────────────────────────────
@@ -2438,19 +2453,17 @@ class ServerPanelBase(QWidget):
                 w = workers.pop(sid, None)
                 if w:
                     w.stop_server()
-                    for tab_idx, tsid in list(self._log_tab_to_sid.items()):
-                        if tsid == sid:
-                            self._log_tabs.removeTab(tab_idx)
-                            del self._log_tab_to_sid[tab_idx]
-                            # 清除临时日志数据，保留编码值
-                            self._logs.pop(sid, None)
-                            self._recv_raw.pop(sid, None)
-                            self._status.pop(sid, None)
-                            self._addr.pop(sid, None)
-                            self._send_combos.pop(sid, None)
-                            self._recv_combos.pop(sid, None)
-                            self._hex_toggles.pop(sid, None)
-                            break
+                    tab_idx = self._log_tab_index(sid)
+                    if tab_idx >= 0:
+                        self._log_tabs.removeTab(tab_idx)
+                    # 清除临时日志数据，保留编码值
+                    self._logs.pop(sid, None)
+                    self._recv_raw.pop(sid, None)
+                    self._status.pop(sid, None)
+                    self._addr.pop(sid, None)
+                    self._send_combos.pop(sid, None)
+                    self._recv_combos.pop(sid, None)
+                    self._hex_toggles.pop(sid, None)
                     break
         self._refresh()
 
@@ -2526,5 +2539,7 @@ class ServerPanelBase(QWidget):
             self._refresh()
         elif shortcuts.event_matches(event, "delete"):
             self._delete_selected_servers()
+        elif shortcuts.event_matches(event, "save"):
+            self._response_section._save()
         else:
             super().keyPressEvent(event)
