@@ -2,28 +2,38 @@
 
 from __future__ import annotations
 
-from PySide6.QtGui import QAction
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence
 from PySide6.QtWidgets import (
+    QApplication,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
     QMessageBox,
     QStatusBar,
+    QTableWidget,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from src.database import Database
+from src import __version__
 from src.ui import shortcuts
 from src.ui.connectivity_panel import ConnectivityPanel
 from src.ui.csp_parser_dialog import CspParserDialog
 from src.ui.port_scan_dialog import PortScanDialog
 from src.ui.protocol_panel import ProtocolPanel
 from src.ui.shortcut_settings_dialog import ShortcutSettingsDialog
+from src.ui.scaling import (
+    UIScaleManager, MIN_SCALE_PERCENT, MAX_SCALE_PERCENT, SCALE_STEP,
+)
+from src.ui.theme import THEMES, apply_theme
+from src.ui.table_utils import fit_table_buttons
 
 
 class CollectionDialog(QDialog):
@@ -65,26 +75,27 @@ class MainWindow(QMainWindow):
     def __init__(self, db_path: str = ""):
         super().__init__()
         self._db = Database(db_path)
+        app = QApplication.instance()
+        self._scale_manager = UIScaleManager(app, self._db)
+        self._ui_scale_percent = self._scale_manager.percent
+        self._theme = apply_theme(app, self._db.get_setting("theme", "light"),
+                                  self._ui_scale_percent)
         # 先加载快捷键绑定，面板创建时即读到已存配置
         shortcuts.load(self._db)
         self.setWindowTitle("测试工具")
-        self.setMinimumSize(1100, 700)
-        self.resize(1300, 850)
+        screen = QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen else None
+        max_width = max(640, available.width() - 40) if available else 1300
+        max_height = max(480, available.height() - 40) if available else 850
+        self.setMinimumSize(min(1100, max_width), min(700, max_height))
+        self.resize(min(1300, max_width), min(850, max_height))
 
-        self.setStyleSheet("""
-            QTableWidget::item:selected, QTreeWidget::item:selected,
-            QListWidget::item:selected {
-                background-color: #3498db; color: white;
-            }
-            QTableWidget::item:selected:!active, QTreeWidget::item:selected:!active,
-            QListWidget::item:selected:!active {
-                background-color: #5dade2; color: white;
-            }
-        """)
         self._setup_menu()
         self._setup_ui()
         self._setup_statusbar()
         self._update_statusbar()
+        self._scale_manager.set_shortcut_handler(self._handle_scale_shortcut)
+        self._scale_manager.apply_widget(self, resize_window=True)
 
     # ── 菜单栏 ─────────────────────────────────────────────
 
@@ -104,24 +115,115 @@ class MainWindow(QMainWindow):
         exit_action.triggered.connect(self.close)
         tools_menu.addAction(exit_action)
 
-        # 设置：作为菜单栏项插在「帮助」左侧
-        settings_action = QAction("设置(&S)", self)
-        settings_action.triggered.connect(self._open_shortcut_settings)
+        settings_menu = menubar.addMenu("设置(&S)")
+        shortcut_action = QAction("快捷键...", self)
+        shortcut_action.triggered.connect(self._open_shortcut_settings)
+        settings_menu.addAction(shortcut_action)
+        theme_menu = settings_menu.addMenu("主题")
+        self._theme_actions = QActionGroup(self)
+        for name, title in (
+            ("light", "浅色（增强区分）"), ("light_original", "经典浅色"),
+            ("dark", "暗色"),
+            ("high_contrast", "高对比度"),
+        ):
+            action = QAction(title, self)
+            action.setCheckable(True)
+            action.setData(name)
+            action.setChecked(name == self._theme)
+            self._theme_actions.addAction(action)
+            theme_menu.addAction(action)
+        self._theme_actions.triggered.connect(self._change_theme)
+
+        settings_menu.addSeparator()
+        self._scale_action = QAction(f"界面缩放（{self._ui_scale_percent}%）...", self)
+        self._scale_action.triggered.connect(self._change_ui_scale)
+        settings_menu.addAction(self._scale_action)
+        for attr, title, action_id, slot in (
+            ("_zoom_in_action", "放大界面", "zoom_in", lambda: self._step_ui_scale(1)),
+            ("_zoom_out_action", "缩小界面", "zoom_out", lambda: self._step_ui_scale(-1)),
+            ("_zoom_reset_action", "恢复 100%", "zoom_reset", lambda: self._apply_ui_scale(100)),
+        ):
+            action = QAction(title, self)
+            action.setShortcutContext(Qt.WidgetShortcut)
+            action.triggered.connect(slot)
+            settings_menu.addAction(action)
+            setattr(self, attr, action)
+        self._update_scale_shortcuts()
 
         help_menu = menubar.addMenu("帮助(&H)")
         about_action = QAction("关于", self)
         about_action.triggered.connect(self._show_about)
         help_menu.addAction(about_action)
 
-        menubar.insertAction(help_menu.menuAction(), settings_action)
+
+    def _change_theme(self, action: QAction):
+        name = action.data()
+        if name in THEMES:
+            self._theme = apply_theme(QApplication.instance(), name, self._ui_scale_percent)
+            self._db.set_setting("theme", name)
+            self._refresh_button_rows()
+
+    def _refresh_button_rows(self):
+        for window in QApplication.topLevelWidgets():
+            for table in window.findChildren(QTableWidget):
+                fit_table_buttons(table, self._ui_scale_percent)
+
+    def _update_scale_shortcuts(self):
+        for action, action_id in (
+            (self._zoom_in_action, "zoom_in"),
+            (self._zoom_out_action, "zoom_out"),
+            (self._zoom_reset_action, "zoom_reset"),
+        ):
+            action.setShortcuts([QKeySequence(key) for key in shortcuts.current(action_id)])
+
+    def _step_ui_scale(self, direction: int):
+        current = self._ui_scale_percent
+        if direction > 0:
+            percent = (current // SCALE_STEP + 1) * SCALE_STEP
+        else:
+            percent = ((current - 1) // SCALE_STEP) * SCALE_STEP
+        self._apply_ui_scale(percent)
+
+    def _handle_scale_shortcut(self, action_id: str):
+        if action_id == "zoom_in":
+            self._step_ui_scale(1)
+        elif action_id == "zoom_out":
+            self._step_ui_scale(-1)
+        else:
+            self._apply_ui_scale(100)
+
+    def _apply_ui_scale(self, percent: int):
+        percent = max(MIN_SCALE_PERCENT, min(MAX_SCALE_PERCENT, percent))
+        if percent == self._ui_scale_percent:
+            return
+        self._ui_scale_percent = percent
+        self._db.set_setting("ui_scale_percent", str(percent))
+        self._scale_manager.set_percent(percent)
+        apply_theme(QApplication.instance(), self._theme, percent)
+        self._refresh_button_rows()
+        self._scale_action.setText(f"界面缩放（{percent}%）...")
+
+    def _change_ui_scale(self):
+        percent, accepted = QInputDialog.getInt(
+            self, "界面缩放", "缩放比例（%，立即生效）:",
+            self._ui_scale_percent, MIN_SCALE_PERCENT, MAX_SCALE_PERCENT, 5
+        )
+        if accepted:
+            self._apply_ui_scale(percent)
 
     def _open_shortcut_settings(self):
         """打开快捷键设置对话框，保存后热更新全部快捷键。"""
         dlg = ShortcutSettingsDialog(self._db, self)
-        if dlg.exec() == QDialog.Accepted:
+        self._scale_manager.shortcuts_enabled = False
+        try:
+            accepted = dlg.exec() == QDialog.Accepted
+        finally:
+            self._scale_manager.shortcuts_enabled = True
+        if accepted:
             shortcuts.save(self._db, dlg.shortcuts)
             shortcuts.set_active(dlg.shortcuts)
             shortcuts.apply_shortcuts()
+            self._update_scale_shortcuts()
 
     # ── 主布局 ─────────────────────────────────────────────
 
@@ -190,7 +292,7 @@ class MainWindow(QMainWindow):
     def _show_about(self):
         QMessageBox.about(
             self, "关于 TestTool",
-            "<h3>TestTool v1.0</h3>"
+            f"<h3>TestTool v{__version__}</h3>"
             "<p>网络测试工具 —— 连通性检测 & 协议测试</p>"
             "<p>基于 Python + PySide6 + SQLite 构建</p>"
             "<p><a href='https://github.com/flyingcherryblossoms/TestTool'>"
@@ -201,6 +303,7 @@ class MainWindow(QMainWindow):
         dlg = PortScanDialog(self._db, parent=self)
         if dlg.exec() == QDialog.Accepted:
             self._conn_panel.refresh_collection_list()
+            self._update_statusbar()
 
     def _open_csp_parser(self):
         """打开 CSP 报文解析对话框。"""
@@ -260,5 +363,9 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 return
             self._conn_panel.stop_test()
+            # 退出应用前确保扫描线程已结束，避免销毁仍在运行的 QThread。
+            worker = self._conn_panel._test_panel._worker
+            if worker and worker.isRunning():
+                worker.wait()
             self._proto_panel.stop_all_servers()
         event.accept()

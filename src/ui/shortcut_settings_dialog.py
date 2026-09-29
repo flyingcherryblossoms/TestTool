@@ -24,7 +24,9 @@ from PySide6.QtWidgets import (
 )
 
 from src.ui import shortcuts
-from src.ui.table_utils import enable_fill_autofit, refresh_tooltips
+from src.ui.table_utils import (
+    enable_fill_autofit, fit_table_buttons, refresh_tooltips, set_button_cell,
+)
 
 _PLACEHOLDER = "按下新快捷键…（Esc 取消 / Backspace 清空）"
 
@@ -96,9 +98,10 @@ class ShortcutSettingsDialog(QDialog):
             self._refresh_cell(row)
             btn = QPushButton("恢复默认")
             btn.clicked.connect(lambda _=False, r=row: self._reset_row(r))
-            self._table.setCellWidget(row, 2, btn)
+            set_button_cell(self._table, row, 2, btn)
         # 功能列按内容自适应（最长功能名决定列宽），快捷键列保持填满剩余宽度
         self._table.resizeColumnToContents(0)
+        fit_table_buttons(self._table)
         refresh_tooltips(self._table)
 
     def _refresh_cell(self, row: int):

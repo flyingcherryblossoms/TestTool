@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 
-from PySide6.QtCore import Qt, QSettings, QTimer, Signal
+from PySide6.QtCore import Qt, QSettings, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -1037,6 +1037,8 @@ class TargetMockServerPanel(ServerPanelBase):
 class _TargetDetailPanel(QWidget):
     """单个目标详情：客户端 / Mock服务端 / 测试历史。"""
 
+    CLIENT_MIN_WIDTH = 620
+
     target_updated = Signal()
     test_finished = Signal()
     config_dirty_changed = Signal(bool)
@@ -1062,10 +1064,10 @@ class _TargetDetailPanel(QWidget):
         # 左右并排：客户端(左) | Mock服务端(右)，可拖动分隔条调整比例、可收起/展开服务端
         self._split_h = QSplitter(Qt.Horizontal)
         self._split_h.setChildrenCollapsible(True)
-        self._split_h.splitterMoved.connect(self._on_splitter_moved)
-        # 忽略面板自身的宽度 sizeHint，允许自由调整两半比例
+        # 忽略面板自身的 sizeHint，但保留按钮完整显示所需的最小宽度。
+        # QSplitter 会在最小宽度与完全收起之间切换，不再挤压客户端控件。
         self._client_panel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
-        self._client_panel.setMinimumWidth(0)
+        self._client_panel.setMinimumWidth(self.CLIENT_MIN_WIDTH)
         self._server_panel.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         self._server_panel.setMinimumWidth(0)
         self._split_h.addWidget(self._client_panel)
@@ -1073,9 +1075,6 @@ class _TargetDetailPanel(QWidget):
         self._split_h.setSizes([900, 0])
         self._server_collapsed = True
         self._client_collapsed = False
-        self._size_check_timer = QTimer(self)
-        self._size_check_timer.setSingleShot(True)
-        self._size_check_timer.timeout.connect(self._check_splitter_sizes)
         # 服务端默认关闭，按钮同步
         if hasattr(self._client_panel, '_server_toggle_btn'):
             self._client_panel._server_toggle_btn.setChecked(False)
@@ -1085,8 +1084,13 @@ class _TargetDetailPanel(QWidget):
         sp_layout.setContentsMargins(0, 0, 0, 0)
         top_bar = QHBoxLayout()
         top_bar.addStretch()
+        self._restore_client_btn = QPushButton("显示客户端")
+        self._restore_client_btn.setVisible(False)
+        self._restore_client_btn.clicked.connect(self._restore_client_panel)
+        top_bar.addWidget(self._restore_client_btn)
         sp_layout.addLayout(top_bar)
         sp_layout.addWidget(self._split_h)
+        self._split_h.splitterMoved.connect(self._on_splitter_moved)
 
         self._tabs = QTabWidget()
         self._tabs.addTab(self._split_page, "客户端/Mock服务端")
@@ -1099,20 +1103,24 @@ class _TargetDetailPanel(QWidget):
         return fw is not None and widget.isAncestorOf(fw)
 
     def _on_splitter_moved(self, pos, index):
-        """拖拽分隔条后延迟检查尺寸。"""
-        self._size_check_timer.start(50)
+        """同步拖拽后的收起状态和恢复入口。"""
+        self._sync_splitter_state()
 
-    def _check_splitter_sizes(self):
-        """拖拽结束：客户端低于 80px 阈值时自动隐藏。"""
+    def _sync_splitter_state(self):
         sizes = self._split_h.sizes()
         if len(sizes) < 2:
             return
-        total = sum(sizes)
-        if sizes[0] <= 80 and sizes[0] > 0 and not self._client_collapsed:
-            self._client_collapsed = True
-            self._split_h.setSizes([0, total])
-        elif sizes[0] > 80 and self._client_collapsed:
-            self._client_collapsed = False
+        self._client_collapsed = sizes[0] == 0
+        self._server_collapsed = sizes[1] == 0
+        self._restore_client_btn.setVisible(self._client_collapsed)
+        self._client_panel._server_toggle_btn.setChecked(not self._server_collapsed)
+
+    def _restore_client_panel(self):
+        """从 Mock 服务端页面恢复客户端到可用宽度。"""
+        total = sum(self._split_h.sizes())
+        client_width = max(self.CLIENT_MIN_WIDTH, total // 2)
+        self._split_h.setSizes([client_width, max(0, total - client_width)])
+        self._sync_splitter_state()
 
     def toggle_server_collapsed(self):
         """收起/展开右侧的 Mock服务端 面板。"""
@@ -1126,9 +1134,7 @@ class _TargetDetailPanel(QWidget):
             self._client_collapsed = False
             self._split_h.setSizes([total // 2, total // 2])
         self._split_h.updateGeometry()
-        # 更新按钮选中状态
-        if hasattr(self._client_panel, '_server_toggle_btn'):
-            self._client_panel._server_toggle_btn.setChecked(not self._server_collapsed)
+        self._sync_splitter_state()
 
     # ── 预设辅助 ────────────────────────────────────────────
 
@@ -1619,12 +1625,12 @@ class _CollectionDetailTab(QWidget):
         tbl.addWidget(QPushButton("复制", clicked=self._copy_target))
         proto_test_btn = QPushButton("协议测试", clicked=self._on_test_target)
         proto_test_btn.setStyleSheet(
-            "QPushButton { color: #fff; background-color: #8e44ad; padding: 4px 12px; }"
-            "QPushButton:hover { background-color: #9b59b6; }"
+            "QPushButton { color: #fff; background-color: #71338e; padding: 4px 12px; }"
+            "QPushButton:hover { background-color: #7c4198; }"
         )
         tbl.addWidget(proto_test_btn)
         conn_btn = QPushButton("连通测试", clicked=self._on_connectivity_test_requested)
-        conn_btn.setStyleSheet("background-color: #3498db; color: white; font-weight: bold;")
+        conn_btn.setStyleSheet("background-color: #19689e; color: white; font-weight: bold;")
         tbl.addWidget(conn_btn)
         tbl.addStretch()
         layout.addLayout(tbl)

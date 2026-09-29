@@ -47,6 +47,7 @@ class TestPanel(QWidget):
         super().__init__(parent)
         self._db = db
         self._worker: ScannerWorker | None = None
+        self._stopping = False
         self._session_id: int | None = None
         self._total = 0
         self._success_count = 0
@@ -278,6 +279,7 @@ class TestPanel(QWidget):
     def _run_test(self, scan_targets: list[ScanTarget]):
         """通用测试启动逻辑。"""
         self._total = len(scan_targets)
+        self._stopping = False
         self._success_count = 0
         self._fail_count = 0
         self._all_results = []
@@ -305,13 +307,26 @@ class TestPanel(QWidget):
     def _cancel_test(self):
         """取消测试。"""
         if self._worker:
+            self._stopping = True
             self._worker.cancel()
-            self._worker.wait(10000)
-        self._finalize_ui()
-        self._status_label.setText("测试已取消")
+            self._test_btn.setEnabled(False)
+            self._status_label.setText("正在停止测试…")
 
     def _on_worker_finished(self):
         """QThread 结束后安全清理引用。"""
+        if self._stopping:
+            self._flush_db_batch()
+            if self._session_id is not None:
+                self._db.complete_test_session(
+                    self._session_id, self._success_count + self._fail_count,
+                    self._success_count, self._fail_count
+                )
+            self._finalize_ui()
+            self._test_btn.setEnabled(True)
+            self._status_label.setText(
+                f"测试已停止，已完成 {self._success_count + self._fail_count}/{self._total} 个目标"
+            )
+            self.test_finished.emit()
         if self._worker:
             self._worker.deleteLater()
             self._worker = None
