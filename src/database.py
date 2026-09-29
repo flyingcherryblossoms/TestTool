@@ -408,7 +408,7 @@ def target_display_info(target: ProtocolTarget) -> dict:
                     "timeout": timeout,
                     "ws_timeout": timeout,
                     "ws_url": ws_url,
-                    "ws_ssl": cfg.get("ws_ssl", False),
+                    "ws_ssl": cfg.get("ws_ssl", cfg.get("ws_use_ssl", False)),
                     "send_message": cfg.get("send_message", ""),
                     "url": cfg.get("url", ""),
                     "http_method": cfg.get("method", "GET"),

@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
     QStackedWidget,
     QVBoxLayout,
@@ -33,6 +34,7 @@ from src.database import Database, default_response_messages, parse_server_respo
 from src.ui import shortcuts
 from src.ui.format_text import FormatTextEdit
 from src.ui.http_client import _CompactKvTable
+from src.ui.message_format import format_payload
 
 
 class ResponseMessageSection(QWidget):
@@ -90,7 +92,7 @@ class ResponseMessageSection(QWidget):
             row1.addWidget(btn)
         lv.addLayout(row1)
         row2 = QHBoxLayout()
-        save_btn = QPushButton("保存 (Ctrl+S)")
+        save_btn = QPushButton("保存")
         save_btn.clicked.connect(self._save)
         row2.addWidget(save_btn)
         row2.addStretch(1)
@@ -125,6 +127,10 @@ class ResponseMessageSection(QWidget):
         self._body = FormatTextEdit()
         self._body.textChanged.connect(self._mark_dirty)
         body_row.addWidget(self._body.format_combo)
+        format_btn = QPushButton("格式化", clicked=self._format_body)
+        format_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        body_row.addWidget(format_btn)
+        body_row.addStretch()
         ev.addLayout(body_row)
         ev.addWidget(self._body, 1)
         ed.addWidget(self._edit_widget, 1)
@@ -210,6 +216,18 @@ class ResponseMessageSection(QWidget):
         if not self._dirty:
             self._dirty = True
             self._update_item_label()
+
+    def _format_body(self):
+        """按选择的格式排版返回报文；TEXT 模式自动识别 JSON/XML。"""
+        if self._srv is None or self._sel_idx is None:
+            return
+        text = self._body.toPlainText()
+        fmt = self._body.current_format()
+        formatted, err = format_payload(text, "" if fmt == "text" else fmt)
+        if err:
+            QMessageBox.warning(self, "格式化", err)
+        elif formatted != text:
+            self._body.setPlainText(formatted)
 
     def _on_menu(self, pos):
         menu = QMenu(self)

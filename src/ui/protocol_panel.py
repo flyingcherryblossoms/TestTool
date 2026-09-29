@@ -80,28 +80,64 @@ from src.ui.protocol_components import (
 
 
 def _target_proto_label(target) -> str:
-    """根据目标参数推断实际协议类型。优先检查 send_presets 中的协议。"""
-    # 优先从 send_presets 推断
+    """类型列与其他展示字段统一使用当前生效的协议。"""
+    return {"tcp_client": "TCP", "ws_client": "WS",
+            "http_client": "HTTP"}.get(target_display_info(target)["proto"], "TCP")
+
+
+def _edited_target_presets(raw: str, old_proto: str, data: dict,
+                           changed_fields: set[str]) -> str:
+    """只更新编辑对话框修改的配置字段，保留原预设和报文内容。"""
     try:
-        sp = json.loads(target.send_presets) if target.send_presets else {}
+        presets = json.loads(raw) if raw else {}
     except (json.JSONDecodeError, TypeError):
-        sp = {}
-    if isinstance(sp, dict):
-        keys = [k for k in sp if sp[k]]  # 有预设的协议
-        if "http_client" in keys:
-            return "HTTP"
-        if "ws_client" in keys and "tcp_client" not in keys:
-            return "WS"
-        if keys:
-            return "TCP"  # 包含 tcp_client 或混合
-    # 回退：从 display_info 推断
-    info = target_display_info(target)
-    proto = info.get("proto", "tcp_client")
-    if proto == "http_client":
-        return "HTTP"
+        presets = {}
+    if isinstance(presets, list):
+        presets = {old_proto: presets}
+    elif not isinstance(presets, dict):
+        presets = {}
+
+    proto = data["proto"]
+    entries = presets.get(proto, [])
+    if not isinstance(entries, list):
+        entries = []
+    selected = None
+    config = {}
+    candidates = sorted(entries, key=lambda p: p.get("name") != DEFAULT_PRESET_NAME
+                        if isinstance(p, dict) else True)
+    for entry in candidates:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            parsed = json.loads(entry.get("message", ""))
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(parsed, dict):
+            selected, config = entry, parsed
+            break
+    if selected is None:
+        selected = {"name": DEFAULT_PRESET_NAME, "message": ""}
+        entries.insert(0, selected)
+
+    config["proto"] = proto
+    fields = set(data) if proto != old_proto else changed_fields
+    if proto == "tcp_client":
+        for key in ("ip", "port", "encoding", "recv_encoding", "head_length", "timeout"):
+            if key in fields:
+                config[key] = data[key]
     elif proto == "ws_client":
-        return "WS"
-    return "TCP"
+        for source, dest in (("ws_path", "ws_url"), ("ws_use_ssl", "ws_ssl"),
+                             ("timeout", "ws_timeout")):
+            if source in fields:
+                config[dest] = data[source]
+    else:
+        for source, dest in (("url", "url"), ("http_method", "method")):
+            if source in fields:
+                config[dest] = data[source]
+    selected["message"] = json.dumps(config, ensure_ascii=False)
+    presets[proto] = entries
+    presets["_active_proto"] = proto
+    return json.dumps(presets, ensure_ascii=False)
 
 
 def _normalize_import_presets(t: dict) -> str:
@@ -168,6 +204,7 @@ class _TargetDialog(QDialog):
                  timeout: float = 30.0, ws_path: str = "",
                  ws_use_ssl: bool = False, url: str = "",
                  http_method: str = "GET",
+                 proto: str | None = None,
                  parent=None):
         super().__init__(parent)
         self.setWindowTitle(title)
@@ -175,12 +212,9 @@ class _TargetDialog(QDialog):
         layout = QFormLayout(self)
 
         # 推断当前协议类型
-        if url:
-            self._proto_type = "http_client"
-        elif ws_path.startswith("ws"):
-            self._proto_type = "ws_client"
-        else:
-            self._proto_type = "tcp_client"
+        self._proto_type = proto or (
+            "http_client" if url else
+            "ws_client" if ws_path.startswith("ws") else "tcp_client")
 
         # ── 协议选择 ──
         self._proto_combo = QComboBox()
@@ -1015,9 +1049,8 @@ class TargetMockServerPanel(ServerPanelBase):
         return "请先停止选中的监听器再删除。"
 
     def _on_stop_all(self):
-        for tab_idx in list(self._log_tab_to_sid.keys()):
-            self._log_tabs.removeTab(tab_idx)
-        self._log_tab_to_sid.clear()
+        while self._log_tabs.count():
+            self._log_tabs.removeTab(0)
         # 清除临时日志数据，保留编码值以便重启后复用
         self._logs.clear()
         self._status.clear()
@@ -1550,6 +1583,9 @@ class _TargetDetailPanel(QWidget):
             else:
                 self._delete_hist_sessions()
         elif shortcuts.event_matches(event, "save"):
+            if self._focus_in(self._server_panel):
+                self._server_panel._response_section._save()
+                return
             cp = self._client_panel
             if cp._selected_preset_idx is not None:
                 cp._save_preset()
@@ -1808,11 +1844,15 @@ class _CollectionDetailTab(QWidget):
             # 构建默认预设配置
             if proto == "http_client":
                 cfg = {"method": http_method, "url": url, "proto": proto}
-                preset_msg = json.dumps(cfg, ensure_ascii=False)
+            elif proto == "ws_client":
+                cfg = {"proto": proto, "ws_url": d["ws_path"],
+                       "ws_ssl": d["ws_use_ssl"], "ws_timeout": d["timeout"]}
             else:
-                cfg = d
-                cfg["proto"] = proto
-                preset_msg = json.dumps(cfg, ensure_ascii=False)
+                cfg = {"proto": proto}
+                for key in ("ip", "port", "encoding", "recv_encoding",
+                            "head_length", "timeout"):
+                    cfg[key] = d[key]
+            preset_msg = json.dumps(cfg, ensure_ascii=False)
 
             send_presets = json.dumps(
                 {"_active_proto": proto,
@@ -1854,57 +1894,24 @@ class _CollectionDetailTab(QWidget):
                             encoding=info["encoding"], recv_encoding=info["recv_encoding"],
                             head_length=info["head_length"], timeout=info["timeout"],
                             ws_path=info.get("ws_url", ""), ws_use_ssl=info.get("ws_ssl", False),
-                            url=info.get("url", ""), http_method=http_method, parent=self)
+                            url=info.get("url", ""), http_method=http_method,
+                            proto=proto, parent=self)
+        initial_data = dlg.get_data()
         if dlg.exec() == QDialog.Accepted:
             d = dlg.get_data()
-            new_proto = d.pop("proto", "tcp_client")
-            new_name = d.pop("name", "")
-            url = d.pop("url", "")
-            http_method = d.pop("http_method", "GET")
-
-            # 保留现有预设结构，更新默认配置
-            try:
-                all_presets = json.loads(t.send_presets) if t.send_presets else {}
-            except json.JSONDecodeError:
-                all_presets = {}
-            if not isinstance(all_presets, dict):
-                # 旧格式迁移
-                all_presets = {proto: all_presets} if isinstance(all_presets, list) else {}
-
-            # 构建新默认配置
-            if new_proto == "http_client":
-                cfg = {"method": http_method, "url": url, "proto": new_proto}
-            else:
-                cfg = d
-                cfg["proto"] = new_proto
-            preset_msg = json.dumps(cfg, ensure_ascii=False)
-
-            # 协议变更：清空旧协议预设，为新协议创建
-            if new_proto != proto:
-                all_presets = {"_active_proto": new_proto,
-                               new_proto: [{"name": DEFAULT_PRESET_NAME, "message": preset_msg}]}
-            else:
-                # 同协议：更新默认预设
-                proto_presets = all_presets.get(new_proto, [])
-                if not isinstance(proto_presets, list):
-                    proto_presets = []
-                updated = False
-                for p in proto_presets:
-                    if p.get("name") == DEFAULT_PRESET_NAME:
-                        p["message"] = preset_msg
-                        updated = True
-                        break
-                if not updated:
-                    proto_presets.insert(0, {"name": DEFAULT_PRESET_NAME, "message": preset_msg})
-                all_presets[new_proto] = proto_presets
-                all_presets["_active_proto"] = new_proto
-
-            self._db.update_protocol_target(
-                target_id=tid, name=new_name,
-                send_presets=json.dumps(all_presets, ensure_ascii=False),
-            )
+            current = self._db.get_protocol_target(tid)
+            if current is None:
+                return
+            changed = {key for key, value in d.items()
+                       if initial_data.get(key) != value}
+            updates = {"name": d["name"]}
+            if changed - {"name"}:
+                current_proto = target_display_info(current)["proto"]
+                updates["send_presets"] = _edited_target_presets(
+                    current.send_presets, current_proto, d, changed)
+            self._db.update_protocol_target(target_id=tid, **updates)
             new_cid = dlg.collection_id
-            if new_cid is not None and new_cid != t.collection_id:
+            if new_cid is not None and new_cid != current.collection_id:
                 self._db.move_protocol_target_ids_to_collection([tid], new_cid)
             self._refresh_targets()
             self.targets_changed.emit()
