@@ -7,13 +7,14 @@
 from __future__ import annotations
 
 import argparse
+import sqlite3
 import sys
 from pathlib import Path
 
 # 确保项目根目录在 Python 路径中
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from PySide6.QtCore import Qt, QtMsgType, qFormatLogMessage, qInstallMessageHandler
+from PySide6.QtCore import Qt, QSettings, QtMsgType, qFormatLogMessage, qInstallMessageHandler
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication
 
@@ -86,6 +87,45 @@ def _load_icon() -> QIcon:
     return _make_fallback_icon()
 
 
+def _user_config_dir() -> Path:
+    """安装版配置放在用户目录，程序升级和卸载不修改用户数据。"""
+    return Path.home() / ".config" / "TestTool"
+
+
+def _default_db_path() -> str:
+    if not getattr(sys, "frozen", False):
+        return str(Path(__file__).resolve().parent / "testtool.db")
+    config_dir = _user_config_dir()
+    config_dir.mkdir(parents=True, exist_ok=True)
+    destination = config_dir / "testtool.db"
+    legacy = Path(sys.executable).parent / "testtool.db"
+    if not destination.exists() and legacy.is_file() and legacy.resolve() != destination.resolve():
+        # SQLite backup 保留旧库及 WAL 中的数据，迁移失败时不留下半成品。
+        try:
+            with sqlite3.connect(str(legacy)) as source, sqlite3.connect(str(destination)) as target:
+                source.backup(target)
+        except Exception:
+            destination.unlink(missing_ok=True)
+            raise
+    return str(destination)
+
+
+def _configure_user_settings() -> None:
+    """打包应用使用用户目录下的 INI，兼容迁移旧 Qt 原生设置。"""
+    if not getattr(sys, "frozen", False):
+        return
+    config_dir = _user_config_dir()
+    config_dir.mkdir(parents=True, exist_ok=True)
+    legacy = QSettings(QSettings.NativeFormat, QSettings.UserScope, "TestTool", "TestTool")
+    QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, str(config_dir.parent))
+    QSettings.setDefaultFormat(QSettings.IniFormat)
+    settings = QSettings(QSettings.defaultFormat(), QSettings.UserScope, "TestTool", "TestTool")
+    if not Path(settings.fileName()).exists():
+        for key in legacy.allKeys():
+            settings.setValue(key, legacy.value(key))
+        settings.sync()
+
+
 def run_gui(db_path: str) -> None:
     """启动图形界面。"""
     # 保留 125% 等非整数 DPI 比例，避免跨高分屏时被取整。
@@ -93,6 +133,7 @@ def run_gui(db_path: str) -> None:
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
     _install_qt_message_filter()
+    _configure_user_settings()
     app = QApplication(sys.argv)
     app.setApplicationName("TestTool")
     app.setOrganizationName("TestTool")
@@ -125,12 +166,8 @@ def main() -> None:
 
     if args.db:
         db_path = args.db
-    elif getattr(sys, 'frozen', False):
-        # PyInstaller 打包后：存到 exe 同目录，数据不丢失
-        db_path = str(Path(sys.executable).parent / "testtool.db")
     else:
-        # 源码运行：存到项目目录
-        db_path = str(Path(__file__).resolve().parent / "testtool.db")
+        db_path = _default_db_path()
     run_gui(db_path)
 
 

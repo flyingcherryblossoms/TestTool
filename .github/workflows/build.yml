@@ -21,16 +21,68 @@ jobs:
 
       - name: Build
         run: |
-          pyinstaller --onefile --windowed --name TestTool `
+          pyinstaller --onedir --windowed --name TestTool `
             --icon=resources/icon.ico `
             --add-data "resources/icon.ico;resources" `
             --clean --noconfirm main.py
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: |
+          $version = python packaging/print_version.py
+          $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (!(Test-Path $compiler)) {
+            choco install innosetup --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "Inno Setup installation failed" }
+            $compiler = (Get-ChildItem "${env:ProgramFiles(x86)}\Inno Setup *\ISCC.exe" | Sort-Object FullName -Descending | Select-Object -First 1).FullName
+          }
+          & $compiler "/DMyAppVersion=$version" packaging/windows-installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed" }
+          $installer = "dist/TestTool-$version-Windows-x64-Setup.exe"
+          (Get-FileHash $installer -Algorithm SHA256).Hash + "  " + (Split-Path $installer -Leaf) |
+            Out-File -Encoding ASCII "$installer.sha256"
+
+      - name: Verify Windows installation and upgrade
+        shell: pwsh
+        run: |
+          $version = python packaging/print_version.py
+          $installer = (Resolve-Path "dist/TestTool-$version-Windows-x64-Setup.exe").Path
+          $compiler = (Get-ChildItem "${env:ProgramFiles(x86)}\Inno Setup *\ISCC.exe" | Sort-Object FullName -Descending | Select-Object -First 1).FullName
+          $oldOutput = Join-Path $env:RUNNER_TEMP "TestTool-old-installer"
+          New-Item -ItemType Directory -Force $oldOutput | Out-Null
+          & $compiler /DMyAppVersion=0.0.0 "/O$oldOutput" packaging/windows-installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "Previous-version test installer compilation failed" }
+          $oldInstaller = (Get-ChildItem "$oldOutput/*-Setup.exe").FullName
+          $installDir = Join-Path $env:RUNNER_TEMP "TestTool-install-test"
+          $configDir = Join-Path $env:USERPROFILE ".config/TestTool"
+          New-Item -ItemType Directory -Force $configDir | Out-Null
+          $sentinel = Join-Path $configDir "upgrade-test.txt"
+          Set-Content $sentinel "preserve-user-data"
+          foreach ($setup in @($oldInstaller, $installer)) {
+            $process = Start-Process $setup -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$installDir") -Wait -PassThru
+            if ($process.ExitCode -ne 0) { throw "Installer failed: $($process.ExitCode)" }
+            if (!(Test-Path "$installDir/TestTool.exe") -or !(Test-Path "$installDir/_internal")) { throw "Missing directory bundle" }
+            if ((Get-Content $sentinel) -ne "preserve-user-data") { throw "Upgrade changed user data" }
+            if ($setup -eq $oldInstaller) { Set-Content "$installDir/_internal/stale-upgrade-test" "old" }
+          }
+          if (Test-Path "$installDir/_internal/stale-upgrade-test") { throw "Stale dependencies were not removed" }
+          $installedVersion = (Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\TestTool.Desktop.x64_is1').DisplayVersion
+          if ($installedVersion -ne $version) { throw "Installed version was not upgraded" }
+          $env:QT_QPA_PLATFORM = 'offscreen'
+          $app = Start-Process "$installDir/TestTool.exe" -PassThru
+          Start-Sleep -Seconds 5
+          if ($app.HasExited) { throw "Installed application failed to start: $($app.ExitCode)" }
+          Stop-Process -Id $app.Id -Force
+          if (!(Test-Path "$configDir/testtool.db")) { throw "Application database was not created in user config directory" }
+          $process = Start-Process "$installDir/unins000.exe" -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -Wait -PassThru
+          if ($process.ExitCode -ne 0 -or !(Test-Path $sentinel)) { throw "Uninstall verification failed" }
+          Remove-Item $sentinel
 
       - name: Package
         shell: pwsh
         run: |
           cd dist
-          Compress-Archive -Path TestTool.exe -DestinationPath TestTool-Windows-x64.zip
+          Compress-Archive -Path TestTool -DestinationPath TestTool-Windows-x64.zip
           (Get-FileHash TestTool-Windows-x64.zip -Algorithm SHA256).Hash + "  TestTool-Windows-x64.zip" |
             Out-File -Encoding ASCII TestTool-Windows-x64.zip.sha256
 
@@ -41,6 +93,8 @@ jobs:
           path: |
             dist/TestTool-Windows-x64.zip
             dist/TestTool-Windows-x64.zip.sha256
+            dist/*-Windows-x64-Setup.exe
+            dist/*-Windows-x64-Setup.exe.sha256
 
   # ── Linux x64 ────────────────────────────────────────────
   linux-x64:
@@ -62,7 +116,7 @@ jobs:
 
       - name: Build
         run: |
-          pyinstaller --onefile --windowed --name TestTool \
+          pyinstaller --onedir --windowed --name TestTool \
             --add-data "resources/icon.png:resources" \
             --clean --noconfirm main.py
 
@@ -80,7 +134,7 @@ jobs:
             dist/TestTool-Linux-x64.tar.gz
             dist/TestTool-Linux-x64.tar.gz.sha256
 
-  # ── Linux x64 兼容版 (glibc 2.27+, Python 3.8) ───────────
+  # ── Linux x64 兼容版 (glibc 2.31+, Python 3.8) ───────────
   linux-x64-compat:
     runs-on: ubuntu-latest
     container:
@@ -106,7 +160,7 @@ jobs:
       - name: Build
         run: |
           QT_PLUGINS=$(python3.8 -c "import PySide6,os;print(os.path.join(os.path.dirname(PySide6.__file__),'Qt','plugins'))")
-          python3.8 -m PyInstaller --onefile --name TestTool \
+          python3.8 -m PyInstaller --onedir --name TestTool \
             --add-data "resources/icon.png:resources" \
             --add-data "${QT_PLUGINS}/platforms:PySide6/Qt/plugins/platforms" \
             --clean --noconfirm main.py
@@ -117,11 +171,16 @@ jobs:
           tar czf TestTool-Linux-x64-compat.tar.gz TestTool
           sha256sum TestTool-Linux-x64-compat.tar.gz > TestTool-Linux-x64-compat.tar.gz.sha256
 
+      - name: Build Debian package
+        run: python3.8 packaging/build_deb.py --arch amd64
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: TestTool-Linux-x64-compat
           path: |
+            dist/testtool_*_amd64.deb
+            dist/testtool_*_amd64.deb.sha256
             dist/TestTool-Linux-x64-compat.tar.gz
             dist/TestTool-Linux-x64-compat.tar.gz.sha256
 
@@ -145,7 +204,7 @@ jobs:
 
       - name: Build
         run: |
-          pyinstaller --onefile --windowed --name TestTool \
+          pyinstaller --onedir --windowed --name TestTool \
             --add-data "resources/icon.png:resources" \
             --clean --noconfirm main.py
 
@@ -163,7 +222,7 @@ jobs:
             dist/TestTool-Linux-ARM64.tar.gz
             dist/TestTool-Linux-ARM64.tar.gz.sha256
 
-  # ── Linux ARM64 兼容版 (glibc 2.27+, Python 3.8) ─────────
+  # ── Linux ARM64 兼容版 (glibc 2.31+, Python 3.8) ─────────
   linux-arm64-compat:
     runs-on: ubuntu-24.04-arm
     container:
@@ -189,7 +248,7 @@ jobs:
       - name: Build
         run: |
           QT_PLUGINS=$(python3.8 -c "import PySide6,os;print(os.path.join(os.path.dirname(PySide6.__file__),'Qt','plugins'))")
-          python3.8 -m PyInstaller --onefile --name TestTool \
+          python3.8 -m PyInstaller --onedir --name TestTool \
             --add-data "resources/icon.png:resources" \
             --add-data "${QT_PLUGINS}/platforms:PySide6/Qt/plugins/platforms" \
             --clean --noconfirm main.py
@@ -200,11 +259,16 @@ jobs:
           tar czf TestTool-Linux-ARM64-compat.tar.gz TestTool
           sha256sum TestTool-Linux-ARM64-compat.tar.gz > TestTool-Linux-ARM64-compat.tar.gz.sha256
 
+      - name: Build Debian package
+        run: python3.8 packaging/build_deb.py --arch arm64
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: TestTool-Linux-ARM64-compat
           path: |
+            dist/testtool_*_arm64.deb
+            dist/testtool_*_arm64.deb.sha256
             dist/TestTool-Linux-ARM64-compat.tar.gz
             dist/TestTool-Linux-ARM64-compat.tar.gz.sha256
 
@@ -223,7 +287,7 @@ jobs:
 
       - name: Build
         run: |
-          pyinstaller --onefile --windowed --name TestTool \
+          pyinstaller --onedir --windowed --name TestTool \
             --add-data "resources/icon.png:resources" \
             --clean --noconfirm main.py
 

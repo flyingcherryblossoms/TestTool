@@ -697,7 +697,7 @@ class TargetPanel(QWidget):
 
     def _save_column_widths(self):
         """保存用户调整后的列宽到 QSettings。"""
-        settings = QSettings("TestTool", "TestTool")
+        settings = QSettings(QSettings.defaultFormat(), QSettings.UserScope, "TestTool", "TestTool")
         for col in [1, 2, 3, 4]:  # IP, 端口, 描述, 集合
             settings.setValue(f"target_col_{col}", self._table.columnWidth(col))
 
