@@ -198,6 +198,11 @@ class HttpRequestWorker(QThread):
         self._timeout = timeout
         self._allow_redirects = allow_redirects
         self._verify_ssl = verify_ssl
+        self.response_body = ""
+        self.response_message = ""
+        self.response_bytes = b""
+        self.request_message = ""
+        self.request_body = ""
 
     def run(self) -> None:
         """在线程中执行 HTTP 请求。"""
@@ -226,6 +231,15 @@ class HttpRequestWorker(QThread):
             start = time.perf_counter()
             resp = requests.request(**kwargs)
             elapsed = (time.perf_counter() - start) * 1000
+            sent = resp.request
+            sent_body = sent.body or ""
+            if isinstance(sent_body, bytes):
+                sent_body = sent_body.decode("utf-8", errors="replace")
+            self.request_body = str(sent_body)
+            request_lines = [f"{sent.method} {sent.url} HTTP/1.1"]
+            request_lines.extend(f"{k}: {v}" for k, v in sent.headers.items())
+            request_lines.extend(("", self.request_body))
+            self.request_message = "\n".join(request_lines)
 
             # 构建响应文本（含状态行和响应头）
             from http.client import responses
@@ -237,9 +251,12 @@ class HttpRequestWorker(QThread):
                 lines.append(f"{k}: {v}")
             lines.append("")
             try:
-                lines.append(resp.text)
+                self.response_body = resp.text
             except Exception:
-                lines.append(resp.content.decode("utf-8", errors="replace"))
+                self.response_body = resp.content.decode("utf-8", errors="replace")
+            self.response_bytes = resp.content
+            lines.append(self.response_body)
+            self.response_message = "\n".join(lines)
             lines.append("")
             lines.append(f"--- 耗时: {elapsed:.1f}ms, 大小: {len(resp.content)} bytes ---")
 
@@ -960,9 +977,8 @@ class HttpParamWidget(QWidget):
 
             # Settings
             settings = config.get("settings", {})
-            if settings:
-                self._timeout_spin.setValue(settings.get("timeout", 30.0))
-                self._follow_redirects_cb.setChecked(settings.get("allow_redirects", True))
+            self._timeout_spin.setValue(settings.get("timeout", 30.0))
+            self._follow_redirects_cb.setChecked(settings.get("allow_redirects", True))
             self._verify_ssl_cb.setChecked(settings.get("verify_ssl", True))
         finally:
             self.blockSignals(False)

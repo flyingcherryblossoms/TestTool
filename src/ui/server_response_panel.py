@@ -126,6 +126,7 @@ class ResponseMessageSection(QWidget):
         body_row.addWidget(QLabel("内容:"))
         self._body = FormatTextEdit()
         self._body.textChanged.connect(self._mark_dirty)
+        self._body.format_combo.currentIndexChanged.connect(self._mark_dirty)
         body_row.addWidget(self._body.format_combo)
         format_btn = QPushButton("格式化", clicked=self._format_body)
         format_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
@@ -207,6 +208,7 @@ class ResponseMessageSection(QWidget):
         self._headers_table.set_data(
             [tuple(x) for x in (it.get("headers") or [])])
         self._body.setPlainText(it.get("body", ""))
+        self._body.set_format(it.get("format", "text"))
         self._loading = False
         self._dirty = False
 
@@ -218,16 +220,28 @@ class ResponseMessageSection(QWidget):
             self._update_item_label()
 
     def _format_body(self):
-        """按选择的格式排版返回报文；TEXT 模式自动识别 JSON/XML。"""
+        """自动识别并排版返回报文，同步更新格式选项。"""
         if self._srv is None or self._sel_idx is None:
             return
         text = self._body.toPlainText()
-        fmt = self._body.current_format()
-        formatted, err = format_payload(text, "" if fmt == "text" else fmt)
+        if not text.strip():
+            QMessageBox.warning(self, "格式化", "报文为空，无需格式化。")
+            return
+        formatted, err = format_payload(text, "json")
         if err:
-            QMessageBox.warning(self, "格式化", err)
-        elif formatted != text:
+            formatted, err = format_payload(text, "xml")
+            if err:
+                QMessageBox.warning(self, "格式化", "内容不是有效的 JSON 或 XML。")
+                return
+            fmt = "xml"
+        else:
+            fmt = "json"
+        previous_format = self._body.current_format()
+        if formatted != text:
             self._body.setPlainText(formatted)
+        self._body.set_format(fmt)
+        if fmt != previous_format:
+            self._mark_dirty()
 
     def _on_menu(self, pos):
         menu = QMenu(self)
@@ -270,6 +284,7 @@ class ResponseMessageSection(QWidget):
         it["status_code"] = self._status_spin.value()
         it["headers"] = self._read_headers()
         it["body"] = self._body.toPlainText()
+        it["format"] = self._body.current_format()
         self._dirty = False
         self._persist()
         self._update_item_label()
@@ -288,7 +303,8 @@ class ResponseMessageSection(QWidget):
             QMessageBox.warning(self, "重名", "已存在同名返回报文。")
             return
         self._responses.append({"name": name, "active": False,
-                                "status_code": 200, "headers": [], "body": ""})
+                                "status_code": 200, "headers": [], "body": "",
+                                "format": "text"})
         self._sel_idx = len(self._responses) - 1
         self._set_active(self._sel_idx)
         self._load_editor()

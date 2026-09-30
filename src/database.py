@@ -98,7 +98,7 @@ class ProtocolServer:
     ws_path: str = ""
     response_mode: str = "fixed"      # "fixed" | "echo"
     response_message: str = ""
-    response_messages: str = ""       # JSON: [{name, active, status_code, headers, body}, ...]
+    response_messages: str = ""       # JSON: [{name, active, status_code, headers, body, format}, ...]
     response_delay: int = 0           # 响应延迟（毫秒）
     target_id: int | None = None      # 关联的协议目标
     sort_order: int = 0
@@ -122,7 +122,7 @@ class ProtocolServer:
 def default_response_messages(body: str = "") -> list:
     """返回单条「默认响应」的返回报文列表（新建服务端时的初始值）。"""
     return [{"name": "默认响应", "active": True, "status_code": 200,
-             "headers": [], "body": body or ""}]
+             "headers": [], "body": body or "", "format": "text"}]
 
 
 def _json_dumps(obj) -> str:
@@ -151,6 +151,8 @@ def parse_server_responses(srv) -> list:
             "status_code": int(it.get("status_code", 200) or 200),
             "headers": it.get("headers", []) or [],
             "body": it.get("body", "") or "",
+            "format": it.get("format") if it.get("format") in ("text", "json", "xml")
+                      else "text",
         })
     if not normalized:
         normalized = default_response_messages(getattr(srv, "response_message", "") or "")
@@ -359,7 +361,7 @@ def target_display_info(target: ProtocolTarget) -> dict:
     """从目标的 send_presets 中提取展示信息（IP、端口、协议类型、编码等）。
 
     返回 dict 包含: proto, ip, port, encoding, recv_encoding, head_length,
-    timeout, ws_url, ws_ssl, send_message, url, http_method
+    timeout, ws_url, ws_ssl, send_message, message_format, url, http_method
     用于表格展示和旧代码兼容。
     """
     import json as _json
@@ -410,6 +412,7 @@ def target_display_info(target: ProtocolTarget) -> dict:
                     "ws_url": ws_url,
                     "ws_ssl": cfg.get("ws_ssl", cfg.get("ws_use_ssl", False)),
                     "send_message": cfg.get("send_message", ""),
+                    "message_format": cfg.get("message_format", "text"),
                     "url": cfg.get("url", ""),
                     "http_method": cfg.get("method", "GET"),
                 }
@@ -422,7 +425,8 @@ def _empty_display_info() -> dict:
         "encoding": "UTF-8", "recv_encoding": "UTF-8",
         "head_length": 0, "timeout": 30.0, "ws_timeout": 30.0,
         "ws_url": "", "ws_ssl": False,
-        "send_message": "", "url": "", "http_method": "GET",
+        "send_message": "", "message_format": "text",
+        "url": "", "http_method": "GET",
     }
 
 

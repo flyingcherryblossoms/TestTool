@@ -29,21 +29,29 @@ class TcpClientWorker(QThread):
     finished = Signal(bool, str)
 
     def __init__(self, ip: str, port: int, message: str, encoding: str,
-                 head_len: int, timeout: float, parent=None):
+                 head_len: int, timeout: float, parent=None,
+                 recv_encoding: str | None = None):
         super().__init__(parent)
         self._ip = ip
         self._port = port
         self._message = message
         self._encoding = encoding
+        self._recv_encoding = recv_encoding or encoding
         self._head_len = head_len
         self._timeout = timeout
+        self.response_bytes = b""
 
     def run(self) -> None:
         success, response = tcp_send_and_receive(
             self._ip, self._port, self._message,
-            self._encoding, self._head_len, self._timeout
+            self._encoding, self._head_len, self._timeout,
+            recv_encoding=self._recv_encoding,
+            on_response_bytes=self._set_response_bytes,
         )
         self.finished.emit(success, response)
+
+    def _set_response_bytes(self, raw: bytes) -> None:
+        self.response_bytes = raw
 
 
 class TcpServerWorker(QThread):
@@ -55,6 +63,7 @@ class TcpServerWorker(QThread):
 
     message_received = Signal(str, str)
     message_received_raw = Signal(str, bytes)
+    message_sent = Signal(str, str, str)
     status_changed = Signal(str)
     error_occurred = Signal(str)
 
@@ -85,6 +94,7 @@ class TcpServerWorker(QThread):
             head_len=self._head_len,
             on_message=self._on_message_received,
             on_message_raw=self._on_raw_received,
+            on_sent=self._on_sent,
             on_status=self._on_status,
             on_error=self._on_error,
         )
@@ -111,9 +121,11 @@ class TcpServerWorker(QThread):
             self.message_received_raw.emit(client_addr, raw)
         if self._response_delay_ms > 0:
             time.sleep(self._response_delay_ms / 1000.0)
-        if self._response_mode == "echo":
-            return message
-        return self._response_message
+        response = message if self._response_mode == "echo" else self._response_message
+        return response
+
+    def _on_sent(self, client_addr: str, response: str) -> None:
+        self.message_sent.emit(client_addr, response, response)
 
     def _on_status(self, status: str) -> None:
         self.status_changed.emit(status)
@@ -159,6 +171,7 @@ class WsServerWorker(QThread):
 
     message_received = Signal(str, str)
     message_received_raw = Signal(str, bytes)
+    message_sent = Signal(str, str, str)
     client_event = Signal(str)
     status_changed = Signal(str)
     error_occurred = Signal(str)
@@ -186,6 +199,7 @@ class WsServerWorker(QThread):
             on_client_event=self._on_client_event,
             on_status=self._on_status,
             on_error=self._on_error,
+            on_sent=self._on_sent,
         )
         self._engine.start()
 
@@ -197,9 +211,11 @@ class WsServerWorker(QThread):
             pass
         if self._response_delay_ms > 0:
             time.sleep(self._response_delay_ms / 1000.0)
-        if self._response_mode == "echo":
-            return message
-        return self._response_message
+        response = message if self._response_mode == "echo" else self._response_message
+        return response
+
+    def _on_sent(self, client_addr: str, response: str) -> None:
+        self.message_sent.emit(client_addr, response, response)
 
     def _on_client_event(self, event: str) -> None:
         self.client_event.emit(event)
@@ -230,6 +246,7 @@ class HttpServerWorker(QThread):
 
     message_received = Signal(str, str)
     message_received_raw = Signal(str, bytes)
+    message_sent = Signal(str, str, str)
     status_changed = Signal(str)
     error_occurred = Signal(str)
 
@@ -256,6 +273,7 @@ class HttpServerWorker(QThread):
             port=self._port,
             on_request=self._on_request,
             on_message_raw=self._on_raw_received,
+            on_sent=self._on_sent,
             on_status=self._on_status,
             on_error=self._on_error,
         )
@@ -281,8 +299,16 @@ class HttpServerWorker(QThread):
             time.sleep(self._response_delay_ms / 1000.0)
         if self._response_mode == "echo":
             body = req["body"].decode("utf-8", errors="replace")
-            return 200, list(self._headers), body
-        return self._status_code, list(self._headers), self._response_message
+            status, headers = 200, list(self._headers)
+        else:
+            status, headers, body = self._status_code, list(self._headers), self._response_message
+        return status, headers, body
+
+    def _on_sent(self, client_addr: str, response_bytes: bytes) -> None:
+        _, _, body = response_bytes.partition(b"\r\n\r\n")
+        original = response_bytes.decode("utf-8", errors="replace")
+        self.message_sent.emit(client_addr, original,
+                               body.decode("utf-8", errors="replace"))
 
     def _on_status(self, status: str) -> None:
         self.status_changed.emit(status)

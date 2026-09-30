@@ -43,10 +43,9 @@ def format_payload(text: str, fmt: str = "") -> tuple[str, str | None]:
     # ── 自动识别：先 JSON 后 XML ──
     try:
         obj = json.loads(stripped)
-    except Exception:
-        obj = None
-    if obj is not None:
         return json.dumps(obj, ensure_ascii=False, indent=2), None
+    except (json.JSONDecodeError, ValueError):
+        pass
     return _format_xml(stripped, text)
 
 

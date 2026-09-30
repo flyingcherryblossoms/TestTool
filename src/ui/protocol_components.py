@@ -72,6 +72,7 @@ from src.ui.clipboard import (
 )
 from src.ui.format_text import FormatTextEdit
 from src.ui.message_format import format_payload
+from src.ui.message_history import MessageHistoryWidget
 from src.ui.table_utils import (
     enable_stretch_fill, fit_table_buttons, refresh_tooltips,
     set_button_cell, unique_copy_name,
@@ -294,9 +295,8 @@ class ClientPanelBase(QWidget):
         self._selected_preset_idx: int | None = None
         self._drafts: dict[int, str] = {}  # 每个预设独立的未保存草稿（索引 → 内容）
         self._dirty: set[int] = set()      # 有未保存修改的预设索引
-        # HTTP：每个预设加载后的“干净基线”（规范化的 get_config），
-        # 旧/导入报文缺字段时 set_config 会按默认补齐，基线避免把补齐误判为“已修改”
-        self._http_baseline: dict[int, str] = {}
+        # 预设加载后的规范化基线：旧配置缺字段时，控件补默认值不算用户修改。
+        self._preset_baseline: dict[int, str] = {}
         self._last_response = ""
         self._last_raw = b""
         self._msg_dirty = False
@@ -324,6 +324,31 @@ class ClientPanelBase(QWidget):
 
     def save_presets(self, presets: list):
         self._presets = presets
+
+    def _preset_selection_key(self) -> str:
+        """当前客户端与协议的预设选中状态在 app_settings 中的键。"""
+        return ""
+
+    def _remember_preset_selection(self):
+        key = self._preset_selection_key()
+        if key and self._selected_preset_idx is not None:
+            self._db.set_setting(key, str(self._selected_preset_idx))
+
+    def _restore_preset_selection(self):
+        """恢复上次选中项；无记录或索引失效时加载第一条。"""
+        presets = self.get_presets()
+        self._selected_preset_idx = None
+        self._refresh_preset_list()
+        if not presets:
+            return
+        key = self._preset_selection_key()
+        try:
+            idx = int(self._db.get_setting(key, "")) if key else 0
+        except (TypeError, ValueError):
+            idx = 0
+        if not 0 <= idx < len(presets):
+            idx = 0
+        self._select_preset(idx, sync_previous=False)
 
     def _build_client_worker(self, msg: str, proto: str):
         raise NotImplementedError
@@ -490,6 +515,8 @@ class ClientPanelBase(QWidget):
         sh.addWidget(self._param_enc)
         sh.addWidget(QLabel("格式:"))
         self._send_edit.format_combo.setMaximumWidth(80)
+        self._send_edit.format_combo.currentIndexChanged.connect(self._on_param_changed)
+        self._send_edit.format_combo.currentIndexChanged.connect(self._mark_msg_dirty)
         sh.addWidget(self._send_edit.format_combo)
         self._send_btn = QPushButton("发送")
         self._send_btn.setMinimumWidth(80)
@@ -645,19 +672,13 @@ class ClientPanelBase(QWidget):
         self._resp_enc_combo.currentTextChanged.connect(self._on_param_changed)
         self._resp_enc_combo.currentTextChanged.connect(self._mark_msg_dirty)
         resp_tool.addWidget(self._resp_enc_combo)
-        self._resp_hex_toggle = QPushButton("十六进制")
-        self._resp_hex_toggle.setCheckable(True)
-        self._resp_hex_toggle.toggled.connect(self._refresh_response_display)
-        resp_tool.addWidget(self._resp_hex_toggle)
-        resp_tool.addWidget(QPushButton("格式化", clicked=lambda *_: self._format_editor(self._resp_edit)))
-        resp_tool.addWidget(QPushButton("清空", clicked=lambda *_: self._resp_edit.clear()))
+        resp_tool.addWidget(QPushButton("清空", clicked=self._clear_response_history))
         resp_tool.addStretch()
         rl.addLayout(resp_tool)
-        self._resp_edit = QPlainTextEdit()
-        self._resp_edit.setReadOnly(True)
-        self._resp_edit.setPlaceholderText("响应将显示在这里...")
-        self._resp_edit.setFont(QFont("Consolas", 10))
-        rl.addWidget(self._resp_edit)
+        self._response_history = MessageHistoryWidget()
+        self._resp_edit = self._response_history.log_edit
+        self._resp_hex_toggle = self._response_history.hex_toggle
+        rl.addWidget(self._response_history)
 
         # ── 上下分栏：发送区 | 响应区 ──
         v_splitter = QSplitter(Qt.Vertical)
@@ -733,6 +754,7 @@ class ClientPanelBase(QWidget):
                 self._param_ws_timeout.setValue(cfg.get("ws_timeout", 5.0))
                 self._param_ws_ssl.setChecked(cfg.get("ws_ssl", False))
                 self._send_edit.setPlainText(cfg.get("send_message", ""))
+                self._send_edit.set_format(cfg.get("message_format", "text"))
         finally:
             self._proto_combo.blockSignals(False)
             self._loading = False
@@ -759,6 +781,7 @@ class ClientPanelBase(QWidget):
             "ws_timeout": self._param_ws_timeout.value(),
             "ws_ssl": self._param_ws_ssl.isChecked(),
             "send_message": self._send_edit.toPlainText(),
+            "message_format": self._send_edit.current_format(),
         }
 
     def prefill(self, ip: str, port: int):
@@ -783,7 +806,7 @@ class ClientPanelBase(QWidget):
         self.reset_config_dirty()
         self._drafts.clear()
         self._dirty.clear()
-        self._http_baseline.clear()
+        self._preset_baseline.clear()
         self._selected_preset_idx = None
         self._msg_dirty = False
         self._update_send_label()
@@ -831,18 +854,15 @@ class ClientPanelBase(QWidget):
         idx = self._selected_preset_idx
         return idx is not None and idx in self._dirty
 
-    def _capture_http_baseline(self, idx: int | None):
-        """把当前 HTTP 面板配置记为预设 idx 的干净基线（预设加载后调用）。
-
-        set_config 会把缺字段的旧/导入报文按默认补齐（如 headers、settings），
-        因此“加载后未编辑”的面板 get_config 可能与原始保存报文不一致；用加载后的
-        规范化输出作基线，_sync_current_draft 只与基线比较，避免误报“已修改”。
-        """
+    def _capture_preset_baseline(self, idx: int | None):
+        """记录预设加载后的实际控件值，避免缺失默认字段被误判为修改。"""
         if idx is None:
             return
-        if self._proto_combo.currentData() != "http_client":
-            return
-        self._http_baseline[idx] = json.dumps(self._http_params.get_config(), ensure_ascii=False)
+        if self._proto_combo.currentData() == "http_client":
+            config = self._http_params.get_config()
+        else:
+            config = self.collect_params()
+        self._preset_baseline[idx] = json.dumps(config, ensure_ascii=False)
 
     def _sync_current_draft(self):
         """把发送框内容缓存为当前预设的草稿，并同步脏标记。"""
@@ -856,10 +876,10 @@ class ClientPanelBase(QWidget):
         if proto == "http_client":
             text = json.dumps(self._http_params.get_config(), ensure_ascii=False)
             # 以加载时捕获的干净基线为准；无基线（如新增预设）时回退到原始保存报文
-            saved = self._http_baseline.get(idx, presets[idx].get("message", ""))
+            saved = self._preset_baseline.get(idx, presets[idx].get("message", ""))
         else:
             text = json.dumps(self.collect_params(), ensure_ascii=False)
-            saved = presets[idx].get("message", "")
+            saved = self._preset_baseline.get(idx, presets[idx].get("message", ""))
         if text != saved:
             self._drafts[idx] = text
             self._dirty.add(idx)
@@ -908,7 +928,7 @@ class ClientPanelBase(QWidget):
             self.save_presets(presets)
         self._dirty.clear()
         self._drafts.clear()
-        self._http_baseline.clear()
+        self._preset_baseline.clear()
         self._msg_dirty = False
         self._update_send_label()
         self._update_preset_stars()
@@ -929,6 +949,7 @@ class ClientPanelBase(QWidget):
             lst.setCurrentRow(self._selected_preset_idx)
             self._preset_selected_label.setText(
                 f"✓ 已选择: {presets[self._selected_preset_idx].get('name', '')}")
+            self._remember_preset_selection()
         else:
             self._selected_preset_idx = None
             self._preset_selected_label.setText("")
@@ -948,7 +969,7 @@ class ClientPanelBase(QWidget):
         self._sync_current_draft()
         old_drafts = dict(self._drafts)
         old_dirty = set(self._dirty)
-        old_baseline = dict(self._http_baseline)
+        old_baseline = dict(self._preset_baseline)
         old_selected = self._selected_preset_idx
         new_presets = [presets[i] for i in order]
         new_drafts, new_dirty, new_baseline = {}, set(), {}
@@ -961,7 +982,7 @@ class ClientPanelBase(QWidget):
                 new_baseline[new_pos] = old_baseline[orig]
         self._drafts = new_drafts
         self._dirty = new_dirty
-        self._http_baseline = new_baseline
+        self._preset_baseline = new_baseline
         self._selected_preset_idx = (order.index(old_selected)
                                      if old_selected is not None and old_selected in order
                                      else None)
@@ -1012,11 +1033,16 @@ class ClientPanelBase(QWidget):
 
     def _on_preset_clicked(self, item: QListWidgetItem):
         idx = item.data(Qt.UserRole)
+        self._select_preset(idx)
+
+    def _select_preset(self, idx: int, sync_previous: bool = True):
+        """加载预设并记录选择；恢复时跳过旧面板内容的草稿同步。"""
         presets = self.get_presets()
         if idx is None or idx >= len(presets):
             return
         # 先把当前预设未保存的内容缓存到它的草稿区，再切换，不弹确认
-        self._sync_current_draft()
+        if sync_previous:
+            self._sync_current_draft()
         self._selected_preset_idx = idx
         draft = self._drafts.get(idx)
         proto = self._proto_combo.currentData()
@@ -1027,12 +1053,6 @@ class ClientPanelBase(QWidget):
             except json.JSONDecodeError:
                 config = {}
             self._http_params.set_config(config)
-            if draft is None:
-                # 从保存报文加载：把规范化后的面板状态记为干净基线，
-                # 并视为干净，避免旧/导入报文缺字段被默认补齐后误报“已修改”
-                self._capture_http_baseline(idx)
-                self._drafts.pop(idx, None)
-                self._dirty.discard(idx)
         else:
             config_str = draft if draft is not None else presets[idx].get("message", "")
             try:
@@ -1041,14 +1061,23 @@ class ClientPanelBase(QWidget):
                     self.set_params(config)  # 新格式：完整配置
                 else:
                     # JSON 解析成功但不是配置 dict（例如纯 JSON 报文）
+                    self._send_edit.set_format("text")
                     self._send_edit.setPlainText(config_str)
             except json.JSONDecodeError:
                 # 旧格式：纯文本报文
+                self._send_edit.set_format("text")
                 self._send_edit.setPlainText(config_str)
+        if draft is None:
+            # 旧预设缺字段时控件会补默认值；首次加载后的状态仍应视为未修改。
+            self._capture_preset_baseline(idx)
+            self._drafts.pop(idx, None)
+            self._dirty.discard(idx)
         self._preset_selected_label.setText(f"✓ 已选择: {presets[idx].get('name', '')}")
         self._sync_current_draft()
         self._update_send_label()
         self._update_preset_stars()
+        self._preset_list.setCurrentRow(idx)
+        self._remember_preset_selection()
 
     def _add_preset(self):
         if not self._can_edit_presets():
@@ -1074,7 +1103,7 @@ class ClientPanelBase(QWidget):
         self.save_presets(presets)
         self.presets_saved.emit()
         if proto == "http_client":
-            self._http_baseline[self._selected_preset_idx] = message
+            self._preset_baseline[self._selected_preset_idx] = message
         self._refresh_preset_list()
         # 新建后自动选中新预设（_refresh_preset_list 已设置），并清空发送框
         self._send_edit.clear()
@@ -1149,9 +1178,9 @@ class ClientPanelBase(QWidget):
             if 0 <= idx < len(presets) and self._drafts.get(idx) == presets[idx].get("message", ""):
                 self._drafts.pop(idx, None)
                 self._dirty.discard(idx)
-        if proto == "http_client" and self._selected_preset_idx is not None:
-            # 保存报文为完整规范化配置，把它记为新的干净基线
-            self._http_baseline[self._selected_preset_idx] = new_msg
+        if self._selected_preset_idx is not None:
+            # 保存后的内容成为新的比较基线，后续撤销编辑可正确清除星号。
+            self._preset_baseline[self._selected_preset_idx] = new_msg
         self._refresh_preset_list()
         self._msg_dirty = self._current_is_dirty()
         # 预设内容即完整配置，保存预设同时也清除配置脏标记
@@ -1185,7 +1214,7 @@ class ClientPanelBase(QWidget):
         self.save_presets(presets)
         self.presets_saved.emit()
         if proto == "http_client":
-            self._http_baseline[idx] = json.dumps(self._http_params.get_config(), ensure_ascii=False)
+            self._preset_baseline[idx] = json.dumps(self._http_params.get_config(), ensure_ascii=False)
         self._refresh_preset_list()
         self._msg_dirty = False
         self._update_send_label()
@@ -1218,7 +1247,7 @@ class ClientPanelBase(QWidget):
         self._dirty.discard(self._selected_preset_idx)
         if self._proto_combo.currentData() == "http_client":
             for i in added_idxs:
-                self._http_baseline[i] = presets[i].get("message", "")
+                self._preset_baseline[i] = presets[i].get("message", "")
         self._refresh_preset_list()
         self._msg_dirty = self._current_is_dirty()
         self._update_send_label()
@@ -1263,7 +1292,7 @@ class ClientPanelBase(QWidget):
             self._dirty.discard(self._selected_preset_idx)
         if self._proto_combo.currentData() == "http_client":
             for i in added_idxs:
-                self._http_baseline[i] = presets[i].get("message", "")
+                self._preset_baseline[i] = presets[i].get("message", "")
         self._refresh_preset_list()
         self._msg_dirty = self._current_is_dirty()
         self._update_send_label()
@@ -1287,6 +1316,7 @@ class ClientPanelBase(QWidget):
             return
         original_len = len(presets)
         deleted = set(idxs)
+        old_selected = self._selected_preset_idx
         for i in reversed(idxs):
             presets.pop(i)
         # 删除后按剩余顺序重建草稿/脏/基线索引
@@ -1299,18 +1329,25 @@ class ClientPanelBase(QWidget):
                 new_drafts[new_idx] = self._drafts[old_idx]
             if old_idx in self._dirty:
                 new_dirty.add(new_idx)
-            if old_idx in self._http_baseline:
-                new_baseline[new_idx] = self._http_baseline[old_idx]
+            if old_idx in self._preset_baseline:
+                new_baseline[new_idx] = self._preset_baseline[old_idx]
             new_idx += 1
         self._drafts = new_drafts
         self._dirty = new_dirty
-        self._http_baseline = new_baseline
-        if self._selected_preset_idx in deleted:
-            self._selected_preset_idx = None
+        self._preset_baseline = new_baseline
+        if old_selected in deleted:
+            new_selected = 0 if presets else None
+        elif old_selected is not None:
+            new_selected = old_selected - sum(i < old_selected for i in deleted)
+        else:
+            new_selected = 0 if presets else None
+        self._selected_preset_idx = None
         self.save_presets(presets)
         self.presets_saved.emit()
         self._refresh_preset_list()
-        self._msg_dirty = False
+        if new_selected is not None:
+            self._select_preset(new_selected, sync_previous=False)
+        self._msg_dirty = self._current_is_dirty()
         self._update_send_label()
 
     def _clear_presets(self):
@@ -1326,7 +1363,7 @@ class ClientPanelBase(QWidget):
         self.save_presets([])
         self._drafts.clear()
         self._dirty.clear()
-        self._http_baseline.clear()
+        self._preset_baseline.clear()
         self._selected_preset_idx = None
         self.presets_saved.emit()
         self._refresh_preset_list()
@@ -1534,6 +1571,11 @@ class ClientPanelBase(QWidget):
                 QMessageBox.information(self, "提示", "请输入 URL。")
                 return
             self._http_request_info = f"{self._http_params.get_method()} {url}"
+            body_cfg = self._http_params.get_config().get("body") or {}
+            body = body_cfg.get("text", "") if isinstance(body_cfg, dict) else ""
+            request_text = self._http_request_info + ("\n\n" + body if body else "")
+            self._response_history.add_message("发送", request_text, payload=body or request_text)
+            self._pending_send_record_idx = len(self._response_history.messages) - 1
             self._http_params.set_sending_state(True)
             self._client_worker = self._http_params.build_worker(parent=self)
             self._client_worker.finished.connect(self._on_client_done)
@@ -1547,6 +1589,7 @@ class ClientPanelBase(QWidget):
         self._send_btn.setEnabled(False)
         self._send_btn.setText("发送中...")
         self._terminate_btn.setVisible(True)
+        self._response_history.add_message("发送", msg)
         self._client_worker = self._build_client_worker(msg, proto)
         self._client_worker.finished.connect(self._on_client_done)
         self._client_worker.start()
@@ -1571,15 +1614,20 @@ class ClientPanelBase(QWidget):
             self._send_btn.setText("发送")
             self._terminate_btn.setVisible(False)
         self._last_response = response
+        if self._proto_combo.currentData() == "http_client":
+            sent = getattr(self._client_worker, "request_message", "")
+            if sent:
+                self._response_history.update_message(
+                    getattr(self, "_pending_send_record_idx", -1), sent,
+                    payload=getattr(self._client_worker, "request_body", "") or sent)
         enc = self._response_encoding()
-        try:
-            self._last_raw = response.encode(enc, errors='replace')
-        except Exception:
-            self._last_raw = response.encode('utf-8', errors='replace')
-        if success and self._last_raw:
-            detected = self._detect_encoding(self._last_raw)
-            if detected and detected != self._resp_enc_combo.currentText():
-                self._resp_enc_combo.setCurrentText(detected)
+        if isinstance(self._client_worker, TcpClientWorker):
+            self._last_raw = self._client_worker.response_bytes
+        else:
+            try:
+                self._last_raw = response.encode(enc, errors='replace')
+            except (LookupError, UnicodeError):
+                self._last_raw = response.encode('utf-8', errors='replace')
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         tag = "OK" if success else "FAIL"
         http_info = getattr(self, '_http_request_info', '')
@@ -1590,6 +1638,14 @@ class ClientPanelBase(QWidget):
         else:
             ip = self._client_ip_label()
             request = self._send_edit.toPlainText()
+        if self._proto_combo.currentData() == "http_client" and success:
+            payload = getattr(self._client_worker, "response_body", response)
+            original = getattr(self._client_worker, "response_message", response)
+            raw = getattr(self._client_worker, "response_bytes", None)
+            self._response_history.add_message("接收", original, payload=payload, raw=raw)
+        else:
+            self._response_history.add_message("接收", response,
+                                               raw=self._last_raw if success and self._last_raw else None)
         self._append_response(
             f"-------------------------------------------------------------------------------\n"
             f"[{ts}][客户端][{ip}]:\n{request}\n"
@@ -1598,84 +1654,27 @@ class ClientPanelBase(QWidget):
         self._record_session(success, response, request)
         self.test_finished.emit()
 
-    def _detect_encoding(self, raw: bytes) -> str | None:
-        candidates = ["UTF-8", "GBK", "GB2312", "GB18030", "ISO-8859-1", "ASCII"]
-        for enc in candidates:
-            try:
-                raw.decode(enc)
-                return enc
-            except (UnicodeDecodeError, UnicodeEncodeError):
-                continue
-        return None
-
     def _refresh_response_display(self):
-        if not self._last_raw:
-            return
-        if self._resp_hex_toggle.isChecked():
-            lines = []
-            for i in range(0, len(self._last_raw), 16):
-                chunk = self._last_raw[i:i + 16]
-                hex_part = " ".join(f"{b:02x}" for b in chunk)
-                ascii_part = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
-                lines.append(f"{i:04x}  {hex_part:<48}  {ascii_part}")
-            self._resp_edit.setPlainText("\n".join(lines))
-        else:
-            enc = self._resp_enc_combo.currentText()
-            try:
-                text = self._last_raw.decode(enc)
-            except (UnicodeDecodeError, UnicodeEncodeError):
-                text = self._last_raw.decode(enc, errors="replace")
-            self._resp_edit.setPlainText(text)
+        self._response_history.set_encoding(self._resp_enc_combo.currentText())
 
     def _format_editor(self, editor: QPlainTextEdit):
-        """自动检测内容类型（JSON / XML）并格式化编辑器内容。"""
-        import xml.dom.minidom
+        """仅格式化报文编辑框本身的内容。"""
         text = editor.toPlainText()
         if not text.strip():
             return
-
-        # 提取可能存在的 HTTP 响应头
-        body = text
-        header = ""
-        if "\n\n" in text:
-            parts = text.split("\n\n", 1)
-            header = parts[0]
-            body = parts[1] if len(parts) > 1 else text
-
-        stripped = body.strip()
-
-        # 尝试 JSON
-        if stripped.startswith(("{", "[")):
-            try:
-                formatted = json.dumps(json.loads(stripped), indent=2, ensure_ascii=False)
-                if header:
-                    formatted = header + "\n\n" + formatted
-                editor.setPlainText(formatted)
-                return
-            except (json.JSONDecodeError, ValueError):
-                pass
-
-        # 尝试 XML
-        if stripped.startswith("<"):
-            try:
-                dom = xml.dom.minidom.parseString(stripped)
-                formatted = dom.toprettyxml(indent="  ")
-                if header:
-                    formatted = header + "\n\n" + formatted
-                editor.setPlainText(formatted)
-                return
-            except Exception:
-                pass
-
-        QMessageBox.information(self, "格式化失败",
-                                "内容不是有效的 JSON 或 XML。\n"
-                                "JSON 需以 { 或 [ 开头，XML 需以 < 开头。")
+        formatted, error = format_payload(text)
+        if error:
+            QMessageBox.information(self, "格式化失败", "内容不是有效的 JSON 或 XML。")
+        elif formatted != text:
+            editor.setPlainText(formatted)
 
     def _append_response(self, text: str):
-        if self._resp_hex_toggle.isChecked():
-            self._refresh_response_display()
-        else:
-            self._resp_edit.appendPlainText(text)
+        self._resp_edit.appendPlainText(text)
+
+    def _clear_response_history(self):
+        self._response_history.clear_messages()
+        self._last_response = ""
+        self._last_raw = b""
 
     def _on_ctrl_s(self):
         """Ctrl+S 统一处理入口（QShortcut 触发，不依赖焦点位置）。"""
@@ -1740,6 +1739,7 @@ class ServerPanelBase(QWidget):
         self._http_workers: dict[int, HttpServerWorker] = {}
         self._servers: list = []          # 当前加载的服务端
         self._logs: dict[int, QPlainTextEdit] = {}
+        self._histories: dict[int, MessageHistoryWidget] = {}
         self._send: dict[int, str] = {}
         self._recv: dict[int, str] = {}
         self._hex: dict[int, bool] = {}
@@ -2043,6 +2043,7 @@ class ServerPanelBase(QWidget):
                 self._log_tabs.removeTab(tab_idx)
             # 清除临时日志数据，保留编码值以便重启后复用
             self._logs.pop(s.id, None)
+            self._histories.pop(s.id, None)
             self._recv_raw.pop(s.id, None)
             self._status.pop(s.id, None)
             self._addr.pop(s.id, None)
@@ -2088,6 +2089,9 @@ class ServerPanelBase(QWidget):
                                            self._on_srv_msg(sid, nm, addr, msg))
                 w.message_received_raw.connect(partial(self._on_srv_msg_raw, s.id))
             w.status_changed.connect(partial(self._log_to_server, s.id))
+            w.message_sent.connect(
+                lambda addr, original, body, sid=s.id:
+                self._on_srv_sent(sid, addr, original, body))
             w.error_occurred.connect(lambda err, sid=s.id: self._log_to_server(sid, f"[ERR] {err}"))
             w.finished.connect(lambda worker=w, kind=st, sid=s.id:
                                self._on_worker_finished(kind, sid, worker))
@@ -2124,18 +2128,20 @@ class ServerPanelBase(QWidget):
             recv_combo.setCurrentText(self._recv.get(s.id, "UTF-8"))
             tab_tool.addWidget(QLabel("编码:"))
             tab_tool.addWidget(recv_combo)
-        hex_toggle = QPushButton("十六进制")
+        hex_toggle = QPushButton("日志十六进制")
         hex_toggle.setCheckable(True)
         hex_toggle.setChecked(self._hex.get(s.id, False))
+        hex_toggle.setVisible(False)
         tab_tool.addWidget(hex_toggle)
         tab_tool.addStretch()
         tab_tool.addWidget(QPushButton(
             "清空", clicked=lambda _checked=False, sid=s.id: self._clear_log(sid)))
         tab_layout.addLayout(tab_tool)
-        log_w = QPlainTextEdit()
-        log_w.setReadOnly(True)
+        history = MessageHistoryWidget()
+        history.log_toggle.toggled.connect(hex_toggle.setVisible)
+        log_w = history.log_edit
         log_w.setMaximumBlockCount(self._log_block_cap())
-        tab_layout.addWidget(log_w)
+        tab_layout.addWidget(history)
         if send_combo is not None:
             send_combo.currentTextChanged.connect(
                 lambda text=None, sid=s.id, cb=send_combo: self._on_send_changed(sid, cb))
@@ -2146,12 +2152,14 @@ class ServerPanelBase(QWidget):
         tab_idx = self._log_tabs.addTab(tab_w, f"{s.name}:{s.port}")
         self._log_tabs.setCurrentIndex(tab_idx)
         self._logs[s.id] = log_w
+        self._histories[s.id] = history
         if send_combo is not None:
             self._send_combos[s.id] = send_combo
             self._send[s.id] = send_combo.currentText()
         self._recv_combos[s.id] = recv_combo
         self._hex_toggles[s.id] = hex_toggle
         self._recv[s.id] = recv_combo.currentText()
+        history.set_encoding(recv_combo.currentText())
         self._hex[s.id] = hex_toggle.isChecked()
         self._recv_raw.setdefault(s.id, b"")
         self._status.setdefault(s.id, [])
@@ -2174,6 +2182,10 @@ class ServerPanelBase(QWidget):
             log.appendPlainText(formatted)
 
     def _on_srv_msg(self, sid: int, name: str, addr="", msg=""):
+        history = self._histories.get(sid)
+        if history:
+            payload = msg.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in msg else msg
+            history.add_message("接收", msg, payload=payload, peer=addr)
         if self._hex.get(sid, False):
             return  # 十六进制模式下由 _on_srv_msg_raw 统一渲染
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -2184,10 +2196,25 @@ class ServerPanelBase(QWidget):
                 f"-------------------------------------------------------------------------------\n[{ts}][客户端][{ip}]:\n{msg}")
 
     def _on_srv_msg_raw(self, sid: int, addr: str, raw: bytes):
+        history = self._histories.get(sid)
+        if history:
+            history.attach_raw("接收", raw)
+            if b"\r\n\r\n" in raw and history.messages:
+                headers, body = raw.split(b"\r\n\r\n", 1)
+                history.messages[-1]["text"] = (
+                    headers.decode("latin-1") + "\r\n\r\n"
+                    + body.decode("utf-8", errors="replace"))
+                history.messages[-1]["payload"] = body.decode("utf-8", errors="replace")
+                history.refresh_detail()
         if raw:
             self._recv_raw[sid] = self._recv_raw.get(sid, b"") + raw + b"\n"
         if self._hex.get(sid, False):
             self._refresh_single_log(sid)
+
+    def _on_srv_sent(self, sid: int, addr: str, original: str, body: str):
+        history = self._histories.get(sid)
+        if history:
+            history.add_message("发送", original, payload=body, peer=addr)
 
     def _on_send_changed(self, sid: int, combo: QComboBox):
         self._send[sid] = combo.currentText()
@@ -2196,6 +2223,9 @@ class ServerPanelBase(QWidget):
 
     def _on_recv_changed(self, sid: int, combo: QComboBox):
         self._recv[sid] = combo.currentText()
+        history = self._histories.get(sid)
+        if history:
+            history.set_encoding(combo.currentText())
         self._save_server_encodings(sid)
         self._refresh_single_log(sid)
         self._refresh()  # 编码修改后自动刷新服务列表
@@ -2210,6 +2240,9 @@ class ServerPanelBase(QWidget):
         log = self._logs.get(sid)
         if log:
             log.clear()
+        history = self._histories.get(sid)
+        if history:
+            history.clear_messages()
 
     def _save_server_encodings(self, sid: int):
         srv = self._db.get_protocol_server(sid)
@@ -2241,7 +2274,9 @@ class ServerPanelBase(QWidget):
             raw = self._recv_raw.get(sid, b"")
             try:
                 decoded = raw.decode(enc)
-            except (UnicodeDecodeError, UnicodeEncodeError):
+            except LookupError:
+                decoded = raw.decode("utf-8", errors="replace")
+            except UnicodeError:
                 decoded = raw.decode(enc, errors="replace")
             parts = list(self._status.get(sid, []))
             if raw:
@@ -2273,7 +2308,8 @@ class ServerPanelBase(QWidget):
                 if w:
                     w.stop_server()
                     break
-            self._logs.pop(sid, None)
+        self._logs.pop(sid, None)
+        self._histories.pop(sid, None)
         self._log_tabs.removeTab(idx)
         self._refresh()
 
@@ -2458,6 +2494,7 @@ class ServerPanelBase(QWidget):
                         self._log_tabs.removeTab(tab_idx)
                     # 清除临时日志数据，保留编码值
                     self._logs.pop(sid, None)
+                    self._histories.pop(sid, None)
                     self._recv_raw.pop(sid, None)
                     self._status.pop(sid, None)
                     self._addr.pop(sid, None)
