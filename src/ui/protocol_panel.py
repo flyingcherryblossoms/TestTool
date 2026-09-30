@@ -687,14 +687,15 @@ class TargetClientPanel(ClientPanelBase):
         # 3) 切换 UI
         self._prev_proto = new_proto
         ClientPanelBase._on_proto_changed(self, idx)
-        # 4) 重置草稿/脏状态，加载新协议已有默认配置（没有则从当前参数创建）
+        # 4) 重置草稿/脏状态，恢复新协议上次选中的预设。
         self._drafts.clear()
         self._dirty.clear()
-        self._http_baseline.clear()
+        self._preset_baseline.clear()
         self._selected_preset_idx = None
         self._msg_dirty = False
         if self._owner._target:
-            self._load_active_proto_default()
+            self._ensure_default_preset()
+            self._restore_preset_selection()
             # 更新 _active_proto，确保下次加载按最近使用的协议展示
             self._owner._update_active_proto(new_proto)
             self._msg_dirty = False
@@ -717,6 +718,12 @@ class TargetClientPanel(ClientPanelBase):
     def save_presets(self, presets, proto: str = ""):
         proto = proto or self._proto_combo.currentData()
         self._owner._save_presets_to_target(presets, proto)
+
+    def _preset_selection_key(self) -> str:
+        target = self._owner._target
+        if target is None:
+            return ""
+        return f"target_selected_preset_{target.id}_{self._proto_combo.currentData()}"
 
     def _ensure_default_preset(self):
         """确保当前协议下存在默认预设；当前协议完全没有预设时才从当前参数创建。
@@ -755,6 +762,7 @@ class TargetClientPanel(ClientPanelBase):
             "ws_timeout": self._param_ws_timeout.value(),
             "ws_ssl": self._param_ws_ssl.isChecked(),
             "send_message": self._send_edit.toPlainText(),
+            "message_format": self._send_edit.current_format(),
         }
         return cfg
 
@@ -793,51 +801,8 @@ class TargetClientPanel(ClientPanelBase):
             self.save_presets(presets, proto=proto)
         self._dirty.clear()
         self._drafts.clear()
-        self._http_baseline.clear()
+        self._preset_baseline.clear()
         self._msg_dirty = False
-
-    def _load_active_proto_default(self):
-        """加载当前协议的默认预设到面板；没有则优先选中第一个用户预设，
-        完全没有预设才从当前参数创建默认预设。"""
-        presets = list(self.get_presets())
-        default_name = DEFAULT_PRESET_NAME
-        idx = next((i for i, p in enumerate(presets)
-                    if p.get("name") == default_name), None)
-        if idx is not None:
-            self._selected_preset_idx = idx
-            self._load_preset_config(presets[idx].get("message", ""))
-            self._capture_http_baseline(idx)
-            self._preset_selected_label.setText(f"✓ 已选择: {default_name}")
-        elif presets:
-            # 无默认预设但有用户预设：选中第一个（与 target_display_info 展示兜底一致）
-            self._selected_preset_idx = 0
-            self._load_preset_config(presets[0].get("message", ""))
-            self._capture_http_baseline(0)
-            self._preset_selected_label.setText(f"✓ 已选择: {presets[0].get('name', '')}")
-        else:
-            self._selected_preset_idx = None
-            self._ensure_default_preset()
-
-    def _load_preset_config(self, msg: str):
-        """把预设 message 应用到面板参数（与 _on_preset_clicked 相同逻辑）。"""
-        proto = self._proto_combo.currentData()
-        if proto == "http_client":
-            try:
-                config = json.loads(msg)
-            except json.JSONDecodeError:
-                config = {}
-            self._http_params.set_config(config)
-            return
-        try:
-            config = json.loads(msg)
-            if isinstance(config, dict) and "proto" in config:
-                self.set_params(config)  # 新格式：完整配置
-            else:
-                # JSON 解析成功但不是配置 dict（例如纯 JSON 报文）
-                self._send_edit.setPlainText(msg)
-        except json.JSONDecodeError:
-            # 旧格式：纯文本报文
-            self._send_edit.setPlainText(msg)
 
     def _build_client_worker(self, msg, proto):
         if proto == "tcp_client":
@@ -845,6 +810,7 @@ class TargetClientPanel(ClientPanelBase):
                 ip=self._param_ip.text().strip(), port=self._param_port.value(),
                 message=msg, encoding=self._param_enc.currentText(),
                 head_len=self._param_hl.value(), timeout=self._param_timeout.value(),
+                recv_encoding=self._resp_enc_combo.currentText(),
             )
         url = self._param_ws_url.text().strip() or f"ws://{self._param_ip.text().strip()}:{self._param_port.value()}/ws"
         return WsClientWorker(url=url, message=msg, timeout=self._param_ws_timeout.value())
@@ -896,7 +862,7 @@ class TargetClientPanel(ClientPanelBase):
     def _params_area_max_height(self):
         return 64
 
-    # ── 压测参数持久化：目标客户端写入目标行，保存由"保存参数"统一处理 ──
+    # ── 压测参数持久化：目标客户端写入目标行 ──
 
     def _load_stress_from_store(self) -> dict:
         t = self._owner._target
@@ -908,8 +874,12 @@ class TargetClientPanel(ClientPanelBase):
             return {}
 
     def _save_stress_to_store(self, sp: dict):
-        # 仅标记脏，落库由"保存参数"按钮统一写入 update_protocol_target
-        self._mark_config_dirty()
+        target = self._owner._target
+        if target is None:
+            return
+        stress_json = json.dumps(sp, ensure_ascii=False)
+        self._db.update_protocol_target(target.id, stress_params=stress_json)
+        target.stress_params = stress_json
 
     # ── 加载目标参数 ────────────────────────────────────────
 
@@ -918,7 +888,7 @@ class TargetClientPanel(ClientPanelBase):
         self._selected_preset_idx = None
         self._drafts.clear()
         self._dirty.clear()
-        self._http_baseline.clear()
+        self._preset_baseline.clear()
         # 从预设中提取配置信息
         info = target_display_info(target)
         proto = info.get("proto", "tcp_client")
@@ -960,6 +930,7 @@ class TargetClientPanel(ClientPanelBase):
                 "ws_timeout": info.get("ws_timeout", info["timeout"]),
                 "ws_ssl": info.get("ws_ssl", False),
                 "send_message": info.get("send_message", ""),
+                "message_format": info.get("message_format", "text"),
             }
         self.set_params(cfg)
         self._apply_stress_params(self._load_stress_from_store())
@@ -967,9 +938,9 @@ class TargetClientPanel(ClientPanelBase):
         self._update_len_label()
         # 同步 _prev_proto 以正确跟踪协议切换
         self._prev_proto = cfg.get("proto", "tcp_client")
-        self._refresh_preset_list()
         # 确保当前协议存在默认预设
         self._ensure_default_preset()
+        self._restore_preset_selection()
 
 
 class TargetMockServerPanel(ServerPanelBase):
@@ -1053,6 +1024,7 @@ class TargetMockServerPanel(ServerPanelBase):
             self._log_tabs.removeTab(0)
         # 清除临时日志数据，保留编码值以便重启后复用
         self._logs.clear()
+        self._histories.clear()
         self._status.clear()
         self._recv_raw.clear()
         self._send_combos.clear()
@@ -1556,7 +1528,6 @@ class _TargetDetailPanel(QWidget):
         self.setEnabled(True)
         self._client_panel.load_target(target)
         self._server_panel.set_target(target)
-        self._client_panel.reset_dirty()
         self._refresh_history()
 
     def has_active_servers(self) -> bool:
@@ -1564,6 +1535,12 @@ class _TargetDetailPanel(QWidget):
 
     def stop_all_servers(self):
         self._server_panel.stop_all_servers()
+
+    def _save_params(self):
+        """退出时保存尚未处理的目标压测参数。"""
+        client = self._client_panel
+        client._save_stress_to_store(client.collect_stress_params())
+        client.reset_config_dirty()
 
     def keyPressEvent(self, event):
         # 左右并排下：客户端 / Mock服务端 各自的 keyPressEvent 会自行处理刷新/删除，
@@ -2528,7 +2505,7 @@ class _StandaloneClientTab(ClientPanelBase):
         self._presets = self._load_presets_for(self._prev_proto)
         self._load_config()
         self._apply_stress_params(self._load_stress_from_store())
-        self._refresh_preset_list()
+        self._restore_preset_selection()
         # 恢复上次使用的协议
         last_proto = self._db.get_setting("standalone_last_proto", "")
         if last_proto and last_proto != self._prev_proto:
@@ -2553,9 +2530,9 @@ class _StandaloneClientTab(ClientPanelBase):
         super()._on_proto_changed(idx)
         # 加载新协议的配置和预设
         self._presets = self._load_presets_for(new_proto)
-        self._refresh_preset_list()
         self._load_config()
         self.reset_dirty()
+        self._restore_preset_selection()
 
     def _load_presets_for(self, proto: str) -> list:
         raw = self._db.get_setting(f"standalone_presets_{self._PROTO_KEY[proto]}", "")
@@ -2581,7 +2558,8 @@ class _StandaloneClientTab(ClientPanelBase):
         if proto == "tcp_client":
             return TcpClientWorker(ip=self._param_ip.text().strip(), port=self._param_port.value(),
                                    message=msg, encoding=self._param_enc.currentText(),
-                                   head_len=self._param_hl.value(), timeout=self._param_timeout.value())
+                                   head_len=self._param_hl.value(), timeout=self._param_timeout.value(),
+                                   recv_encoding=self._resp_enc_combo.currentText())
         return WsClientWorker(url=self._param_ws_url.text().strip(), message=msg,
                               timeout=self._param_ws_timeout.value())
 
@@ -2591,6 +2569,10 @@ class _StandaloneClientTab(ClientPanelBase):
     def save_presets(self, presets):
         self._presets = presets
         self._save_presets_to_settings()
+
+    def _preset_selection_key(self) -> str:
+        proto = self._proto_combo.currentData()
+        return f"standalone_selected_preset_{self._PROTO_KEY[proto]}"
 
     # ── 压测参数持久化：独立客户端写入 settings 表 ────────────
 

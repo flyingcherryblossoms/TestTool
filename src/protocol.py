@@ -117,7 +117,9 @@ def read_message(sock: socket.socket, encoding: str, head_len: int,
 
 def tcp_send_and_receive(
     ip: str, port: int, message: str, encoding: str,
-    head_len: int, timeout: float
+    head_len: int, timeout: float,
+    recv_encoding: Optional[str] = None,
+    on_response_bytes: Optional[Callable[[bytes], None]] = None,
 ) -> tuple[bool, str]:
     """一次性 TCP 请求：连接、打包发送、半关闭、接收、关闭。
 
@@ -132,7 +134,10 @@ def tcp_send_and_receive(
         sock.connect((ip, port))
         write_message(sock, message, encoding, head_len)
         sock.shutdown(socket.SHUT_WR)
-        response = read_message(sock, encoding, head_len, timeout)
+        body_bytes = read_message_bytes(sock, head_len, timeout)
+        if on_response_bytes:
+            on_response_bytes(body_bytes)
+        response = body_bytes.decode(recv_encoding or encoding)
         elapsed = (time.perf_counter() - start) * 1000
         return True, response
 
@@ -145,12 +150,12 @@ def tcp_send_and_receive(
         return False, f"地址解析失败: {e}"
     except ConnectionError as e:
         return False, f"连接错误: {e}"
-    except ValueError as e:
-        return False, f"协议错误: {e}"
     except UnicodeEncodeError as e:
         return False, f"编码失败 ({encoding}): {e}"
     except UnicodeDecodeError as e:
-        return False, f"解码失败 ({encoding}): {e}"
+        return False, f"解码失败 ({recv_encoding or encoding}): {e}"
+    except ValueError as e:
+        return False, f"协议错误: {e}"
     except OSError as e:
         return False, f"网络错误: {e}"
     finally:
@@ -182,6 +187,7 @@ class TcpServerEngine:
         on_error: Callable[[str], None],
         recv_encoding: Optional[str] = None,
         on_message_raw: Optional[Callable[[str, bytes], None]] = None,
+        on_sent: Optional[Callable[[str, str], None]] = None,
     ):
         self._ip = ip
         self._port = port
@@ -192,6 +198,7 @@ class TcpServerEngine:
         self._on_status = on_status
         self._on_error = on_error
         self._on_message_raw = on_message_raw
+        self._on_sent = on_sent
 
         self._server_sock: Optional[socket.socket] = None
         self._stop_event = threading.Event()
@@ -275,6 +282,8 @@ class TcpServerEngine:
                 write_message(
                     client_sock, response, self._encoding, self._head_len
                 )
+                if self._on_sent:
+                    self._on_sent(addr_str, response)
                 self._on_status(f"已回复:\n{response}")
         except (ConnectionError, socket.timeout, ValueError,
                 UnicodeDecodeError, OSError) as e:
@@ -346,6 +355,7 @@ class WsServerEngine:
         on_client_event: Callable[[str], None],
         on_status: Callable[[str], None],
         on_error: Callable[[str], None],
+        on_sent: Optional[Callable[[str, str], None]] = None,
     ):
         self._ip = ip
         self._port = port
@@ -354,6 +364,7 @@ class WsServerEngine:
         self._on_client_event = on_client_event
         self._on_status = on_status
         self._on_error = on_error
+        self._on_sent = on_sent
 
         self._running = False
         self._server = None
@@ -381,6 +392,8 @@ class WsServerEngine:
                 async for message in websocket:
                     response = self._on_message(message)
                     await websocket.send(response)
+                    if self._on_sent:
+                        self._on_sent(client_info, response)
                     self._on_status(f"已回复:\n{response}")
             except websockets.exceptions.ConnectionClosed:
                 self._on_client_event(f"客户端已断开: {client_info}")
@@ -517,6 +530,7 @@ class HttpServerEngine:
         on_status: Callable[[str], None],
         on_error: Callable[[str], None],
         on_message_raw: Optional[Callable[[str, bytes], None]] = None,
+        on_sent: Optional[Callable[[str, bytes], None]] = None,
     ):
         self._ip = ip
         self._port = port
@@ -524,6 +538,7 @@ class HttpServerEngine:
         self._on_status = on_status
         self._on_error = on_error
         self._on_message_raw = on_message_raw
+        self._on_sent = on_sent
         self._server_sock: Optional[socket.socket] = None
         self._stop_event = threading.Event()
         self._running = False
@@ -595,7 +610,10 @@ class HttpServerEngine:
                 if self._on_message_raw:
                     self._on_message_raw(addr_str, req["text"].encode("latin-1"))
                 status, headers, body = self._on_request(addr_str, req)
-                client_sock.sendall(build_http_response(status, headers, body))
+                response_bytes = build_http_response(status, headers, body)
+                client_sock.sendall(response_bytes)
+                if self._on_sent:
+                    self._on_sent(addr_str, response_bytes)
                 self._on_status(f"已回复:\nHTTP {status} {body}")
         except (ConnectionError, socket.timeout, OSError) as e:
             self._on_error(f"处理客户端 {addr_str} 时出错: {e}")
