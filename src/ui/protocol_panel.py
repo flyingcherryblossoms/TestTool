@@ -7,7 +7,6 @@
         ├── Tab 0: _CollectionDetailTab (目标表格，双击打开目标标签页)
         ├── Tab 1: _StandaloneClientTab (独立客户端，固定)
         ├── Tab 2: _ServerTab (全部服务端，固定)
-        ├── Tab 3: _GlobalHistoryTab (全局测试历史，固定)
         └── [动态] 目标标签页 (客户端 / Mock服务端 / 历史)
 
 客户端与服务端的公共逻辑抽到 src/ui/protocol_components.py：
@@ -21,7 +20,6 @@ import json
 from datetime import datetime
 
 from PySide6.QtCore import Qt, QSettings, Signal
-from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -32,6 +30,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -53,6 +52,10 @@ from PySide6.QtWidgets import (
 
 from src.database import Database, target_display_info, DEFAULT_PRESET_NAME
 from src.protocol import compute_length_header
+from src.postman_handler import export_postman
+from src.ui.message_history import _hex_dump
+from src.ui.format_text import FormatTextEdit
+from src.ui.message_format import format_payload
 from src.ui import shortcuts
 from src.ui.clipboard import KIND_PROTO_TARGET, copy_items, paste_items
 from src.ui.collection_sidebar import CollectionSidebarBase
@@ -75,7 +78,6 @@ from src.ui.protocol_components import (
     ClientPanelBase,
     ServerPanelBase,
     ENCODINGS,
-    _hex_dump,
 )
 
 
@@ -518,16 +520,18 @@ class _CollectionSidebar(CollectionSidebarBase):
 
     def _on_import(self):
         filepaths, _ = QFileDialog.getOpenFileNames(
-            self, "导入集合", "", "JSON 文件 (*.json);;所有文件 (*)")
+            self, "导入集合", "", "TestTool / Postman 集合 (*.json);;所有文件 (*)")
         if not filepaths:
             return
         imported = 0
+        warnings = []
         for filepath in filepaths:
             coll_list, err = import_collection_from_json(filepath)
             if err:
                 QMessageBox.warning(self, "导入失败", f"{filepath}\n{err}")
                 continue
             for coll_data in coll_list:
+                warnings.extend(coll_data.get("_import_warnings", []))
                 cid = self._db.add_protocol_collection(
                     name=coll_data["name"], protocol_type=coll_data["protocol_type"]
                 )
@@ -554,24 +558,18 @@ class _CollectionSidebar(CollectionSidebarBase):
                         )
                 imported += 1
         self.refresh()
-        QMessageBox.information(self, "导入完成", f"成功导入 {imported} 个集合。")
+        QMessageBox.information(self, "导入完成", f"成功导入 {imported} 个集合。"
+                                + ("\n" + "\n".join(dict.fromkeys(warnings)) if warnings else ""))
 
-    def _on_export(self):
-        # 收集所有选中的集合（支持多选）
-        selected = self._tree.selectedItems()
-        if not selected:
-            QMessageBox.information(self, "提示", "请先选择一个或多个集合。")
-            return
-        # 解析选中集合 ID
-        coll_ids = []
-        for item in selected:
-            cid = item.data(0, Qt.UserRole)
-            if cid is not None:
-                coll = self._get_collection(cid)
-                if coll and coll.name != "未分类":
-                    coll_ids.append(cid)
+    def _on_export(self, all_collections: bool = False):
+        if all_collections:
+            coll_ids = [coll.id for coll in self._get_all_collections()]
+        else:
+            coll_ids = [item.data(0, Qt.UserRole) for item in self._tree.selectedItems()
+                        if item.data(0, Qt.UserRole) is not None
+                        and self._get_collection(item.data(0, Qt.UserRole))]
         if not coll_ids:
-            QMessageBox.information(self, "提示", "请选择有效的集合（不能导出未分类）。")
+            QMessageBox.information(self, "提示", "请先选择一个或多个集合。")
             return
         # 构建导出数据
         collections_data = []
@@ -623,14 +621,18 @@ class _CollectionSidebar(CollectionSidebarBase):
             default_name = f"{collections_data[0]['name']}_{ts}.json"
         else:
             default_name = f"{collections_data[0]['name']}_等{len(collections_data)}个集合_{ts}.json"
-        filepath, _ = QFileDialog.getSaveFileName(
-            self, "导出集合", default_name, "JSON 文件 (*.json);;所有文件 (*)")
+        filepath, selected_filter = QFileDialog.getSaveFileName(
+            self, "导出集合", default_name,
+            "TestTool JSON (*.json);;Postman Collection v2.1 (*.postman_collection.json);;所有文件 (*)")
         if not filepath:
             return
-        ok, err = export_collections_to_json(filepath, collections_data)
+        if "Postman" in selected_filter or filepath.lower().endswith(".postman_collection.json"):
+            ok, err = export_postman(filepath, collections_data)
+        else:
+            ok, err = export_collections_to_json(filepath, collections_data)
         if ok:
             QMessageBox.information(
-                self, "导出完成", f"已导出 {len(collections_data)} 个集合到:\n{filepath}")
+                self, "导出完成", f"已导出到:\n{filepath}" + (f"\n{err}" if err else ""))
         else:
             QMessageBox.critical(self, "导出失败", err)
 
@@ -824,27 +826,46 @@ class TargetClientPanel(ClientPanelBase):
     def _client_endpoint(self):
         return (self._param_ip.text().strip(), self._param_port.value())
 
-    def _record_session(self, success: bool, response: str, request: str):
+    def _capture_test_context(self, request: str) -> dict:
+        context = super()._capture_test_context(request)
         owner = self._owner
         if owner._target and owner._coll:
-            proto = self._proto_combo.currentData()
-            if proto == "http_client":
-                protocol_type = "http_client"
-                url = self._http_params.get_url() if self._http_params else ""
-                ip, port = url, 0
-            else:
-                protocol_type = owner._coll.protocol_type
-                ip = self._param_ip.text().strip()
-                port = self._param_port.value()
-            owner._db.add_protocol_test_session(
-                collection_id=owner._coll.id, collection_name=owner._coll.name,
-                target_id=owner._target.id, protocol_type=protocol_type,
-                target_ip=ip,
-                target_port=port,
-                success=success, request=request,
-                response=response, error_msg="" if success else response,
-            )
-            owner._refresh_history()
+            context.update(collection_id=owner._coll.id, collection_name=owner._coll.name,
+                           target_id=owner._target.id)
+        return context
+
+    def _record_session(self, success: bool, response: str, request: str):
+        context = self._pending_test_context
+        if "target_id" not in context:
+            return
+        params = context["params"]
+        proto = params["proto"]
+        if proto == "http_client":
+            ip, port = params.get("url", ""), 0
+        elif proto == "ws_client":
+            ip, port = params.get("ws_url", "") or getattr(self._client_worker, "_url", ""), 0
+        else:
+            ip, port = params["ip"], params["port"]
+        request_raw = response_raw = None
+        if proto in ("tcp_client", "ws_client"):
+            encoding = params.get("encoding", "UTF-8") if proto == "tcp_client" else "UTF-8"
+            try:
+                request_raw = request.encode(encoding)
+            except (LookupError, UnicodeError):
+                pass
+            if proto == "tcp_client":
+                response_raw = getattr(self._client_worker, "response_bytes", None)
+            elif success:
+                response_raw = response.encode("UTF-8")
+        self._owner._db.add_protocol_test_session(
+            collection_id=context["collection_id"], collection_name=context["collection_name"],
+            target_id=context["target_id"], protocol_type=proto,
+            target_ip=ip, target_port=port, success=success, request=request,
+            response=response if success else "", error_msg="" if success else response,
+            test_params=json.dumps(params, ensure_ascii=False),
+            request_raw=request_raw, response_raw=response_raw,
+        )
+        self._owner._refresh_history()
 
     def _update_len_label(self):
         if not self._owner._target:
@@ -1037,6 +1058,84 @@ class TargetMockServerPanel(ServerPanelBase):
         servers = self._db.get_protocol_servers_by_target(self._owner._target.id)
         for srv in servers:
             self._toggle_server(srv)
+
+
+class _HistoryMessageDetail(QGroupBox):
+    """历史报文与参数；十六进制优先使用保存的报文体字节。"""
+
+    def __init__(self, title: str, parent=None):
+        super().__init__(title, parent)
+        self._message = ""
+        self._raw = None
+        self._encoding = "UTF-8"
+        layout = QVBoxLayout(self)
+        toolbar = QHBoxLayout()
+        self.mode = QComboBox()
+        self.mode.addItem("报文", "text")
+        self.mode.addItem("16进制", "hex")
+        self.mode.currentIndexChanged.connect(self._refresh_message)
+        toolbar.addWidget(self.mode)
+        toolbar.addStretch()
+        layout.addLayout(toolbar)
+        self.message = FormatTextEdit()
+        self.format_combo = self.message.format_combo
+        toolbar.addWidget(QLabel("报文类型:"))
+        toolbar.addWidget(self.format_combo)
+        self.format_button = QPushButton("格式化", clicked=self._format_message)
+        toolbar.addWidget(self.format_button)
+        self.message.setReadOnly(True)
+        self.message.setPlaceholderText("选择测试记录查看报文...")
+        layout.addWidget(self.message, 3)
+        layout.addWidget(QLabel(title.replace("报文", "参数")))
+        self.params = QPlainTextEdit()
+        self.params.setReadOnly(True)
+        layout.addWidget(self.params, 1)
+
+    def set_record(self, message: str, raw: bytes | None, encoding: str, params: dict):
+        self._message, self._raw, self._encoding = message, raw, encoding
+        self._display_message = message
+        self.message.set_format("text")
+        self.params.setPlainText(json.dumps(params, ensure_ascii=False, indent=2)
+                                 if params else "该记录未保存测试参数")
+        self._refresh_message()
+
+    def _refresh_message(self, *_args):
+        is_text = self.mode.currentData() == "text"
+        self.format_combo.setEnabled(is_text)
+        self.format_button.setEnabled(is_text)
+        if is_text:
+            self.message._highlighter.set_format(self.message.current_format())
+            self.message.setPlainText(getattr(self, "_display_message", self._message))
+            self.message.setToolTip("")
+            return
+        raw = self._raw
+        if raw is None:
+            try:
+                raw = self._message.encode(self._encoding, errors="replace")
+            except LookupError:
+                raw = self._message.encode("utf-8", errors="replace")
+        self.message._highlighter.set_format("text")
+        self.message.setPlainText(_hex_dump(raw))
+        self.message.setToolTip("保存的报文体字节" if self._raw is not None
+                                else "按报文文本和编码转换的字节")
+
+    def _format_message(self):
+        """仅调整历史详情的显示，不修改保存的原报文。"""
+        fmt = self.message.current_format()
+        payload = self._message
+        prefix = ""
+        # HTTP 历史保留状态行和报文头，只格式化正文。
+        if payload.startswith("HTTP/") or payload.split("\n", 1)[0].endswith(" HTTP/1.1"):
+            if "\n\n" in payload:
+                headers, payload = payload.split("\n\n", 1)
+                prefix = headers + "\n\n"
+        formatted, error = format_payload(payload, "" if fmt == "text" else fmt)
+        if error:
+            QMessageBox.information(self, "格式化失败", error)
+            return
+        self._display_message = prefix + formatted
+        self.message.set_format("xml" if formatted.lstrip().startswith("<") else "json")
+        self._refresh_message()
 
 
 class _TargetDetailPanel(QWidget):
@@ -1262,12 +1361,15 @@ class _TargetDetailPanel(QWidget):
         base_name = (t.name or "").strip()
         if not base_name:
             base_name = f"{info['ip']}_{info['port']}" if info.get("ip") else "目标"
-        filepath, _ = QFileDialog.getSaveFileName(self, "导出目标",
+        filepath, selected_filter = QFileDialog.getSaveFileName(self, "导出目标",
                                                    f"{base_name}_{ts}.json",
-                                                   "JSON 文件 (*.json);;所有文件 (*)")
+                                                   "TestTool JSON (*.json);;Postman Collection v2.1 (*.postman_collection.json);;所有文件 (*)")
         if not filepath:
             return
-        ok, err = export_client_config(filepath, data)
+        if "Postman" in selected_filter or filepath.lower().endswith(".postman_collection.json"):
+            ok, err = export_postman(filepath, [{"name": base_name, "targets": [data]}])
+        else:
+            ok, err = export_client_config(filepath, data)
         if ok:
             QMessageBox.information(self, "导出完成", f"已导出到:\n{filepath}")
         else:
@@ -1286,6 +1388,19 @@ class _TargetDetailPanel(QWidget):
         if not result or not isinstance(result[0], dict):
             return
         cfg = result[0]
+        if "targets" in cfg:
+            targets = [target for collection in result for target in collection.get("targets", [])]
+            if not targets:
+                QMessageBox.information(self, "提示", "文件中没有请求。")
+                return
+            if len(targets) == 1:
+                cfg = targets[0]
+            else:
+                labels = [f"{index + 1}. {target.get('name', '请求')}" for index, target in enumerate(targets)]
+                label, accepted = QInputDialog.getItem(self, "导入请求", "选择请求:", labels, 0, False)
+                if not accepted:
+                    return
+                cfg = targets[labels.index(label)]
         # 只导入预设和压测参数（配置全部在预设中）
         presets = cfg.get("send_presets", [])
         if isinstance(presets, list):
@@ -1347,19 +1462,24 @@ class _TargetDetailPanel(QWidget):
         hh = self._hist_table.horizontalHeader()
         hh.setSectionsClickable(True)
         hh.sectionClicked.connect(self._on_hist_header_clicked)
-        self._hist_table.cellClicked.connect(self._on_hist_cell_clicked)
+        self._hist_table.currentCellChanged.connect(
+            lambda row, col, *_: self._on_hist_cell_clicked(row, col))
         self._hist_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self._hist_table.customContextMenuRequested.connect(self._on_hist_menu)
         enable_stretch_fill(self._hist_table)
         hist_splitter = QSplitter(Qt.Vertical)
         hist_splitter.addWidget(self._hist_table)
 
-        self._hist_detail = QPlainTextEdit()
-        self._hist_detail.setReadOnly(True)
-        self._hist_detail.setPlaceholderText("点击行查看请求和响应详情...")
-        hist_splitter.addWidget(self._hist_detail)
-        hist_splitter.setStretchFactor(0, 3)
-        hist_splitter.setStretchFactor(1, 1)
+        details = QSplitter(Qt.Horizontal)
+        self._hist_send_detail = _HistoryMessageDetail("发送报文")
+        self._hist_recv_detail = _HistoryMessageDetail("接收报文")
+        details.addWidget(self._hist_send_detail)
+        details.addWidget(self._hist_recv_detail)
+        details.setStretchFactor(0, 1)
+        details.setStretchFactor(1, 1)
+        hist_splitter.addWidget(details)
+        hist_splitter.setStretchFactor(0, 1)
+        hist_splitter.setStretchFactor(1, 2)
         layout.addWidget(hist_splitter)
 
         self._hist_sessions = []
@@ -1377,7 +1497,9 @@ class _TargetDetailPanel(QWidget):
         search_text = self._hist_search.text().strip().lower()
         if search_text:
             sessions = [s for s in sessions
-                        if search_text in (s.response or "").lower()
+                        if search_text in (s.request or "").lower()
+                        or search_text in (s.test_params or "").lower()
+                        or search_text in (s.response or "").lower()
                         or search_text in (s.error_msg or "").lower()
                         or search_text in s.target_ip.lower()
                         or search_text in str(s.target_port)]
@@ -1398,6 +1520,12 @@ class _TargetDetailPanel(QWidget):
             t.setItem(row, 2, QTableWidgetItem(s.target_ip))
             t.setItem(row, 3, QTableWidgetItem(str(s.target_port)))
         refresh_tooltips(t)
+        row = t.currentRow()
+        if 0 <= row < len(sessions):
+            self._on_hist_cell_clicked(row, 0)
+        else:
+            for detail in (self._hist_send_detail, self._hist_recv_detail):
+                detail.set_record("", None, "UTF-8", {})
 
     def _on_hist_header_clicked(self, col: int):
         if self._hist_sort_col == col:
@@ -1417,12 +1545,27 @@ class _TargetDetailPanel(QWidget):
                 item.setText(label + arrow)
 
     def _on_hist_cell_clicked(self, row: int, col: int):
-        if row < len(self._hist_sessions):
-            s = self._hist_sessions[row]
-            detail = f"请求:\n{s.request}\n---\n响应 ({'OK' if s.success else 'FAIL'}):\n{s.response}"
-            if s.error_msg:
-                detail += f"\n\n错误:\n{s.error_msg}"
-            self._hist_detail.setPlainText(detail)
+        if not 0 <= row < len(self._hist_sessions):
+            return
+        session = self._hist_sessions[row]
+        try:
+            params = json.loads(session.test_params or "{}")
+        except (ValueError, TypeError):
+            params = {}
+        send_params = {key: value for key, value in params.items()
+                       if key not in ("send_message", "recv_encoding")}
+        recv_params = {key: params[key] for key in
+                       ("proto", "ip", "port", "ws_url", "url", "recv_encoding",
+                        "head_length", "timeout", "ws_timeout", "settings") if key in params}
+        recv_params["结果"] = "OK" if session.success else "FAIL"
+        if session.error_msg:
+            recv_params["错误"] = session.error_msg
+        send_encoding = params.get("encoding", "UTF-8")
+        recv_encoding = params.get("recv_encoding", send_encoding)
+        self._hist_send_detail.set_record(session.request, session.request_raw,
+                                          send_encoding, send_params)
+        self._hist_recv_detail.set_record(session.response, session.response_raw,
+                                          recv_encoding, recv_params)
 
     def _on_hist_menu(self, pos):
         item = self._hist_table.itemAt(pos)
@@ -1482,7 +1625,7 @@ class _TargetDetailPanel(QWidget):
                                                      "Excel (*.xlsx);;CSV (*.csv)")
         if not fp:
             return
-        headers = ["测试时间", "协议", "目标IP", "端口", "结果", "请求报文", "响应报文", "错误信息"]
+        headers = ["测试时间", "协议", "目标IP", "端口", "结果", "发送报文", "响应报文", "错误信息", "测试参数"]
         rows = [
             [
                 s.started_at,
@@ -1493,6 +1636,7 @@ class _TargetDetailPanel(QWidget):
                 s.request or "",
                 s.response or "",
                 s.error_msg or "",
+                s.test_params or "{}",
             ]
             for s in sessions
         ]
@@ -2157,333 +2301,6 @@ class _ServerTab(ServerPanelBase):
         for log in self._logs.values():
             log.appendPlainText("服务端已停止")
 
-class _GlobalHistoryTab(QWidget):
-    """全局协议测试历史。"""
-
-    def __init__(self, db: Database, parent=None):
-        super().__init__(parent)
-        self._db = db
-        self._all_sessions = []
-        self._current_session = None
-        self._last_raw = b""
-        self._sort_col: int = 0
-        self._sort_asc: bool = False
-        self._setup_ui()
-
-    def _setup_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
-
-        fl = QHBoxLayout()
-        fl.addWidget(QLabel("协议:"))
-        self._proto_filter = QComboBox()
-        self._proto_filter.addItem("全部", None)
-        self._proto_filter.addItem("TCP", "tcp_client")
-        self._proto_filter.addItem("WebSocket", "ws_client")
-        self._proto_filter.addItem("HTTP", "http_client")
-        self._proto_filter.currentIndexChanged.connect(self.refresh)
-        fl.addWidget(self._proto_filter)
-        self._search = QLineEdit()
-        self._search.setPlaceholderText("搜索 IP/端口...")
-        self._search.setClearButtonEnabled(True)
-        self._search.textChanged.connect(self._filter)
-        fl.addWidget(self._search)
-        fl.addStretch()
-        layout.addLayout(fl)
-
-        # ── 选择与删除操作栏 ──
-        sel_bar = QHBoxLayout()
-        sel_bar.addWidget(QPushButton("全选", clicked=self._select_all))
-
-        sel_bar.addWidget(QPushButton("反选", clicked=self._invert_selection))
-        sel_bar.addStretch()
-        # 刷新按钮在删除按钮前面，删除/清空在行尾
-        sel_bar.addWidget(QPushButton("刷新", clicked=self.refresh))
-        del_btn = QPushButton("删除")
-        del_btn.clicked.connect(self._delete_selected)
-        sel_bar.addWidget(del_btn)
-        clear_btn = QPushButton("清空")
-        clear_btn.clicked.connect(self._clear_all)
-        sel_bar.addWidget(clear_btn)
-        # 导出按钮放在清空按钮后面
-        sel_bar.addWidget(QPushButton("导出", clicked=self._export))
-        layout.addLayout(sel_bar)
-
-        self._table = QTableWidget()
-        self._table.setColumnCount(6)
-        self._table.setHorizontalHeaderLabels(["时间", "集合", "协议", "目标", "端口", "结果"])
-        self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self._table.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self._table.setAlternatingRowColors(False)
-        self._table.verticalHeader().setVisible(False)
-        self._table.cellClicked.connect(self._on_cell_clicked)
-        self._table.horizontalHeader().setSectionsClickable(True)
-        self._table.horizontalHeader().sectionClicked.connect(self._on_header_clicked)
-        self._table.setContextMenuPolicy(Qt.CustomContextMenu)
-        self._table.customContextMenuRequested.connect(self._on_table_menu)
-        enable_stretch_fill(self._table)
-
-        hist_splitter = QSplitter(Qt.Vertical)
-
-        # ── 详情区（编码 + 十六进制切换）──
-        detail_w = QWidget()
-        detail_layout = QVBoxLayout(detail_w)
-        detail_layout.setContentsMargins(0, 0, 0, 0)
-        detail_layout.setSpacing(2)
-        detail_tool = QHBoxLayout()
-        detail_tool.addWidget(QLabel("编码:"))
-        self._detail_enc_combo = QComboBox()
-        self._detail_enc_combo.setEditable(True)
-        self._detail_enc_combo.addItems(ENCODINGS)
-        self._detail_enc_combo.currentTextChanged.connect(self._refresh_detail_display)
-        detail_tool.addWidget(self._detail_enc_combo)
-        self._detail_hex_toggle = QPushButton("十六进制")
-        self._detail_hex_toggle.setCheckable(True)
-        self._detail_hex_toggle.toggled.connect(self._refresh_detail_display)
-        detail_tool.addWidget(self._detail_hex_toggle)
-        detail_tool.addStretch()
-        detail_layout.addLayout(detail_tool)
-        self._detail = QPlainTextEdit()
-        self._detail.setReadOnly(True)
-        self._detail.setPlaceholderText("点击行查看请求和响应详情...")
-        self._detail.setFont(QFont("Consolas", 10))
-        detail_layout.addWidget(self._detail)
-
-        hist_splitter.addWidget(self._table)
-        hist_splitter.addWidget(detail_w)
-        hist_splitter.setStretchFactor(0, 3)
-        hist_splitter.setStretchFactor(1, 1)
-        layout.addWidget(hist_splitter)
-
-    def refresh(self):
-        proto = self._proto_filter.currentData()
-        self._all_sessions = self._db.get_protocol_test_sessions(proto)
-        # 字段排序
-        if self._sort_col >= 0:
-            key_map = {
-                0: lambda s: s.started_at,
-                1: lambda s: (s.collection_name or "").lower(),
-                2: lambda s: ("HTTP" if "http" in s.protocol_type else ("WS" if "ws" in s.protocol_type else "TCP")),
-                3: lambda s: s.target_ip,
-                4: lambda s: s.target_port,
-                5: lambda s: s.success,
-            }
-            key_fn = key_map.get(self._sort_col)
-            if key_fn:
-                self._all_sessions.sort(key=key_fn, reverse=not self._sort_asc)
-        self._update_sort_indicator()
-        self._populate_table()
-        if self._search.text().strip():
-            self._filter(self._search.text())
-        # 数据可能已变化，重置详情显示
-        self._current_session = None
-        self._last_raw = b""
-        self._detail.clear()
-
-    def _on_header_clicked(self, col: int):
-        if self._sort_col == col:
-            self._sort_asc = not self._sort_asc
-        else:
-            self._sort_col = col
-            self._sort_asc = True
-        self.refresh()
-
-    def _update_sort_indicator(self):
-        headers = {0: "时间", 1: "集合", 2: "协议", 3: "目标", 4: "端口", 5: "结果"}
-        for c, label in headers.items():
-            item = self._table.horizontalHeaderItem(c)
-            if item:
-                arrow = " ▲" if (c == self._sort_col and self._sort_asc) else \
-                        " ▼" if c == self._sort_col else ""
-                item.setText(label + arrow)
-
-    # ── 选择操作 ──────────────────────────────────────────
-
-    def _select_all(self):
-        self._table.selectAll()
-
-    def _deselect_all(self):
-        self._table.clearSelection()
-
-    def _invert_selection(self):
-        model = self._table.model()
-        rows = self._table.rowCount()
-        if rows == 0:
-            return
-        sm = self._table.selectionModel()
-        sel_rows = set()
-        for r in range(rows):
-            if sm.isSelected(model.index(r, 0)):
-                sel_rows.add(r)
-        if not sel_rows:
-            self._table.selectAll()
-            return
-        from PySide6.QtCore import QItemSelection, QItemSelectionModel
-        new_sel = QItemSelection()
-        for r in range(rows):
-            if r not in sel_rows:
-                new_sel.select(model.index(r, 0), model.index(r, self._table.columnCount() - 1))
-        sm.select(new_sel, QItemSelectionModel.ClearAndSelect)
-        self._table.setFocus()
-
-    # ── 删除操作 ──────────────────────────────────────────
-
-    def _delete_selected(self):
-        rows = set(i.row() for i in self._table.selectedIndexes())
-        ids = [self._all_sessions[r].id for r in rows
-               if r < len(self._all_sessions)]
-        if not ids:
-            QMessageBox.information(self, "提示", "请先选择要删除的记录。")
-            return
-        r = QMessageBox.question(
-            self, "确认删除",
-            f"确定要删除选中的 {len(ids)} 条测试记录吗？",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if r != QMessageBox.Yes:
-            return
-        self._db.delete_protocol_test_sessions(ids)
-        self.refresh()
-
-    def _clear_all(self):
-        r = QMessageBox.question(
-            self, "确认清空",
-            "确定要清空全部协议测试历史吗？此操作不可恢复。",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if r != QMessageBox.Yes:
-            return
-        self._db.clear_protocol_test_sessions()
-        self.refresh()
-
-    def _populate_table(self):
-        sessions = self._all_sessions
-        self._table.setRowCount(len(sessions))
-        for row, s in enumerate(sessions):
-            self._table.setItem(row, 0, QTableWidgetItem(s.started_at))
-            self._table.setItem(row, 1, QTableWidgetItem(s.collection_name or "-"))
-            proto_label = "HTTP" if "http" in s.protocol_type else ("WS" if "ws" in s.protocol_type else "TCP")
-            self._table.setItem(row, 2, QTableWidgetItem(proto_label))
-            self._table.setItem(row, 3, QTableWidgetItem(s.target_ip))
-            self._table.setItem(row, 4, QTableWidgetItem(str(s.target_port)))
-            ok = "OK" if s.success else "FAIL"
-            ri = QTableWidgetItem(ok)
-            ri.setForeground(Qt.green if s.success else Qt.red)
-            self._table.setItem(row, 5, ri)
-        refresh_tooltips(self._table)
-
-    def _filter(self, text: str):
-        s = text.strip().lower()
-        for row in range(self._table.rowCount()):
-            ip = self._table.item(row, 3)
-            port = self._table.item(row, 4)
-            match = (ip and s in ip.text().lower()) or (port and s in port.text())
-            self._table.setRowHidden(row, not match if s else False)
-
-    def _on_cell_clicked(self, row: int, col: int):
-        if row >= len(self._all_sessions):
-            return
-        sess = self._all_sessions[row]
-        self._current_session = sess
-        # 存储响应原始字节，供编码切换/十六进制显示使用
-        self._last_raw = (sess.response or "").encode("utf-8", errors="replace")
-        self._refresh_detail_display()
-
-    def _on_table_menu(self, pos):
-        """全局测试历史右键菜单：导出/刷新/删除/清空。"""
-        item = self._table.itemAt(pos)
-        menu = QMenu(self)
-        menu.addAction("导出", self._export)
-        menu.addAction("刷新", self.refresh)
-        if item:
-            row = item.row()
-            model = self._table.model()
-            if not self._table.selectionModel().isSelected(model.index(row, 0)):
-                self._table.selectRow(row)
-            menu.addAction("删除", self._delete_selected)
-        menu.addSeparator()
-        menu.addAction("清空", self._clear_all)
-        menu.exec(self._table.viewport().mapToGlobal(pos))
-
-    def _refresh_detail_display(self):
-        """根据当前编码选择与十六进制开关刷新详情显示。"""
-        sess = self._current_session
-        if sess is None:
-            return
-        header = f"请求:\n{sess.request}\n---\n响应 ({'OK' if sess.success else 'FAIL'}):"
-        if self._detail_hex_toggle.isChecked():
-            raw = self._last_raw or b""
-            detail = f"{header}\n{_hex_dump(raw)}"
-        else:
-            enc = self._detail_enc_combo.currentText()
-            raw = self._last_raw or b""
-            try:
-                text = raw.decode(enc)
-            except (UnicodeDecodeError, UnicodeEncodeError):
-                text = raw.decode(enc, errors="replace")
-            detail = f"{header}\n{text}"
-        if sess.error_msg:
-            detail += f"\n\n错误:\n{sess.error_msg}"
-        self._detail.setPlainText(detail)
-
-    def _export(self):
-        sessions = self._all_sessions
-        # 支持多选导出：选中则只导出选中行
-        sel_rows = sorted(set(i.row() for i in self._table.selectedIndexes()))
-        if sel_rows:
-            sessions = [sessions[r] for r in sel_rows if r < len(sessions)]
-        if not sessions:
-            QMessageBox.information(self, "提示", "没有可导出的数据。")
-            return
-        fp, sel_filter = QFileDialog.getSaveFileName(self, "导出测试历史", "protocol_history.xlsx",
-                                                     "Excel (*.xlsx);;CSV (*.csv)")
-        if not fp:
-            return
-        headers = ["测试时间", "集合", "协议", "目标IP", "端口", "结果", "请求报文", "响应报文", "错误信息"]
-        rows = [
-            [
-                s.started_at,
-                s.collection_name or "-",
-                "HTTP" if "http" in s.protocol_type else ("WS" if "ws" in s.protocol_type else "TCP"),
-                s.target_ip,
-                s.target_port,
-                "OK" if s.success else "FAIL",
-                s.request or "",
-                s.response or "",
-                s.error_msg or "",
-            ]
-            for s in sessions
-        ]
-        is_xlsx = fp.lower().endswith(".xlsx")
-        if not fp.lower().endswith((".csv", ".xlsx")):
-            # 无扩展名时按所选过滤器补充
-            fp += ".xlsx" if "xlsx" in sel_filter else ".csv"
-            is_xlsx = fp.lower().endswith(".xlsx")
-        try:
-            if is_xlsx:
-                from src.excel_handler import export_rows_to_excel
-                ok, err = export_rows_to_excel(fp, headers, rows)
-                if not ok:
-                    QMessageBox.critical(self, "导出失败", err)
-                    return
-            else:
-                import csv
-                with open(fp, "w", encoding="utf-8-sig", newline="") as f:
-                    writer = csv.writer(f)
-                    writer.writerow(headers)
-                    writer.writerows(rows)
-            QMessageBox.information(self, "导出完成", f"已导出 {len(sessions)} 条记录。")
-        except OSError as e:
-            QMessageBox.critical(self, "导出失败", str(e))
-
-    def keyPressEvent(self, event):
-        if shortcuts.event_matches(event, "refresh"):
-            self.refresh()
-        elif shortcuts.event_matches(event, "delete"):
-            self._delete_selected()
-        else:
-            super().keyPressEvent(event)
-
-
 # ── 独立客户端 ──────────────────────────────────────────────
 
 
@@ -2716,14 +2533,11 @@ class ProtocolPanel(QWidget):
         self._server_tab = _ServerTab(self._db)
         self._tabs.addTab(self._server_tab, "服务端")
 
-        # Tab 3: 全局测试历史
-        self._history_tab = _GlobalHistoryTab(self._db)
-        self._tabs.addTab(self._history_tab, "全局测试历史")
         self._tabs.currentChanged.connect(self._on_tab_changed)
         self._tabs.tabCloseRequested.connect(self._on_tab_close)
 
-        # 记录固定标签页: [0, 1, 2, 3]
-        self._fixed_tab_count = 4
+        # 记录固定标签页: [0, 1, 2]
+        self._fixed_tab_count = 3
         self._tabs.setTabsClosable(True)
         self._hide_fixed_close_buttons()
 
@@ -2833,8 +2647,6 @@ class ProtocolPanel(QWidget):
         widget = self._tabs.widget(idx)
         if widget == self._server_tab:
             self._server_tab.refresh()
-        elif widget == self._history_tab:
-            self._history_tab.refresh()
 
     # ── 公共方法 ─────────────────────────────────────────────
 

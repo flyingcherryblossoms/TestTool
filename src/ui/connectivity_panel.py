@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.postman_handler import is_postman, postman_connectivity_targets, export_connectivity_postman
 from src.csv_handler import export_targets_to_csv, parse_targets_csv
 from src.database import Database
 from src.excel_handler import export_targets_to_excel, parse_targets_excel
@@ -141,26 +142,22 @@ class _CollectionListTab(CollectionSidebarBase):
         self.refresh()
         QMessageBox.information(self, "导入完成", f"成功导入 {count} 条记录。")
 
-    def _on_export(self):
-        selected = self._tree.selectedItems()
-        valid = [it.data(0, Qt.UserRole) for it in selected
-                 if it.data(0, Qt.UserRole) not in (None, 0)]
+    def _on_export(self, all_collections: bool = False):
+        valid = [it.data(0, Qt.UserRole) for it in self._tree.selectedItems()
+                 if it.data(0, Qt.UserRole) is not None]
         coll_names = []
-        if valid:
+        if all_collections:
+            targets = self._db.get_targets(None)
+        elif valid:
             targets = []
             for bid in valid:
-                coll = self._get_collection(bid)
+                coll = self._get_collection(bid) if bid else self._ensure_uncat()
                 if coll:
                     coll_names.append(coll.name)
                 targets.extend(self._db.get_targets(bid))
         else:
-            reply = QMessageBox.question(
-                self, "导出确认",
-                "未选中集合，是否导出所有目标数据？",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
-            if reply != QMessageBox.Yes:
-                return
-            targets = self._db.get_targets(None)
+            QMessageBox.information(self, "提示", "请先选择一个或多个集合。")
+            return
         if not targets:
             QMessageBox.information(self, "提示", "没有可导出的数据。")
             return
@@ -172,9 +169,9 @@ class _CollectionListTab(CollectionSidebarBase):
             default_name = f"{coll_names[0]}_等{len(coll_names)}个集合_{ts}.json"
         else:
             default_name = f"collections_{ts}.json"
-        filepath, _ = QFileDialog.getSaveFileName(
+        filepath, selected_filter = QFileDialog.getSaveFileName(
             self, "导出目标", default_name,
-            "JSON 文件 (*.json);;Excel 文件 (*.xlsx);;CSV 文件 (*.csv)")
+            "TestTool JSON (*.json);;Postman Collection v2.1 (*.postman_collection.json);;Excel 文件 (*.xlsx);;CSV 文件 (*.csv)")
         if not filepath:
             return
         data = [{"ip": t.ip, "port": t.port, "description": t.description,
@@ -183,7 +180,9 @@ class _CollectionListTab(CollectionSidebarBase):
         if not ext:
             filepath += ".json"
             ext = ".json"
-        if ext == ".json":
+        if "Postman" in selected_filter or filepath.lower().endswith(".postman_collection.json"):
+            ok, err = export_connectivity_postman(filepath, data)
+        elif ext == ".json":
             ok, err = _export_connectivity_json(filepath, data)
         elif ext == ".csv":
             from src.csv_handler import export_targets_to_csv
@@ -249,6 +248,9 @@ def _parse_connectivity_json(filepath: str) -> tuple[list[dict], list[str]]:
 
     if not isinstance(doc, dict):
         return [], ["JSON 格式错误：根节点应为对象"]
+
+    if is_postman(doc):
+        return postman_connectivity_targets(doc)
 
     version = doc.get("version", 0)
     if version != 1:

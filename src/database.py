@@ -193,6 +193,9 @@ class ProtocolTestSession:
     request: str = ""
     response: str = ""
     error_msg: str = ""
+    test_params: str = "{}"
+    request_raw: bytes | None = None
+    response_raw: bytes | None = None
 
 
 # ── SQL 建表语句 ──────────────────────────────────────────
@@ -319,7 +322,10 @@ CREATE TABLE IF NOT EXISTS protocol_test_sessions (
     success INTEGER DEFAULT 0,
     request TEXT DEFAULT '',
     response TEXT DEFAULT '',
-    error_msg TEXT DEFAULT ''
+    error_msg TEXT DEFAULT '',
+    test_params TEXT DEFAULT '{}',
+    request_raw BLOB,
+    response_raw BLOB
 );
 
 CREATE INDEX IF NOT EXISTS idx_protocol_targets_coll
@@ -520,6 +526,18 @@ class Database:
                 )
             except sqlite3.OperationalError:
                 pass  # 列已存在
+            # 保存发送时的测试参数，旧记录保留空快照
+            try:
+                conn.execute(
+                    "ALTER TABLE protocol_test_sessions ADD COLUMN test_params TEXT DEFAULT '{}'"
+                )
+            except sqlite3.OperationalError:
+                pass  # 列已存在
+            for column in ("request_raw", "response_raw"):
+                try:
+                    conn.execute(f"ALTER TABLE protocol_test_sessions ADD COLUMN {column} BLOB")
+                except sqlite3.OperationalError:
+                    pass  # 列已存在
             # 集合不再需要描述列，旧数据库迁移时一并删除
             for table in ("connect_collections", "protocol_collections"):
                 try:
@@ -1380,16 +1398,19 @@ class Database:
                                   target_ip: str, target_port: int,
                                   success: bool, request: str = "",
                                   response: str = "",
-                                  error_msg: str = "") -> int:
+                                  error_msg: str = "",
+                                  test_params: str = "{}",
+                                  request_raw: bytes | None = None,
+                                  response_raw: bytes | None = None) -> int:
         """记录一次协议测试，返回会话 ID。"""
         with self._connect() as conn:
             cur = conn.execute("""
                 INSERT INTO protocol_test_sessions
                     (collection_id, collection_name, target_id, protocol_type,
-                     target_ip, target_port, success, request, response, error_msg)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     target_ip, target_port, success, request, response, error_msg, test_params, request_raw, response_raw)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (collection_id, collection_name, target_id, protocol_type,
-                  target_ip, target_port, 1 if success else 0, request, response, error_msg))
+                  target_ip, target_port, 1 if success else 0, request, response, error_msg, test_params, request_raw, response_raw))
             return cur.lastrowid
 
     def get_protocol_test_sessions(self, protocol_type: str | None = None,
@@ -1415,7 +1436,8 @@ class Database:
                 started_at=r["started_at"],
                 success=bool(r["success"]),
                 request=r["request"], response=r["response"],
-                error_msg=r["error_msg"]
+                error_msg=r["error_msg"], test_params=r["test_params"],
+                request_raw=r["request_raw"], response_raw=r["response_raw"]
             ) for r in rows]
 
     def get_protocol_test_sessions_by_target(self, target_id: int,
@@ -1436,7 +1458,8 @@ class Database:
                 started_at=r["started_at"],
                 success=bool(r["success"]),
                 request=r["request"], response=r["response"],
-                error_msg=r["error_msg"]
+                error_msg=r["error_msg"], test_params=r["test_params"],
+                request_raw=r["request_raw"], response_raw=r["response_raw"]
             ) for r in rows]
 
     def delete_protocol_test_session(self, session_id: int) -> None:
