@@ -1919,14 +1919,14 @@ class _CollectionDetailTab(QWidget):
 
     def _save_target_column_widths(self):
         """保存用户调整后的列宽到 QSettings。"""
-        settings = QSettings("TestTool", "TestTool")
+        settings = QSettings(QSettings.defaultFormat(), QSettings.UserScope, "TestTool", "TestTool")
         t = self._target_table
         for col in range(t.columnCount()):
             settings.setValue(f"proto_target_col_{col}", t.columnWidth(col))
 
     def _restore_target_column_widths(self):
         """从 QSettings 恢复列宽，首次运行时使用默认紧凑列宽。"""
-        settings = QSettings("TestTool", "TestTool")
+        settings = QSettings(QSettings.defaultFormat(), QSettings.UserScope, "TestTool", "TestTool")
         t = self._target_table
         hh = t.horizontalHeader()
         for col in range(t.columnCount()):
