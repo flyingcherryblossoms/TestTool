@@ -7,15 +7,13 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal, QItemSelectionModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
-    QHBoxLayout,
     QLineEdit,
     QMenu,
     QMessageBox,
-    QPushButton,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
@@ -73,12 +71,6 @@ class CollectionSidebarBase(QWidget):
         self._tree.order_changed.connect(self._on_collections_moved)
         layout.addWidget(self._tree)
 
-        # 底部仅保留导入/导出按钮，新建/编辑/删除等操作集成在右键菜单里
-        btn_row = QHBoxLayout()
-        btn_row.addWidget(QPushButton("导入", clicked=self._on_import))
-        btn_row.addWidget(QPushButton("导出", clicked=self._on_export))
-        layout.addLayout(btn_row)
-
     # ── 子类需实现的集合访问方法 ─────────────────────────────
 
     def _get_all_collections(self) -> list:
@@ -125,7 +117,7 @@ class CollectionSidebarBase(QWidget):
     def _on_import(self):
         pass
 
-    def _on_export(self):
+    def _on_export(self, all_collections: bool = False):
         pass
 
     def _build_collection_menu(self, menu: QMenu, item, cid: int) -> None:
@@ -258,7 +250,8 @@ class CollectionSidebarBase(QWidget):
             selected = self._tree.selectedItems()
             if item not in selected:
                 self._tree.clearSelection()
-            self._tree.setCurrentItem(item)
+            self._tree.setCurrentItem(item, 0, QItemSelectionModel.NoUpdate)
+            item.setSelected(True)
         cid = item.data(0, Qt.UserRole) if item else None
         is_custom = cid is not None and cid != self._uncat_node_id()
 
@@ -273,7 +266,10 @@ class CollectionSidebarBase(QWidget):
             self._build_blank_menu(menu)
         menu.addSeparator()
         menu.addAction("导入集合", self._on_import)
-        menu.addAction("导出集合", self._on_export)
+        export_selected = menu.addAction("导出选中集合", lambda: self._on_export(False))
+        export_selected.setEnabled(any(it.data(0, Qt.UserRole) is not None
+                                       for it in self._tree.selectedItems()))
+        menu.addAction("全量导出", lambda: self._on_export(True))
         menu.exec(self._tree.mapToGlobal(pos))
 
     # ── 新建 / 编辑 / 删除 ───────────────────────────────────

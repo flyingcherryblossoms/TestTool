@@ -86,6 +86,10 @@ def import_collection_from_json(filepath: str | Path) -> tuple:
     if not isinstance(data, dict):
         return None, "JSON 格式错误：根节点应为对象"
 
+    from src.postman_handler import is_postman, import_postman
+    if is_postman(data):
+        return import_postman(data)
+
     version = data.get("version", 0)
     if version != 1:
         return None, f"不支持的版本: {version}"

@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
+    QFileDialog,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -362,6 +363,11 @@ class ClientPanelBase(QWidget):
     def _client_endpoint(self) -> tuple[str, int]:
         """当前客户端用于连通性检测的 IP:端口。"""
         return self._param_ip.text().strip(), self._param_port.value()
+
+    def _capture_test_context(self, request: str) -> dict:
+        """发送前冻结参数，避免请求期间修改界面影响历史。"""
+        return {"params": json.loads(json.dumps(self.collect_params(), ensure_ascii=False)),
+                "request": request}
 
     def _record_session(self, success: bool, response: str, request: str):
         """发送完成后记录测试会话（目标客户端实现）。"""
@@ -829,14 +835,8 @@ class ClientPanelBase(QWidget):
     # ── 报文格式化 ───────────────────────────────────────────
 
     def _format_message(self):
-        """按所选格式把发送框内容格式化（text 不处理，json / xml 缩进排版）。"""
-        text = self._send_edit.toPlainText()
-        formatted, err = format_payload(text, self._send_edit.current_format())
-        if err:
-            QMessageBox.warning(self, "格式化", err)
-            return
-        if formatted != text:
-            self._send_edit.setPlainText(formatted)
+        """自动识别发送报文类型，并同步格式选择与高亮。"""
+        self._format_editor(self._send_edit)
 
     def _build_send_edit_menu(self, pos) -> QMenu:
         """构建发送框右键菜单：标准编辑菜单 + 「格式化」动作。"""
@@ -1576,6 +1576,7 @@ class ClientPanelBase(QWidget):
             request_text = self._http_request_info + ("\n\n" + body if body else "")
             self._response_history.add_message("发送", request_text, payload=body or request_text)
             self._pending_send_record_idx = len(self._response_history.messages) - 1
+            self._pending_test_context = self._capture_test_context(request_text)
             self._http_params.set_sending_state(True)
             self._client_worker = self._http_params.build_worker(parent=self)
             self._client_worker.finished.connect(self._on_client_done)
@@ -1590,7 +1591,10 @@ class ClientPanelBase(QWidget):
         self._send_btn.setText("发送中...")
         self._terminate_btn.setVisible(True)
         self._response_history.add_message("发送", msg)
+        self._pending_test_context = self._capture_test_context(msg)
         self._client_worker = self._build_client_worker(msg, proto)
+        if proto == "ws_client":
+            self._pending_test_context["params"]["ws_url"] = self._client_worker._url
         self._client_worker.finished.connect(self._on_client_done)
         self._client_worker.start()
 
@@ -1651,22 +1655,30 @@ class ClientPanelBase(QWidget):
             f"[{ts}][客户端][{ip}]:\n{request}\n"
             f"[{ts}] {tag}:\n{response}"
         )
-        self._record_session(success, response, request)
+        context = self._pending_test_context
+        saved_request = getattr(self._client_worker, "request_message", "") or context["request"]
+        saved_response = getattr(self._client_worker, "response_message", response) if success else response
+        self._record_session(success, saved_response, saved_request)
         self.test_finished.emit()
 
     def _refresh_response_display(self):
         self._response_history.set_encoding(self._resp_enc_combo.currentText())
 
     def _format_editor(self, editor: QPlainTextEdit):
-        """仅格式化报文编辑框本身的内容。"""
+        """自动格式化报文，并同步编辑器的格式选项。"""
         text = editor.toPlainText()
         if not text.strip():
             return
         formatted, error = format_payload(text)
         if error:
             QMessageBox.information(self, "格式化失败", "内容不是有效的 JSON 或 XML。")
-        elif formatted != text:
+            return
+        if formatted != text:
             editor.setPlainText(formatted)
+        if isinstance(editor, FormatTextEdit):
+            # 自动格式化成功后，输出只可能是 JSON 或 XML。
+            fmt = "xml" if formatted.lstrip().startswith("<") else "json"
+            editor.format_combo.setCurrentIndex(editor.format_combo.findData(fmt))
 
     def _append_response(self, text: str):
         self._resp_edit.appendPlainText(text)
@@ -2137,6 +2149,8 @@ class ServerPanelBase(QWidget):
         tab_tool.addWidget(QPushButton(
             "清空", clicked=lambda _checked=False, sid=s.id: self._clear_log(sid)))
         tab_layout.addLayout(tab_tool)
+        tab_tool.addWidget(QPushButton(
+            "保存接收文件", clicked=lambda _checked=False, sid=s.id: self._save_received_file(sid)))
         history = MessageHistoryWidget()
         history.log_toggle.toggled.connect(hex_toggle.setVisible)
         log_w = history.log_edit
@@ -2165,6 +2179,39 @@ class ServerPanelBase(QWidget):
         self._status.setdefault(s.id, [])
         self._addr[s.id] = f"{s.ip}:{s.port}"
         self._log_to_server(s.id, f"Start [{s.name}] {s.ip}:{s.port}")
+
+    def _save_received_file(self, sid: int):
+        """保存选中的接收报文体，优先使用原始字节以保留二进制内容。"""
+        history = self._histories.get(sid)
+        row = history.list.currentRow() if history else -1
+        if history is None or not 0 <= row < len(history.messages):
+            QMessageBox.information(self, "提示", "请先选择一条接收报文。")
+            return
+        record = history.messages[row]
+        if record["direction"] != "接收":
+            QMessageBox.information(self, "提示", "请选择接收报文，不能保存发送记录。")
+            return
+        raw = record["raw"]
+        if raw is None:
+            try:
+                raw = record["payload"].encode(history.encoding)
+            except (LookupError, UnicodeError) as exc:
+                QMessageBox.warning(self, "保存失败", str(exc))
+                return
+        server = self._db.get_protocol_server(sid)
+        if server and server.server_type == "http_server" and b"\r\n\r\n" in raw:
+            raw = raw.split(b"\r\n\r\n", 1)[1]
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "保存接收文件", "received.bin", "所有文件 (*)")
+        if not filepath:
+            return
+        try:
+            with open(filepath, "wb") as output:
+                output.write(raw)
+        except OSError as exc:
+            QMessageBox.warning(self, "保存失败", str(exc))
+            return
+        QMessageBox.information(self, "保存完成", f"已保存 {len(raw)} 字节到:\n{filepath}")
 
     def _log_to_server(self, sid: int, text: str):
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
