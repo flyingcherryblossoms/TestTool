@@ -53,8 +53,10 @@ from PySide6.QtWidgets import (
 from src.database import Database, target_display_info, DEFAULT_PRESET_NAME
 from src.protocol import compute_length_header
 from src.postman_handler import export_postman
+from src.protocol_history import history_client_config, load_protocol_history_params
 from src.ui.message_history import _hex_dump
 from src.ui.format_text import FormatTextEdit
+from src.ui.history_worker import HistoryFileWorker
 from src.ui.message_format import format_payload
 from src.ui import shortcuts
 from src.ui.clipboard import KIND_PROTO_TARGET, copy_items, paste_items
@@ -1449,7 +1451,18 @@ class _TargetDetailPanel(QWidget):
         fl.addWidget(QPushButton("刷新", clicked=self._refresh_history))
         fl.addWidget(QPushButton("删除", clicked=self._delete_hist_sessions))
         fl.addWidget(QPushButton("清空", clicked=self._clear_hist))
-        fl.addWidget(QPushButton("导出", clicked=self._export_history))
+        self._history_file_worker = None
+        self._hist_file_import_btn = QPushButton("导入", clicked=self._import_history)
+        self._hist_file_export_btn = QPushButton("导出", clicked=self._export_history)
+        fl.addWidget(self._hist_file_import_btn)
+        fl.addWidget(self._hist_file_export_btn)
+        self._history_file_status = QLabel()
+        fl.addWidget(self._history_file_status)
+        self._hist_import_btn = QPushButton("导入为新配置")
+        self._hist_import_btn.setToolTip("恢复该次测试的协议、参数和发送报文到客户端")
+        self._hist_import_btn.clicked.connect(lambda: self._import_history_config())
+        self._hist_import_btn.setEnabled(False)
+        fl.addWidget(self._hist_import_btn)
         layout.addLayout(fl)
 
         self._hist_table = QTableWidget()
@@ -1498,7 +1511,8 @@ class _TargetDetailPanel(QWidget):
         if search_text:
             sessions = [s for s in sessions
                         if search_text in (s.request or "").lower()
-                        or search_text in (s.test_params or "").lower()
+                        or search_text in json.dumps(load_protocol_history_params(
+                            s.test_params, s.protocol_type), ensure_ascii=False).lower()
                         or search_text in (s.response or "").lower()
                         or search_text in (s.error_msg or "").lower()
                         or search_text in s.target_ip.lower()
@@ -1545,13 +1559,11 @@ class _TargetDetailPanel(QWidget):
                 item.setText(label + arrow)
 
     def _on_hist_cell_clicked(self, row: int, col: int):
+        self._hist_import_btn.setEnabled(0 <= row < len(self._hist_sessions))
         if not 0 <= row < len(self._hist_sessions):
             return
         session = self._hist_sessions[row]
-        try:
-            params = json.loads(session.test_params or "{}")
-        except (ValueError, TypeError):
-            params = {}
+        params = load_protocol_history_params(session.test_params, session.protocol_type)
         send_params = {key: value for key, value in params.items()
                        if key not in ("send_message", "recv_encoding")}
         recv_params = {key: params[key] for key in
@@ -1567,9 +1579,50 @@ class _TargetDetailPanel(QWidget):
         self._hist_recv_detail.set_record(session.response, session.response_raw,
                                           recv_encoding, recv_params)
 
+    def _import_history_config(self, row: int | None = None):
+        if not self._target:
+            return
+        if row is None:
+            row = self._hist_table.currentRow()
+        if not 0 <= row < len(self._hist_sessions):
+            QMessageBox.information(self, "提示", "请先选择一条测试历史。")
+            return
+        session = self._hist_sessions[row]
+        try:
+            config = history_client_config(session.test_params, session.protocol_type,
+                                           session.request)
+        except ValueError as exc:
+            QMessageBox.warning(self, "无法导入", str(exc))
+            return
+        client = self._client_panel
+        presets = list(client.get_presets(proto=session.protocol_type))
+        base_name = f"历史配置 {session.started_at or session.id}"
+        name = base_name
+        names = {preset.get('name') for preset in presets}
+        suffix = 2
+        while name in names:
+            name = f"{base_name}（{suffix}）"
+            suffix += 1
+        presets.append({'name': name, 'message': json.dumps(config, ensure_ascii=False)})
+        client.save_presets(presets, proto=session.protocol_type)
+        # 正常切换协议以保留现有草稿，再选择新增配置；不覆盖任何已有配置。
+        client._proto_combo.setCurrentIndex(
+            client._proto_combo.findData(session.protocol_type))
+        client._refresh_preset_list()
+        client._select_preset(len(presets) - 1)
+        client.presets_saved.emit()
+        self._tabs.setCurrentIndex(0)
+        if self._client_collapsed:
+            self._restore_client_panel()
+        if session.protocol_type == 'http_client':
+            client._http_params.setFocus()
+        else:
+            client._send_edit.setFocus()
+
     def _on_hist_menu(self, pos):
         item = self._hist_table.itemAt(pos)
         menu = QMenu(self)
+        menu.addAction("导入", self._import_history)
         menu.addAction("导出", self._export_history)
         menu.addAction("刷新", self._refresh_history)
         if item:
@@ -1577,6 +1630,7 @@ class _TargetDetailPanel(QWidget):
             model = self._hist_table.model()
             if not self._hist_table.selectionModel().isSelected(model.index(row, 0)):
                 self._hist_table.selectRow(row)
+            menu.addAction("导入为新配置", lambda: self._import_history_config(row))
             menu.addAction("删除", self._delete_hist_sessions)
         menu.addSeparator()
         menu.addAction("清空", self._clear_hist)
@@ -1622,44 +1676,48 @@ class _TargetDetailPanel(QWidget):
             QMessageBox.information(self, "提示", "没有可导出的数据。")
             return
         fp, sel_filter = QFileDialog.getSaveFileName(self, "导出测试历史", "target_history.xlsx",
-                                                     "Excel (*.xlsx);;CSV (*.csv)")
+                                                     "Excel (*.xlsx);;CSV (*.csv);;JSON (*.json)")
         if not fp:
             return
-        headers = ["测试时间", "协议", "目标IP", "端口", "结果", "发送报文", "响应报文", "错误信息", "测试参数"]
-        rows = [
-            [
-                s.started_at,
-                "HTTP" if "http" in s.protocol_type else ("WS" if "ws" in s.protocol_type else "TCP"),
-                s.target_ip,
-                s.target_port,
-                "OK" if s.success else "FAIL",
-                s.request or "",
-                s.response or "",
-                s.error_msg or "",
-                s.test_params or "{}",
-            ]
-            for s in sessions
-        ]
-        is_xlsx = fp.lower().endswith(".xlsx")
-        if not fp.lower().endswith((".csv", ".xlsx")):
-            fp += ".xlsx" if "xlsx" in sel_filter else ".csv"
-            is_xlsx = fp.lower().endswith(".xlsx")
-        try:
-            if is_xlsx:
-                from src.excel_handler import export_rows_to_excel
-                ok, err = export_rows_to_excel(fp, headers, rows)
-                if not ok:
-                    QMessageBox.critical(self, "导出失败", err)
-                    return
-            else:
-                import csv
-                with open(fp, "w", encoding="utf-8-sig", newline="") as f:
-                    writer = csv.writer(f)
-                    writer.writerow(headers)
-                    writer.writerows(rows)
-            QMessageBox.information(self, "导出完成", f"已导出 {len(self._hist_sessions)} 条记录。")
-        except OSError as e:
-            QMessageBox.critical(self, "导出失败", str(e))
+        if not fp.lower().endswith((".csv", ".xlsx", ".json")):
+            fp += ".json" if "json" in sel_filter else (".xlsx" if "xlsx" in sel_filter else ".csv")
+        self._start_history_file_worker(fp, sessions=list(sessions))
+
+    def _import_history(self):
+        if not self._target or not self._coll:
+            return
+        fp, _ = QFileDialog.getOpenFileName(
+            self, "导入测试历史", "", "测试历史 (*.xlsx *.csv *.json);;Excel (*.xlsx);;CSV (*.csv);;JSON (*.json)")
+        if fp:
+            self._start_history_file_worker(fp)
+
+    def _start_history_file_worker(self, filepath, sessions=None):
+        if self._history_file_worker and self._history_file_worker.isRunning():
+            QMessageBox.information(self, "提示", "历史文件正在处理，请稍后再试。")
+            return
+        exporting = sessions is not None
+        target = None if exporting else (self._coll.id, self._coll.name, self._target.id)
+        worker = HistoryFileWorker(filepath, sessions=sessions, db=self._db, target=target, parent=self)
+        self._history_file_worker = worker
+        self._hist_file_import_btn.setEnabled(False)
+        self._hist_file_export_btn.setEnabled(False)
+        self._history_file_status.setText("正在导出..." if exporting else "正在导入...")
+        worker.completed.connect(lambda count, error: self._on_history_file_done(exporting, count, error))
+        worker.finished.connect(worker.deleteLater)
+        worker.finished.connect(lambda: setattr(self, '_history_file_worker', None))
+        worker.start()
+
+    def _on_history_file_done(self, exporting, count, error):
+        self._hist_file_import_btn.setEnabled(True)
+        self._hist_file_export_btn.setEnabled(True)
+        self._history_file_status.clear()
+        action = "导出" if exporting else "导入"
+        if error:
+            QMessageBox.critical(self, action + "失败", error)
+            return
+        if not exporting:
+            self._refresh_history()
+        QMessageBox.information(self, action + "完成", f"已{action} {count} 条测试历史。")
 
     # ── 设置目标 ─────────────────────────────────────────
 
@@ -2614,6 +2672,9 @@ class ProtocolPanel(QWidget):
         for tid, (tw, _) in list(self._target_tabs.items()):
             if tw == tab_w:
                 detail = self._target_tabs[tid][1]
+                if detail._history_file_worker and detail._history_file_worker.isRunning():
+                    QMessageBox.information(self, "正在处理历史文件", "请等待历史文件处理完成后关闭目标标签页。")
+                    return
                 client = detail._client_panel
                 # 未保存判定统一走 has_unsaved_presets()（含"未选预设 + 发送框被修改"），
                 # 避免仅因发送框残留文本（加载/切换协议带入）就误报未保存

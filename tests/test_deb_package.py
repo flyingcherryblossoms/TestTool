@@ -19,7 +19,8 @@ spec.loader.exec_module(deb)
 def make_launcher(tmp_path):
     mock = tmp_path / 'mock app'
     mock.write_text('#!' + sys.executable + '\nimport json,os,sys\n'
-                    'open(os.environ["TEST_ARGS"],"w").write(json.dumps(sys.argv[1:]))\n')
+                    'open(os.environ["TEST_ARGS"],"w").write(json.dumps(sys.argv[1:]))\n'
+                    'open(os.environ["TEST_ARGS"]+".env","w").write(json.dumps({k:os.environ.get(k) for k in ["QT_QPA_PLATFORM","XDG_CONFIG_HOME","QT_WAYLAND_DECORATION"]}))\n')
     mock.chmod(0o755)
     launcher = tmp_path / 'testtool'
     launcher.write_text(deb.LAUNCHER.replace('/usr/lib/testtool/TestTool', shlex.quote(str(mock))))
@@ -56,6 +57,18 @@ def test_relative_xdg_and_help(tmp_path):
     assert json.loads(Path(environment['TEST_ARGS']).read_text()) == ['--help']
 
 
+def test_launcher_preserves_desktop_environment(tmp_path):
+    launcher, environment = make_launcher(tmp_path)
+    for display, wayland, platform in [(':0', '', ''), (':0', 'wayland-0', ''),
+                                        (':0', 'wayland-0', 'xcb')]:
+        environment.update(DISPLAY=display, WAYLAND_DISPLAY=wayland,
+                           QT_QPA_PLATFORM=platform, XDG_CONFIG_HOME='/custom/config',
+                           QT_WAYLAND_DECORATION='adwaita')
+        subprocess.run([str(launcher), '--help'], env=environment, check=True)
+        actual = json.loads(Path(environment['TEST_ARGS'] + '.env').read_text())
+        assert actual == {key: environment[key] for key in actual}
+
+
 def test_wrong_architecture_rejected():
     architecture = subprocess.check_output(['dpkg', '--print-architecture'], text=True).strip()
     wrong = 'arm64' if architecture == 'amd64' else 'amd64'
@@ -71,6 +84,8 @@ def make_bundle(path, executable):
     shutil.copyfile(executable, path / 'TestTool')
     (path / '_internal').mkdir()
     (path / '_internal/dependency').write_text('directory bundle dependency')
+    (path / '_internal/libxkbcommon.so.0').write_bytes(b'bundled-core')
+    (path / '_internal/libxkbcommon-x11.so.0').write_bytes(b'bundled-x11')
     return path
 
 
@@ -85,7 +100,9 @@ def test_single_file_bundle_rejected(tmp_path):
 def test_install_upgrade_remove_keeps_user_database(tmp_path):
     architecture = subprocess.check_output(['dpkg', '--print-architecture'], text=True).strip()
     old = deb.build_deb(make_bundle(tmp_path / 'old', Path('/bin/true')), architecture, '1.0.5', tmp_path / 'packages')
-    new = deb.build_deb(make_bundle(tmp_path / 'new', Path('/bin/echo')), architecture, '1.0.6', tmp_path / 'packages')
+    new = deb.build_deb(make_bundle(tmp_path / 'new', Path('/bin/echo')), architecture, '1.0.6', tmp_path / 'packages', minimum_glibc='2.39')
+    dependencies = subprocess.check_output(['dpkg-deb', '-f', str(new), 'Depends'], text=True)
+    assert 'libc6 (>= 2.39)' in dependencies
     root = tmp_path / 'root'
     database = root / 'home/tester/.config/TestTool/testtool.db'
     database.parent.mkdir(parents=True)
@@ -96,6 +113,7 @@ def test_install_upgrade_remove_keeps_user_database(tmp_path):
                'sh', str(root), str(old), str(new)]
     subprocess.run(command, check=True, capture_output=True, text=True)
     assert (root / 'usr/lib/testtool/TestTool').read_bytes() == Path('/bin/echo').read_bytes()
+    assert not list((root / 'usr/lib/testtool').rglob('libxkbcommon*.so*'))
     version = subprocess.check_output(['dpkg-query', '--admindir=' + str(root / 'var/lib/dpkg'),
                                       '-W', '-f=${Version}', 'testtool'], text=True)
     assert version == '1.0.6-1'

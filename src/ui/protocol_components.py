@@ -17,6 +17,8 @@ import json
 from datetime import datetime
 from functools import partial
 
+from src.protocol_history import protocol_history_params
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
@@ -366,7 +368,7 @@ class ClientPanelBase(QWidget):
 
     def _capture_test_context(self, request: str) -> dict:
         """发送前冻结参数，避免请求期间修改界面影响历史。"""
-        return {"params": json.loads(json.dumps(self.collect_params(), ensure_ascii=False)),
+        return {"params": protocol_history_params(self.collect_params()),
                 "request": request}
 
     def _record_session(self, success: bool, response: str, request: str):

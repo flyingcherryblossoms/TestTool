@@ -326,6 +326,11 @@ class MainWindow(QMainWindow):
     # ── 窗口关闭 ───────────────────────────────────────────
 
     def closeEvent(self, event):
+        if any(detail._history_file_worker and detail._history_file_worker.isRunning()
+               for _, detail in self._proto_panel._target_tabs.values()):
+            QMessageBox.information(self, "正在处理历史文件", "请等待测试历史导入或导出完成后退出。")
+            event.ignore()
+            return
         # 未保存的预设报文/参数修改：先提示是否保存
         has_dirty_config = any(
             detail._client_panel._config_dirty
