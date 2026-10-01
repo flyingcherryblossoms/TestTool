@@ -1413,6 +1413,25 @@ class Database:
                   target_ip, target_port, 1 if success else 0, request, response, error_msg, test_params, request_raw, response_raw))
             return cur.lastrowid
 
+    def import_protocol_test_sessions(self, sessions: list[ProtocolTestSession],
+                                      collection_id: int, collection_name: str,
+                                      target_id: int) -> int:
+        """原子追加到当前目标，保留导入记录时间，不替换已有历史。"""
+        with self._connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            if not conn.execute('SELECT 1 FROM protocol_targets WHERE id = ?', (target_id,)).fetchone():
+                raise ValueError('导入目标已被删除')
+            conn.executemany('''
+                INSERT INTO protocol_test_sessions
+                    (collection_id, collection_name, target_id, protocol_type, target_ip,
+                     target_port, started_at, success, request, response, error_msg,
+                     test_params, request_raw, response_raw)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', [(collection_id, collection_name, target_id, s.protocol_type, s.target_ip,
+                   s.target_port, s.started_at, int(s.success), s.request, s.response,
+                   s.error_msg, s.test_params, s.request_raw, s.response_raw) for s in sessions])
+        return len(sessions)
+
     def get_protocol_test_sessions(self, protocol_type: str | None = None,
                                    limit: int = 100) -> list[ProtocolTestSession]:
         """获取最近的协议测试会话。protocol_type=None 获取全部。"""
@@ -1441,7 +1460,7 @@ class Database:
             ) for r in rows]
 
     def get_protocol_test_sessions_by_target(self, target_id: int,
-                                             limit: int = 50
+                                             limit: int = -1
                                              ) -> list[ProtocolTestSession]:
         """获取指定目标的协议测试会话。"""
         with self._connect() as conn:

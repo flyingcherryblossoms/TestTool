@@ -19,12 +19,12 @@ DEPENDENCIES = (
     'libxcb-icccm4, libxcb-image0, libxcb-keysyms1, libxcb-randr0, '
     'libxcb-render-util0, libxcb-render0, libxcb-shape0, libxcb-shm0, '
     'libxcb-sync1, libxcb-xfixes0, libxcb-xinerama0, libxcb-xkb1, '
-    'libxcb-util1, libfontconfig1, libfreetype6'
+    'libxcb-util1, libfontconfig1, libfreetype6, libwayland-client0, '
+    'libwayland-cursor0, libwayland-egl1, xkb-data'
 )
 LAUNCHER = '''#!/bin/sh
 set -eu
-# Qt 用户配置与默认数据库统一存放于 ~/.config/TestTool。
-export XDG_CONFIG_HOME="$HOME/.config"
+# 不覆盖桌面的 XDG_CONFIG_HOME、Qt 显示后端和装饰设置。
 # 显式 --db 参数保持原样；安装/升级不会覆盖数据库。
 for argument in "$@"; do
     case "$argument" in
@@ -78,11 +78,14 @@ def write_file(path: Path, content: str, mode: int = 0o644):
 
 
 def build_deb(bundle: Path, architecture: str, version: str, output_dir: Path,
-              maintainer: str = 'Quasimodo <wangaimeng@outlook.com>') -> Path:
+              maintainer: str = 'Quasimodo <wangaimeng@outlook.com>',
+              minimum_glibc: str = '2.31') -> Path:
     binary = bundle / 'TestTool'
     if not bundle.is_dir() or not (bundle / '_internal').is_dir():
         raise ValueError('需要 PyInstaller --onedir 生成的目录（含 TestTool 和 _internal），不接受单文件')
     validate_binary(binary, architecture)
+    if not re.fullmatch(r'[0-9]+\.[0-9]+', minimum_glibc):
+        raise ValueError('最低 glibc 版本应为数字版本号，如 2.39')
     version = version.lstrip('v')
     # Debian revision 表示同一应用版本的打包修订；后续较大版本可直接升级。
     if '-' not in version:
@@ -98,6 +101,10 @@ def build_deb(bundle: Path, architecture: str, version: str, output_dir: Path,
         installed_dir = stage / 'usr/lib/testtool'
         installed_dir.parent.mkdir(parents=True)
         shutil.copytree(bundle, installed_dir, symlinks=True)
+        # 与系统 xkbcommon-x11 配套，避免加载不同版本的核心库。
+        for library in installed_dir.rglob('libxkbcommon*.so*'):
+            if library.is_file() or library.is_symlink():
+                library.unlink()
         installed_binary = installed_dir / 'TestTool'
         installed_binary.chmod(0o755)
         # 保留目录包内链接，但拒绝指向包外的依赖和数据文件。
@@ -133,7 +140,7 @@ def build_deb(bundle: Path, architecture: str, version: str, output_dir: Path,
         write_file(stage / 'DEBIAN/control',
                    f'Package: testtool\nVersion: {version}\nArchitecture: {architecture}\n'
                    f'Maintainer: {maintainer}\nSection: net\nPriority: optional\n'
-                   f'Installed-Size: {installed_size}\nDepends: {DEPENDENCIES}\n'
+                   f'Installed-Size: {installed_size}\nDepends: {DEPENDENCIES.replace("libc6 (>= 2.31)", "libc6 (>= " + minimum_glibc + ")")}\n'
                    'Homepage: https://github.com/flyingcherryblossoms/TestTool\n'
                    'Description: desktop network connectivity and protocol testing tool\n'
                    ' Batch TCP checks, TCP/WebSocket/HTTP clients and mock servers,\n'
@@ -153,10 +160,12 @@ def main():
     parser.add_argument('--version', default=None)
     parser.add_argument('--output-dir', type=Path, default=ROOT / 'dist')
     parser.add_argument('--maintainer', default='Quasimodo <wangaimeng@outlook.com>')
+    parser.add_argument('--minimum-glibc', default='2.31',
+                        help='标准 Ubuntu 24.04 构建使用 2.39，兼容构建使用 2.31')
     args = parser.parse_args()
     try:
         result = build_deb(args.bundle, args.arch, args.version or project_version(),
-                           args.output_dir, args.maintainer)
+                           args.output_dir, args.maintainer, args.minimum_glibc)
     except (ValueError, OSError, subprocess.CalledProcessError) as exc:
         parser.exit(1, str(exc) + '\n')
     print(result)

@@ -8,7 +8,7 @@
 ![Python](https://img.shields.io/badge/Python-3.8.2+-green)
 ![License](https://img.shields.io/badge/License-MIT-yellow)
 
-当前版本：[v1.0.7](https://github.com/flyingcherryblossoms/TestTool/releases/tag/v1.0.7)。
+当前版本：[v1.0.11](https://github.com/flyingcherryblossoms/TestTool/releases/tag/v1.0.11)。
 
 ## 功能特性
 
@@ -42,7 +42,7 @@
 - **返回报文列表** — 服务端面板主区域返回报文列表 + 输入框（逻辑参考客户端预设报文）：添加/重命名/删除/保存（Ctrl+S），当前返回项标记 ●，切换即热更新运行中的监听器；HTTP 服务端每条约含状态码 + 响应头表格
 - **复制/剪贴板** — 预设、目标、服务端支持一键复制（名称自动追加"副本"），Ctrl+C/Ctrl+V 应用内剪贴板跨集合复制粘贴
 - **批量操作** — 服务端支持多选启动/停止/删除，列排序
-- **目标测试历史** — 在目标详情的「测试历史」页保存发送报文、响应报文和发送时的参数快照，失败原因单独记录；发送/接收详情并排展示，各自支持报文/16进制切换、TEXT/JSON/XML 类型选择及格式化；可搜索、筛选、排序、刷新、删除、清空和导出 Excel/CSV。旧记录缺少参数时显示提示，未保存原始字节的记录按文本和编码转换为16进制
+- **目标测试历史** — 在目标详情的「测试历史」页保存发送报文、响应报文和发送时的参数快照，失败原因单独记录；发送/接收详情并排展示，各自支持报文/16进制切换、TEXT/JSON/XML 类型选择及格式化；可搜索、筛选、排序、刷新、删除、清空和导入/导出 Excel/CSV/JSON，并可恢复为新配置再次测试。旧记录缺少参数时显示提示，未保存原始字节的记录按文本和编码转换为16进制
 - **保存接收文件** — 服务端报文页选择一条接收记录后点击「保存接收文件」，TCP 优先保存原始报文体字节，WebSocket 保存接收报文，HTTP 保存请求正文；此功能保存所选报文，不解析 multipart 上传中的独立文件
 
 ### 管理
@@ -76,7 +76,7 @@
 | --- | --- | --- |
 | 连通测试目标 | CSV、Excel（xlsx/xls）、TestTool JSON、Postman Collection v2.0/v2.1 | CSV、Excel（xlsx）、TestTool JSON、Postman Collection v2.1 |
 | 协议测试集合/目标 | TestTool JSON、Postman Collection v2.0/v2.1 | TestTool JSON、Postman Collection v2.1 |
-| 目标协议测试历史 | — | Excel（xlsx）、CSV |
+| 目标协议测试历史 | Excel（xlsx）、CSV、JSON | Excel（xlsx）、CSV、JSON |
 
 - **入口与范围** — 在集合树上右键选择「导入集合」「导出选中集合」或「全量导出」；导出对话框选择文件格式。协议测试支持一次导入多个 JSON 文件，多个选中集合可导出到同一文件。
 - **TestTool JSON** — 保存协议目标参数、各协议预设、压测参数及目标关联的 Mock 服务端配置；需要完整备份时使用此格式。
@@ -96,29 +96,33 @@
 
 ### Windows x86_64
 
-下载安装文件 `TestTool-1.0.7-Windows-x64-Setup.exe` 并运行。开始菜单提供 TestTool 入口，安装器可选择创建桌面快捷方式；运行新版安装器即可覆盖升级，安装前按提示关闭正在运行的程序。也可下载目录版 ZIP，完整解压后运行 `TestTool/TestTool.exe`，请保留 `_internal` 依赖目录。
+下载安装文件 `TestTool-1.0.11-Windows-x64-Setup.exe` 并运行。开始菜单提供 TestTool 入口，安装器可选择创建桌面快捷方式；运行新版安装器即可覆盖升级，安装前按提示关闭正在运行的程序。也可下载目录版 ZIP，完整解压后运行 `TestTool/TestTool.exe`，请保留 `_internal` 依赖目录。
 
 Windows 安装器仅包含 64 位 x86_64 程序，不提供 ARM64 或 32 位版本。用户配置位于 `%USERPROFILE%\.config\TestTool`，不会写入 Program Files。
 
 ### Debian / Ubuntu（x86_64、ARM64）
 
+新版 deb 与标准 Linux 目录包使用相同的 Qt 和 Wayland 装饰插件，需要 glibc 2.39 及以上（如 Ubuntu 24.04）。旧系统可使用 `-compat.tar.gz` 目录包。早期 `1.0.7-1` 至 `1.0.7-5` deb 来自 Qt 6.6.3 兼容构建，与标准目录包不同。
+
 根据 `dpkg --print-architecture` 选择 `amd64` 或 `arm64` 文件，使用 APT 安装并处理系统库依赖：
 
 ```bash
 # x86_64
-sudo apt install ./testtool_1.0.7-1_amd64.deb
+sudo apt install ./testtool_1.0.11-1_amd64.deb
 # ARM64（在 ARM64 系统上安装）
-sudo apt install ./testtool_1.0.7-1_arm64.deb
+sudo apt install ./testtool_1.0.11-1_arm64.deb
 ```
 
 安装后从应用菜单启动，或运行 `testtool`。后续下载更高版本的同架构 deb，再执行 `sudo apt install ./新版文件.deb` 即可升级；这些下载包不会配置 APT 仓库，需要自行下载新版。
+
+deb 启动器不覆盖桌面的 XDG/Qt 环境变量，保持与直接运行二进制相同的显示后端和装饰设置。键盘映射库统一使用系统的 libxkbcommon/libxkbcommon-x11，避免版本混用。
 
 包基于 Ubuntu 20.04 兼容构建，要求 glibc 2.31 或更新版本及声明的 Qt/X11 系统依赖，无需安装 Python。程序目录为 `/usr/lib/testtool`，启动入口为 `/usr/bin/testtool`，用户数据为 `~/.config/TestTool/`；可用 `testtool --db /path/to/testtool.db` 指定数据库。
 
 ```bash
 sudo apt remove testtool
 # 如需手动验证下载文件，在安装文件目录执行：
-sha256sum -c testtool_1.0.7-1_amd64.deb.sha256
+sha256sum -c testtool_1.0.11-1_amd64.deb.sha256
 ```
 
 ## 使用方法
@@ -150,6 +154,12 @@ python main.py --db /path/to/testtool.db
 - **压测**：发送区「压力测试」按钮展开参数区，填好并发数/总请求数等后点「开始压测」，过程中可「停止」，结果实时统计成功/失败/耗时；「重置默认参数」一键恢复默认值
 - **报文格式**：发送报文框旁选择 TEXT/JSON/XML；点击「格式化」自动识别 JSON/XML 并更新格式选项。服务端响应框可在「内容格式」下拉选择
 - **测试历史**：双击集合中的目标 →「测试历史」→ 选择记录；左右分别查看发送/接收报文及当时参数，独立切换报文/16进制或格式化显示
+
+历史参数只显示该次测试所选协议：TCP 不显示 WS/HTTP 配置，WS 不显示 TCP/HTTP 配置。发送时冻结协议与参数，之后切换协议不会改变历史；已有混合参数的旧记录在查看、搜索和导出时也按记录协议筛选。
+
+选中测试历史后，点击「导入为新配置」（或右键同名菜单），即可创建独立配置并切换到客户端，恢复该次测试的协议、参数和发送报文；点击「发送」可再次测试。重复导入会使用不同名称，不覆盖已有配置。缺少参数快照的旧记录会提示无法导入。
+
+测试历史工具栏和右键菜单中的「导入」可读取程序导出的 Excel/CSV/JSON 文件，将记录追加到当前目标，保留原测试时间、协议、结果、报文、参数和原始字节。支持旧版 Excel/CSV 导出列；文件先完整校验，格式错误不会部分写入。导出时有选中记录则导出选中项，否则导出当前筛选结果。报文超过 Excel 单元格文本限制或含控制字符时，请选择 CSV/JSON。
 - **保存接收文件**：启动服务端并收到报文后，在其报文列表选中一条「接收」记录 →「保存接收文件」→ 选择保存路径
 - **Postman 交换**：集合树右键「导入集合」选择 Postman JSON；导出时选择「Postman Collection v2.1」。目标详情也可导入/导出 Postman 请求，导入多个请求时会提示选择
 - **快捷键**：Ctrl+Enter 发送，F5 刷新列表，Delete/Ctrl+D 删除选中，Ctrl+S 保存预设/参数，Ctrl+C/Ctrl+V 复制粘贴列表项；菜单栏「设置」可查看/修改全部快捷键
@@ -228,30 +238,32 @@ pyinstaller --onedir --windowed --name TestTool \
 先在 Windows 上生成 `dist/TestTool/` 目录包，再安装 Inno Setup 6，运行：
 
 ```powershell
-& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DMyAppVersion=1.0.7 packaging/windows-installer.iss
+& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DMyAppVersion=1.0.11 packaging/windows-installer.iss
 ```
 
-输出为 `dist/TestTool-1.0.7-Windows-x64-Setup.exe`。安装器的应用 ID 不随版本改变，用于后续覆盖升级。
+输出为 `dist/TestTool-1.0.11-Windows-x64-Setup.exe`。安装器的应用 ID 不随版本改变，用于后续覆盖升级。
 
 ### 生成 deb 安装包
 
 先在对应架构的 Linux 系统上生成目录包，再运行（ARM64 使用 `--arch arm64`）：
 
 ```bash
-python packaging/build_deb.py --bundle dist/TestTool --arch amd64
+python packaging/build_deb.py --bundle dist/TestTool --arch amd64 --minimum-glibc 2.39
 ```
 
 脚本拒绝单文件构建和架构错标，输出 deb 与 SHA256 文件。使用相同包名 `testtool` 和递增版本号支持升级；CI 在 x86_64/ARM64 原生运行器上分别生成目录包。
 
 ## 测试
 
-Postman 转换回归测试使用临时文件，覆盖鉴权继承、变量替换、HTTP 正文、查询参数、Cookie、端口提取、导出回导，以及原有 TestTool JSON 兼容性。
+回归检查使用临时文件和数据库，覆盖 Postman 转换、配置迁移、协议历史参数筛选、历史恢复为新配置、CSV/Excel/JSON 往返，以及 deb 安装升级保留用户数据。
 
 ```bash
 pip install pytest
 python -m pytest -q tests/test_postman_handler.py tests/test_runtime_paths.py
 # Linux 打包/升级检查还需要 dpkg-deb、fakeroot：
 python -m pytest -q tests/test_deb_package.py
+# Linux 完整回归检查（含 Qt 控件，使用无桌面显示后端）：
+QT_QPA_PLATFORM=offscreen python -m pytest -q tests
 ```
 
 界面和网络协议功能仍需运行应用进行验证；测试时可通过 `--db` 指向临时数据库。
@@ -261,8 +273,8 @@ python -m pytest -q tests/test_deb_package.py
 推送新的 `v*` tag 会触发 Windows x64、Linux x64/ARM64（含 Python 3.8 兼容构建）和 macOS ARM64 打包，并发布 GitHub Release，包含 Windows x86_64 安装器、两种架构 deb 和目录版归档。也可手动运行 Build 工作流生成可下载的 Actions 构建产物。先同步 `pyproject.toml` 与 `uv.lock` 中的版本，再提交、创建新 tag 并推送，例如：
 
 ```bash
-git tag -a v1.0.8 -m "Release v1.0.8"
-git push origin main v1.0.8
+git tag -a v1.0.11 -m "Release v1.0.11"
+git push origin main v1.0.11
 ```
 
 ## License
