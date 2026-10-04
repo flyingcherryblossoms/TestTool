@@ -12,8 +12,9 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_MINIMUM_GLIBC = '2.31'
 DEPENDENCIES = (
-    'libc6 (>= 2.31), libstdc++6, libgcc-s1, libegl1, libgl1, libopengl0, '
+    'libstdc++6, libgcc-s1, libegl1, libgl1, libopengl0, '
     'libdbus-1-3, libx11-6, libx11-xcb1, libxext6, libxrender1, libxi6, '
     'libxkbcommon0, libxkbcommon-x11-0, libxcb1, libxcb-cursor0, '
     'libxcb-icccm4, libxcb-image0, libxcb-keysyms1, libxcb-randr0, '
@@ -24,7 +25,8 @@ DEPENDENCIES = (
 )
 LAUNCHER = '''#!/bin/sh
 set -eu
-# 不覆盖桌面的 XDG_CONFIG_HOME、Qt 显示后端和装饰设置。
+# 应用自身负责配置目录，不覆盖桌面的 XDG_CONFIG_HOME（主题/窗口装饰配置）。
+# 不修改 Qt 显示后端和装饰设置，保持与直接运行二进制相同的行为。
 # 显式 --db 参数保持原样；安装/升级不会覆盖数据库。
 for argument in "$@"; do
     case "$argument" in
@@ -79,13 +81,15 @@ def write_file(path: Path, content: str, mode: int = 0o644):
 
 def build_deb(bundle: Path, architecture: str, version: str, output_dir: Path,
               maintainer: str = 'Quasimodo <wangaimeng@outlook.com>',
-              minimum_glibc: str = '2.31') -> Path:
+              minimum_glibc: str = DEFAULT_MINIMUM_GLIBC) -> Path:
+    # 仅接受主/次版本号，防止无效版本或控制字段注入；默认值与 CLI 共用。
+    if not isinstance(minimum_glibc, str) or not re.fullmatch(r'[0-9]+\.[0-9]+', minimum_glibc):
+        raise ValueError('最低 glibc 版本应为数字版本号，如 2.39')
+    dependencies = f'libc6 (>= {minimum_glibc}), {DEPENDENCIES}'
     binary = bundle / 'TestTool'
     if not bundle.is_dir() or not (bundle / '_internal').is_dir():
         raise ValueError('需要 PyInstaller --onedir 生成的目录（含 TestTool 和 _internal），不接受单文件')
     validate_binary(binary, architecture)
-    if not re.fullmatch(r'[0-9]+\.[0-9]+', minimum_glibc):
-        raise ValueError('最低 glibc 版本应为数字版本号，如 2.39')
     version = version.lstrip('v')
     # Debian revision 表示同一应用版本的打包修订；后续较大版本可直接升级。
     if '-' not in version:
@@ -101,9 +105,10 @@ def build_deb(bundle: Path, architecture: str, version: str, output_dir: Path,
         installed_dir = stage / 'usr/lib/testtool'
         installed_dir.parent.mkdir(parents=True)
         shutil.copytree(bundle, installed_dir, symlinks=True)
-        # 与系统 xkbcommon-x11 配套，避免加载不同版本的核心库。
+        # xkbcommon-x11 由系统提供；核心库也必须来自同一系统版本，避免 ABI 混用。
         for library in installed_dir.rglob('libxkbcommon*.so*'):
-            if library.is_file() or library.is_symlink():
+            if (re.fullmatch(r'libxkbcommon(?:-x11)?\.so(?:\..+)?', library.name)
+                    and (library.is_file() or library.is_symlink())):
                 library.unlink()
         installed_binary = installed_dir / 'TestTool'
         installed_binary.chmod(0o755)
@@ -140,7 +145,7 @@ def build_deb(bundle: Path, architecture: str, version: str, output_dir: Path,
         write_file(stage / 'DEBIAN/control',
                    f'Package: testtool\nVersion: {version}\nArchitecture: {architecture}\n'
                    f'Maintainer: {maintainer}\nSection: net\nPriority: optional\n'
-                   f'Installed-Size: {installed_size}\nDepends: {DEPENDENCIES.replace("libc6 (>= 2.31)", "libc6 (>= " + minimum_glibc + ")")}\n'
+                   f'Installed-Size: {installed_size}\nDepends: {dependencies}\n'
                    'Homepage: https://github.com/flyingcherryblossoms/TestTool\n'
                    'Description: desktop network connectivity and protocol testing tool\n'
                    ' Batch TCP checks, TCP/WebSocket/HTTP clients and mock servers,\n'
@@ -160,12 +165,12 @@ def main():
     parser.add_argument('--version', default=None)
     parser.add_argument('--output-dir', type=Path, default=ROOT / 'dist')
     parser.add_argument('--maintainer', default='Quasimodo <wangaimeng@outlook.com>')
-    parser.add_argument('--minimum-glibc', default='2.31',
-                        help='标准 Ubuntu 24.04 构建使用 2.39，兼容构建使用 2.31')
+    parser.add_argument('--minimum-glibc', default=DEFAULT_MINIMUM_GLIBC,
+                        help=f'最低 glibc 主/次版本号；默认 {DEFAULT_MINIMUM_GLIBC}（Ubuntu 20.04 兼容构建），Ubuntu 24.04 构建使用 2.39')
     args = parser.parse_args()
     try:
         result = build_deb(args.bundle, args.arch, args.version or project_version(),
-                           args.output_dir, args.maintainer, args.minimum_glibc)
+                           args.output_dir, args.maintainer, minimum_glibc=args.minimum_glibc)
     except (ValueError, OSError, subprocess.CalledProcessError) as exc:
         parser.exit(1, str(exc) + '\n')
     print(result)
