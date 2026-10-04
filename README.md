@@ -8,7 +8,9 @@
 ![Python](https://img.shields.io/badge/Python-3.8.2+-green)
 ![License](https://img.shields.io/badge/License-MIT-yellow)
 
-当前版本：[v1.1](https://github.com/flyingcherryblossoms/TestTool/releases/tag/v1.1)。
+当前版本：[v1.1.1](https://github.com/flyingcherryblossoms/TestTool/releases/tag/v1.1.1)。
+
+本次更新修复 HTTP 测试服务端返回报文的十六进制显示，保留实际发送的状态行、响应头和正文字节；客户端发送区、响应区及服务端报文区的「清空」按钮统一位于各自工具栏右侧。
 
 ## 功能特性
 
@@ -96,7 +98,7 @@
 
 ### Windows x86_64
 
-下载安装文件 `TestTool-1.1-Windows-x64-Setup.exe` 并运行。开始菜单提供 TestTool 入口，安装器可选择创建桌面快捷方式；运行新版安装器即可覆盖升级，安装前按提示关闭正在运行的程序。也可下载目录版 ZIP，完整解压后运行 `TestTool/TestTool.exe`，请保留 `_internal` 依赖目录。
+下载安装文件 `TestTool-1.1.1-Windows-x64-Setup.exe` 并运行。开始菜单提供 TestTool 入口，安装器可选择创建桌面快捷方式；运行新版安装器即可覆盖升级，安装前按提示关闭正在运行的程序。也可下载目录版 ZIP，完整解压后运行 `TestTool/TestTool.exe`，请保留 `_internal` 依赖目录。
 
 Windows 安装器仅包含 64 位 x86_64 程序，不提供 ARM64 或 32 位版本。用户配置位于 `%USERPROFILE%\.config\TestTool`，不会写入 Program Files。
 
@@ -108,9 +110,9 @@ Windows 安装器仅包含 64 位 x86_64 程序，不提供 ARM64 或 32 位版�
 
 ```bash
 # x86_64
-sudo apt install ./testtool_1.1-1_amd64.deb
+sudo apt install ./testtool_1.1.1-1_amd64.deb
 # ARM64（在 ARM64 系统上安装）
-sudo apt install ./testtool_1.1-1_arm64.deb
+sudo apt install ./testtool_1.1.1-1_arm64.deb
 ```
 
 安装后从应用菜单启动，或运行 `testtool`。后续下载更高版本的同架构 deb，再执行 `sudo apt install ./新版文件.deb` 即可升级；这些下载包不会配置 APT 仓库，需要自行下载新版。
@@ -128,7 +130,7 @@ QT_QPA_PLATFORM=xcb testtool
 ```bash
 sudo apt remove testtool
 # 如需手动验证下载文件，在安装文件目录执行：
-sha256sum -c testtool_1.1-1_amd64.deb.sha256
+sha256sum -c testtool_1.1.1-1_amd64.deb.sha256
 ```
 
 ## 使用方法
@@ -244,10 +246,10 @@ pyinstaller --onedir --windowed --name TestTool \
 先在 Windows 上生成 `dist/TestTool/` 目录包，再安装 Inno Setup 6，运行：
 
 ```powershell
-& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DMyAppVersion=1.1 packaging/windows-installer.iss
+& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DMyAppVersion=1.1.1 packaging/windows-installer.iss
 ```
 
-输出为 `dist/TestTool-1.1-Windows-x64-Setup.exe`。安装器的应用 ID 不随版本改变，用于后续覆盖升级。
+输出为 `dist/TestTool-1.1.1-Windows-x64-Setup.exe`。安装器的应用 ID 不随版本改变，用于后续覆盖升级。
 
 ### 生成 deb 安装包
 
@@ -281,8 +283,8 @@ QT_QPA_PLATFORM=offscreen python -m pytest -q tests
 推送新的 `v*` tag 会触发 Windows x64、Linux x64/ARM64（含 Python 3.8 兼容构建）和 macOS ARM64 打包，并发布 GitHub Release，包含 Windows x86_64 安装器、两种架构 deb 和目录版归档。也可手动运行 Build 工作流生成可下载的 Actions 构建产物。先同步 `pyproject.toml` 与 `uv.lock` 中的版本，再提交、创建新 tag 并推送，例如：
 
 ```bash
-git tag -a v1.1 -m "Release v1.1"
-git push origin main v1.1
+git tag -a v1.1.1 -m "Release v1.1.1"
+git push origin main v1.1.1
 ```
 
 ## License

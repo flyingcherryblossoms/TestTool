@@ -545,7 +545,6 @@ class ClientPanelBase(QWidget):
         self._save_preset_btn = QPushButton("保存", clicked=self._save_preset)
         sh2.addWidget(self._save_preset_btn)
         self._clear_btn = QPushButton("清空", clicked=self._send_edit.clear)
-        sh2.addWidget(self._clear_btn)
         self._conn_test_btn = QPushButton("连通测试", clicked=self._run_connectivity_test)
         sh2.addWidget(self._conn_test_btn)
         # 压力测试：点击展开/收起下方隐藏的压测参数区
@@ -554,6 +553,7 @@ class ClientPanelBase(QWidget):
         self._stress_toggle_btn.toggled.connect(self._toggle_stress_area)
         sh2.addWidget(self._stress_toggle_btn)
         sh2.addStretch()
+        sh2.addWidget(self._clear_btn)
         sl.addLayout(sh2)
 
         # ── 压测参数区（隐藏，点击"压力测试"展开）──
@@ -680,8 +680,8 @@ class ClientPanelBase(QWidget):
         self._resp_enc_combo.currentTextChanged.connect(self._on_param_changed)
         self._resp_enc_combo.currentTextChanged.connect(self._mark_msg_dirty)
         resp_tool.addWidget(self._resp_enc_combo)
-        resp_tool.addWidget(QPushButton("清空", clicked=self._clear_response_history))
         resp_tool.addStretch()
+        resp_tool.addWidget(QPushButton("清空", clicked=self._clear_response_history))
         rl.addLayout(resp_tool)
         self._response_history = MessageHistoryWidget()
         self._resp_edit = self._response_history.log_edit
@@ -2102,6 +2102,7 @@ class ServerPanelBase(QWidget):
                 w.message_received.connect(lambda addr, msg, sid=s.id, nm=s.name:
                                            self._on_srv_msg(sid, nm, addr, msg))
                 w.message_received_raw.connect(partial(self._on_srv_msg_raw, s.id))
+                w.message_sent_raw.connect(partial(self._on_srv_sent_raw, s.id))
             w.status_changed.connect(partial(self._log_to_server, s.id))
             w.message_sent.connect(
                 lambda addr, original, body, sid=s.id:
@@ -2148,11 +2149,11 @@ class ServerPanelBase(QWidget):
         hex_toggle.setVisible(False)
         tab_tool.addWidget(hex_toggle)
         tab_tool.addStretch()
-        tab_tool.addWidget(QPushButton(
-            "清空", clicked=lambda _checked=False, sid=s.id: self._clear_log(sid)))
         tab_layout.addLayout(tab_tool)
         tab_tool.addWidget(QPushButton(
             "保存接收文件", clicked=lambda _checked=False, sid=s.id: self._save_received_file(sid)))
+        tab_tool.addWidget(QPushButton(
+            "清空", clicked=lambda _checked=False, sid=s.id: self._clear_log(sid)))
         history = MessageHistoryWidget()
         history.log_toggle.toggled.connect(hex_toggle.setVisible)
         log_w = history.log_edit
@@ -2264,6 +2265,12 @@ class ServerPanelBase(QWidget):
         history = self._histories.get(sid)
         if history:
             history.add_message("发送", original, payload=body, peer=addr)
+
+    def _on_srv_sent_raw(self, sid: int, addr: str, raw: bytes):
+        """为 HTTP 响应记录补上完整网络字节（包含状态行和响应头）。"""
+        history = self._histories.get(sid)
+        if history:
+            history.attach_raw("发送", raw)
 
     def _on_send_changed(self, sid: int, combo: QComboBox):
         self._send[sid] = combo.currentText()

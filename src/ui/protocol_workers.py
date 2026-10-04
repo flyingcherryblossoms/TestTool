@@ -247,6 +247,7 @@ class HttpServerWorker(QThread):
     message_received = Signal(str, str)
     message_received_raw = Signal(str, bytes)
     message_sent = Signal(str, str, str)
+    message_sent_raw = Signal(str, bytes)
     status_changed = Signal(str)
     error_occurred = Signal(str)
 
@@ -309,6 +310,8 @@ class HttpServerWorker(QThread):
         original = response_bytes.decode("utf-8", errors="replace")
         self.message_sent.emit(client_addr, original,
                                body.decode("utf-8", errors="replace"))
+        # 保留实际发送的响应字节，十六进制详情不经文本重新编码。
+        self.message_sent_raw.emit(client_addr, response_bytes)
 
     def _on_status(self, status: str) -> None:
         self.status_changed.emit(status)
