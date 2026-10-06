@@ -18,6 +18,7 @@ from datetime import datetime
 from functools import partial
 
 from src.protocol_history import protocol_history_params
+from src.mock_config import client_to_mock_config
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
@@ -285,6 +286,7 @@ class ClientPanelBase(QWidget):
     test_finished = Signal()
     config_dirty_changed = Signal(bool)
     target_saved = Signal()      # 独立客户端保存到集合后触发
+    mock_server_created = Signal(int)
     presets_saved = Signal()     # 预设保存后触发（目标客户端用于刷新目标）
 
     def __init__(self, db: Database, parent=None, show_len_label: bool = False):
@@ -312,6 +314,33 @@ class ClientPanelBase(QWidget):
 
     def _build_action_buttons(self, proto_row):
         """在协议行右侧追加操作按钮。"""
+
+    def _mock_target_id(self):
+        return None
+
+    def _generate_mock_server(self):
+        """使用当前控件值创建独立配置，不覆盖旧服务端、不自动监听。"""
+        if not self._can_send():
+            return
+        try:
+            config, notice = client_to_mock_config(self.collect_params())
+        except ValueError as exc:
+            QMessageBox.warning(self, "无法生成 Mock", str(exc))
+            return
+        target_id = self._mock_target_id()
+        target = self._db.get_protocol_target(target_id) if target_id is not None else None
+        label = {'tcp_server': 'TCP', 'ws_server': 'WebSocket', 'http_server': 'HTTP'}[config['server_type']]
+        base_name = f"{target.name + ' ' if target else ''}{label} Mock"
+        existing = {server.name for server in self._db.get_all_protocol_servers()}
+        name, number = base_name, 2
+        while name in existing:
+            name = f'{base_name} ({number})'
+            number += 1
+        config['response_messages'] = json.dumps(config['response_messages'], ensure_ascii=False)
+        sid = self._db.add_protocol_server(name=name, target_id=target_id, **config)
+        self.mock_server_created.emit(sid)
+        if notice:
+            QMessageBox.information(self, "Mock 配置已生成", notice)
 
     def _on_param_changed(self):
         """任一参数变化时的行为（自动保存 / 标记脏）。"""
@@ -1743,6 +1772,7 @@ class ServerPanelBase(QWidget):
       _check_port_conflict / _log_block_cap 端口冲突检查、日志上限
       _confirm_delete_text / _running_delete_warning  删除确认文案
       _on_stop_all                          全部停止后的清理
+      _mock_client                          生成 Mock 按钮参数来源客户端（None = 无按钮）
     """
 
     def __init__(self, db: Database, parent=None):
@@ -1789,6 +1819,10 @@ class ServerPanelBase(QWidget):
 
     def _can_add(self) -> bool:
         return True
+
+    def _mock_client(self):
+        """返回关联客户端面板供生成 Mock 按钮取参数（None = 页面无该按钮）。"""
+        return None
 
     def _load_servers(self) -> list:
         return []
@@ -1920,6 +1954,11 @@ class ServerPanelBase(QWidget):
 
         bl = QHBoxLayout()
         bl.addWidget(QPushButton("添加", clicked=self._add_server))
+        if self._mock_client() is not None:
+            # 生成 Mock 按钮位于服务端页面，参数来自关联客户端面板
+            self._mock_btn = QPushButton("生成 Mock", clicked=self._generate_mock_from_client)
+            self._mock_btn.setToolTip("根据关联客户端当前参数生本地 Mock 配置：监听 127.0.0.1，复用端口和发送正文，不自动启动。")
+            bl.addWidget(self._mock_btn)
         bl.addWidget(QPushButton("编辑", clicked=self._edit_server))
         bl.addWidget(QPushButton("删除", clicked=self._delete_selected_servers))
         bl.addWidget(QPushButton("复制", clicked=self._copy_servers))
@@ -1937,6 +1976,24 @@ class ServerPanelBase(QWidget):
 
     def refresh(self):
         self._refresh()
+
+    def select_server(self, sid: int):
+        """清除筛选并显示新生成的服务端及返回报文。"""
+        if hasattr(self, '_type_filter'):
+            self._type_filter.setCurrentIndex(0)
+        if hasattr(self, '_search'):
+            self._search.clear()
+        self._refresh()
+        self._restore_selection(sid)
+        item = self._table.currentItem()
+        if item:
+            self._table.scrollToItem(item)
+
+    def _generate_mock_from_client(self):
+        """从关联客户端面板生成 Mock 服务端配置。"""
+        client = self._mock_client()
+        if client is not None:
+            client._generate_mock_server()
 
     def _refresh(self):
         if not self._can_refresh():

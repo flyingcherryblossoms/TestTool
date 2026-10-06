@@ -8,9 +8,9 @@
 ![Python](https://img.shields.io/badge/Python-3.8.2+-green)
 ![License](https://img.shields.io/badge/License-MIT-yellow)
 
-当前版本：[v1.1.1](https://github.com/flyingcherryblossoms/TestTool/releases/tag/v1.1.1)。
+当前版本：[v1.1.2](https://github.com/flyingcherryblossoms/TestTool/releases/tag/v1.1.2)。
 
-本次更新修复 HTTP 测试服务端返回报文的十六进制显示，保留实际发送的状态行、响应头和正文字节；客户端发送区、响应区及服务端报文区的「清空」按钮统一位于各自工具栏右侧。
+本次更新「生成 Mock」按钮位于服务端页面按钮行，参数来自关联客户端，生成后自动切换服务端页面并选中新记录；HTTP 客户端 Body 输入框按类型选择（JSON/XML）语法高。
 
 ## 功能特性
 
@@ -28,7 +28,7 @@
 
 ### 协议测试
 
-- **TCP/WebSocket/HTTP 客户端** — TCP 支持发送/接收编码、长度头和超时；WebSocket 支持 URL 和超时；HTTP 支持方法、URL、查询参数、请求头、正文、鉴权、Cookie、重定向和 SSL 校验；目标名称独立，参数变更标签页显示 `*`
+- **TCP/WebSocket/HTTP 客户端** — TCP 支持发送/接收编码、长度头和超时；WebSocket 支持 URL 和超时；HTTP 支持方法、URL、查询参数、请求头、正文（JSON/XML 语法高亮）、鉴权、Cookie、重定向和 SSL 校验；目标名称独立，参数变更标签页显示 `*`
 - **预设报文模板** — 添加/删除（支持多选）/重命名/清空，Ctrl+S 保存，未保存时标题显示 `*`；每个预设独立的未保存草稿缓存，切换不丢失、互不影响，关闭程序时提示保存
 - **报文收发记录** — 请求和响应逐条展示，可查看原报文、格式化正文或十六进制；运行日志可单独展开，TCP 支持接收编码选择
 - **Mock 服务端 / 服务端** — TCP/WebSocket/HTTP 监听，固定/回显响应模式，列表含发送/接收编码与运行状态列，双击行编辑；每条服务端可配置多条命名「返回报文」，选中即当前返回，HTTP 模式每条返回报文自带状态码 + 响应头
@@ -98,7 +98,7 @@
 
 ### Windows x86_64
 
-下载安装文件 `TestTool-1.1.1-Windows-x64-Setup.exe` 并运行。开始菜单提供 TestTool 入口，安装器可选择创建桌面快捷方式；运行新版安装器即可覆盖升级，安装前按提示关闭正在运行的程序。也可下载目录版 ZIP，完整解压后运行 `TestTool/TestTool.exe`，请保留 `_internal` 依赖目录。
+下载安装文件 `TestTool-1.1.2-Windows-x64-Setup.exe` 并运行。开始菜单提供 TestTool 入口，安装器可选择创建桌面快捷方式；运行新版安装器即可覆盖升级，安装前按提示关闭正在运行的程序。也可下载目录版 ZIP，完整解压后运行 `TestTool/TestTool.exe`，请保留 `_internal` 依赖目录。
 
 Windows 安装器仅包含 64 位 x86_64 程序，不提供 ARM64 或 32 位版本。用户配置位于 `%USERPROFILE%\.config\TestTool`，不会写入 Program Files。
 
@@ -110,9 +110,9 @@ Windows 安装器仅包含 64 位 x86_64 程序，不提供 ARM64 或 32 位版�
 
 ```bash
 # x86_64
-sudo apt install ./testtool_1.1.1-1_amd64.deb
+sudo apt install ./testtool_1.1.2-1_amd64.deb
 # ARM64（在 ARM64 系统上安装）
-sudo apt install ./testtool_1.1.1-1_arm64.deb
+sudo apt install ./testtool_1.1.2-1_arm64.deb
 ```
 
 安装后从应用菜单启动，或运行 `testtool`。后续下载更高版本的同架构 deb，再执行 `sudo apt install ./新版文件.deb` 即可升级；这些下载包不会配置 APT 仓库，需要自行下载新版。
@@ -130,10 +130,18 @@ QT_QPA_PLATFORM=xcb testtool
 ```bash
 sudo apt remove testtool
 # 如需手动验证下载文件，在安装文件目录执行：
-sha256sum -c testtool_1.1.1-1_amd64.deb.sha256
+sha256sum -c testtool_1.1.2-1_amd64.deb.sha256
 ```
 
 ## 使用方法
+
+### 从客户端生成 Mock 服务端
+
+「生成 Mock」按钮位于服务端页面按钮行（独立「服务端」Tab 或目标详情「Mock服务端」面板），参数来自关联客户端：独立客户端或目标详情客户端。先在关联客户端选择协议并填写当前参数，程序使用当前控件值（包括尚未保存的正文）创建配置，默认监听 `127.0.0.1`，复用客户端端口；TCP 保留长度头并将客户端发送/接收编码对应到服务端接收/发送编码，WebSocket 保留 URL 路径。
+
+生成后会切换到服务端配置并选中新记录；目标客户端生成的配置关联当前目标。重复生成会使用不同名称，配置不会自动启动。可编辑返回报文后手动启动，再将客户端地址改为本机地址进行测试。
+
+默认固定响应使用当前发送正文；HTTP 默认返回 200，复制文本、JSON、XML 或 URL 编码表单正文，以及请求中的 `Content-Type`，不复制认证、Cookie 等请求专用头。HTTP Mock 不按请求方法和路径分流。文件和 multipart 正文不自动复制，需填写返回报文；HTTPS/WSS 仅复用端口生成明文 Mock，并提示使用 `http://` 或 `ws://` 测试。
 
 ### 源码运行
 
@@ -246,10 +254,10 @@ pyinstaller --onedir --windowed --name TestTool \
 先在 Windows 上生成 `dist/TestTool/` 目录包，再安装 Inno Setup 6，运行：
 
 ```powershell
-& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DMyAppVersion=1.1.1 packaging/windows-installer.iss
+& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DMyAppVersion=1.1.2 packaging/windows-installer.iss
 ```
 
-输出为 `dist/TestTool-1.1.1-Windows-x64-Setup.exe`。安装器的应用 ID 不随版本改变，用于后续覆盖升级。
+输出为 `dist/TestTool-1.1.2-Windows-x64-Setup.exe`。安装器的应用 ID 不随版本改变，用于后续覆盖升级。
 
 ### 生成 deb 安装包
 
@@ -283,8 +291,8 @@ QT_QPA_PLATFORM=offscreen python -m pytest -q tests
 推送新的 `v*` tag 会触发 Windows x64、Linux x64/ARM64（含 Python 3.8 兼容构建）和 macOS ARM64 打包，并发布 GitHub Release，包含 Windows x86_64 安装器、两种架构 deb 和目录版归档。也可手动运行 Build 工作流生成可下载的 Actions 构建产物。先同步 `pyproject.toml` 与 `uv.lock` 中的版本，再提交、创建新 tag 并推送，例如：
 
 ```bash
-git tag -a v1.1.1 -m "Release v1.1.1"
-git push origin main v1.1.1
+git tag -a v1.1.2 -m "Release v1.1.2"
+git push origin main v1.1.2
 ```
 
 ## License

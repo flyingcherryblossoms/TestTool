@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.ui import shortcuts
+from src.ui.format_text import FormatTextEdit
 from src.ui.message_format import format_payload
 
 
@@ -505,19 +506,19 @@ class HttpParamWidget(QWidget):
         self._body_stack.addWidget(self._form_data_table)
 
         # json
-        self._json_edit = QPlainTextEdit()
+        self._json_edit = FormatTextEdit(format_name="json")
         self._json_edit.setPlaceholderText('{"key": "value"}')
         self._json_edit.setFont(QFont("Consolas", 10))
         self._body_stack.addWidget(self._json_edit)
 
         # xml
-        self._xml_edit = QPlainTextEdit()
+        self._xml_edit = FormatTextEdit(format_name="xml")
         self._xml_edit.setPlaceholderText('<root>\n    <key>value</key>\n</root>')
         self._xml_edit.setFont(QFont("Consolas", 10))
         self._body_stack.addWidget(self._xml_edit)
 
         # text
-        self._text_edit = QPlainTextEdit()
+        self._text_edit = FormatTextEdit(format_name="text")
         self._text_edit.setPlaceholderText("输入文本内容...")
         self._text_edit.setFont(QFont("Consolas", 10))
         self._body_stack.addWidget(self._text_edit)
@@ -544,6 +545,9 @@ class HttpParamWidget(QWidget):
         self._body_stack.setCurrentIndex(idx)
         # 仅 json / xml / text 显示格式化按钮
         self._body_format_btn.setVisible(idx in (3, 4, 5))
+        # 纯文本 Body 默认不着色（「格式化」按识别结果同步高亮）
+        if idx == 5:
+            self._text_edit.set_format("text")
         self.config_changed.emit()
 
     def _format_body(self):
@@ -565,6 +569,9 @@ class HttpParamWidget(QWidget):
             return
         if formatted != text:
             editor.setPlainText(formatted)
+        if fmt == "" and isinstance(editor, FormatTextEdit):
+            # 纯文本 Body 自动识别成功后，按识别结果同步语法高亮
+            editor.set_format("xml" if formatted.lstrip().startswith("<") else "json")
 
     def _pick_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "选择文件", "", "所有文件 (*)")

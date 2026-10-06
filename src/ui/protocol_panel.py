@@ -651,6 +651,9 @@ class TargetClientPanel(ClientPanelBase):
 
     # ── 钩子 ────────────────────────────────────────────────
 
+    def _mock_target_id(self):
+        return self._owner._target.id if self._owner._target else None
+
     def _build_action_buttons(self, proto_row):
         proto_row.addWidget(QPushButton("导出配置", clicked=self._owner._export_target))
         proto_row.addWidget(QPushButton("导入配置", clicked=self._owner._import_target_config))
@@ -984,6 +987,9 @@ class TargetMockServerPanel(ServerPanelBase):
     def _can_add(self) -> bool:
         return bool(self._owner._target)
 
+    def _mock_client(self):
+        return self._owner._client_panel
+
     # 显示搜索筛选与状态栏；Mock 服务端不显示类型筛选
     def _has_filter_bar(self) -> bool:
         return True
@@ -1165,6 +1171,7 @@ class _TargetDetailPanel(QWidget):
         self._client_panel.config_dirty_changed.connect(self.config_dirty_changed.emit)
         self._client_panel.test_finished.connect(self.test_finished.emit)
         self._client_panel.presets_saved.connect(self._on_presets_saved)
+        self._client_panel.mock_server_created.connect(self._show_generated_mock)
         self._server_collapsed = False
 
         # 左右并排：客户端(左) | Mock服务端(右)，可拖动分隔条调整比例、可收起/展开服务端
@@ -1426,6 +1433,12 @@ class _TargetDetailPanel(QWidget):
     def _toggle_server_panel(self):
         """从客户端按钮行切换服务端面板显示/隐藏。"""
         self.toggle_server_collapsed()
+
+    def _show_generated_mock(self, sid: int):
+        self._tabs.setCurrentIndex(0)
+        if self._server_collapsed:
+            self.toggle_server_collapsed()
+        self._server_panel.select_server(sid)
 
     # ── 测试历史 ─────────────────────────────────────────
 
@@ -2288,6 +2301,14 @@ class _CollectionDetailTab(QWidget):
 class _ServerTab(ServerPanelBase):
     """显示全部服务端配置（全局 + 目标关联），支持筛选排序。"""
 
+    def __init__(self, db: Database, client=None):
+        """关联独立客户端供「生成 Mock」按钮取参数。"""
+        self._mock_source = client
+        super().__init__(db)
+
+    def _mock_client(self):
+        return self._mock_source
+
     # ── 钩子：全局服务端与目标 Mock 的差异 ──────────────────
 
     def _has_filter_bar(self) -> bool:
@@ -2588,8 +2609,9 @@ class ProtocolPanel(QWidget):
         self._tabs.addTab(self._standalone_client, "客户端")
 
         # Tab 2: 服务端（全部）
-        self._server_tab = _ServerTab(self._db)
+        self._server_tab = _ServerTab(self._db, self._standalone_client)
         self._tabs.addTab(self._server_tab, "服务端")
+        self._standalone_client.mock_server_created.connect(self._show_generated_mock)
 
         self._tabs.currentChanged.connect(self._on_tab_changed)
         self._tabs.tabCloseRequested.connect(self._on_tab_close)
@@ -2721,6 +2743,10 @@ class ProtocolPanel(QWidget):
         self._server_tab.stop_all_servers()
         for _, detail in self._target_tabs.values():
             detail.stop_all_servers()
+
+    def _show_generated_mock(self, sid: int):
+        self._tabs.setCurrentWidget(self._server_tab)
+        self._server_tab.select_server(sid)
 
     def _all_client_panels(self) -> list:
         """独立客户端 + 所有已打开目标详情的客户端面板。"""
