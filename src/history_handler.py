@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import csv
+import io
+import re
 import json
 from datetime import datetime
 from pathlib import Path
@@ -62,6 +64,20 @@ def _parse_record(row: dict) -> ProtocolTestSession:
         response_raw=_hex_bytes(row.get('响应原始字节')))
 
 
+def _read_csv_text(text: str) -> list[dict]:
+    """CSV 读取：Python csv 拒绝 NUL，按反斜转转序列在内存转后恢复。"""
+    escaped = '\x00' in text
+    if escaped:
+        text = text.replace('\\', '\\\\').replace('\x00', '\\0')
+    rows = list(csv.DictReader(io.StringIO(text)))
+    if not escaped:
+        return rows
+    return [{key: re.sub(r'\\([\\0])',
+                    lambda m: '\x00' if m.group(1) == '0' else '\\', value)
+                    if isinstance(value, str) else value
+             for key, value in row.items()} for row in rows]
+
+
 def read_history(filepath) -> list[ProtocolTestSession]:
     path = Path(filepath)
     if path.suffix.lower() == '.json':
@@ -73,7 +89,7 @@ def read_history(filepath) -> list[ProtocolTestSession]:
     elif path.suffix.lower() == '.csv':
         csv.field_size_limit(2 ** 31 - 1)
         with path.open(encoding='utf-8-sig', newline='') as source:
-            records = list(csv.DictReader(source))
+            records = _read_csv_text(source.read())
     elif path.suffix.lower() == '.xlsx':
         from openpyxl import load_workbook
         workbook = load_workbook(path, read_only=True, data_only=False)
