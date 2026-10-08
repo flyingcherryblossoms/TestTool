@@ -1,6 +1,6 @@
 # TestTool
 
-跨平台网络测试工具。支持批量 TCP 连通性检测、TCP/WebSocket/HTTP 协议测试、客户端压测、IP/端口范围展开、端口扫描、集合管理，以及 CSV、Excel、TestTool JSON 和 Postman Collection 导入导出。
+跨平台网络测试工具。支持批量 TCP 连通性检测、TCP/WebSocket/HTTP 协议测试、客户端压测、IP/端口范围展开、端口扫描、联调代理录制与离线回放、集合管理，以及 CSV、Excel、TestTool JSON 和 Postman Collection 导入导出。
 
 ![Windows](https://img.shields.io/badge/Windows-x64-blue)
 ![Linux](https://img.shields.io/badge/Linux-x64%20%7C%20ARM64%20%7C%20Compat-orange)
@@ -87,6 +87,14 @@
 - **Postman 范围** — TCP/WS 目标、Mock 服务端和压测配置不包含在 Postman 文件中；没有 HTTP 预设的目标会提示跳过。脚本不导入或执行，未解析的环境变量保留为 `{{变量名}}` 并提示测试前替换；form-data 文件字段暂不支持。
 - **默认文件名** — 使用「集合名称_yyyyMMddHHmmss」，多选取首集合名，默认导出 TestTool JSON。
 - **连通目标导入** — 按集合、IP、端口去重；大批量导入提供二次确认、进度条和取消操作。
+
+### 联调会话录制与回放
+
+- **中间代理录制** — 明文 TCP / HTTP/1.1 / WebSocket 双向原样转发，保存来源、上游、原始字节和连接异常；支持长连接、并发及 TCP 半关闭。
+- **请求响应关联** — 顺序关联、JSON 流水号关联及人工配对，未关联消息单独保留。
+- **离线录制 Mock** — 请求精确/JSON 字段匹配、流水号回填、响应延迟和按连接顺序回放。
+- **复用真实报文** — 生成客户端预设与预期响应历史，保存为原有固定 Mock，后台导出完整 JSON 归档。
+- 使用方法和协议限制见 [联调会话录制与回放](docs/session-recording.md)。
 
 ### 存储
 
