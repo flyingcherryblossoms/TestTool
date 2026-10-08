@@ -11,6 +11,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from src.recording import (
+    RECORDING_SCHEMA, RecordingSession, RecordingConnection, RecordingExchange, RecordingEvent, ReplayRule,
+)
+
 
 # 协议测试「默认配置」预设的统一名称（新建/查找默认预设时统一使用）
 DEFAULT_PRESET_NAME = "配置1"
@@ -454,6 +458,7 @@ class Database:
         """创建数据库和表结构。"""
         with self._connect() as conn:
             conn.executescript(SCHEMA_SQL)
+            conn.executescript(RECORDING_SCHEMA)
             # 服务端响应延迟列：老库缺列时幂等补列（默认 0，不迁移历史数据）
             try:
                 conn.execute(
@@ -1531,3 +1536,166 @@ class Database:
                 "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)",
                 (key, value)
             )
+
+    # ── 联调代理录制 ─────────────────────────────────────────
+
+    def create_recording_session(self, name: str, config: str) -> int:
+        with self._connect() as conn:
+            return conn.execute("INSERT INTO recording_sessions(name, config) VALUES (?, ?)",
+                                (name, config)).lastrowid
+
+    def finish_recording_session(self, session_id: int, status: str, error: str = "") -> None:
+        with self._connect() as conn:
+            conn.execute("UPDATE recording_sessions SET ended_at=CURRENT_TIMESTAMP, status=?, error=? WHERE id=?",
+                         (status, error, session_id))
+
+    def get_recording_sessions(self) -> list[RecordingSession]:
+        with self._connect() as conn:
+            return [RecordingSession(**dict(r)) for r in conn.execute(
+                "SELECT * FROM recording_sessions ORDER BY id DESC")]
+
+    def write_recording_batch(self, actions: list) -> None:
+        """队列中的事件按原顺序事务写入，保持外键与关联一致。"""
+        statements = {
+            "connection": "INSERT INTO recording_connections(id,session_id,source,upstream,opened_at) VALUES (?,?,?,?,?)",
+            "destination": "UPDATE recording_connections SET upstream=? WHERE id=?",
+            "close": "UPDATE recording_connections SET closed_at=?,status=?,error=? WHERE id=?",
+            "event": "INSERT INTO recording_events VALUES (?,?,?,?,?,?,?,?)",
+            "exchange": "INSERT OR REPLACE INTO recording_exchanges VALUES (?,?,?,?,?,?,?)",
+        }
+        with self._connect() as conn:
+            for kind, values in actions:
+                conn.execute(statements[kind], values)
+
+    def get_recording_exchanges(self, session_id: int, limit: int | None = None,
+                                preview: bool = False, exchange_id: str | None = None) -> list[RecordingExchange]:
+        with self._connect() as conn:
+            request = "substr(q.payload,1,256)" if preview else "q.payload"
+            response = "substr(a.payload,1,256)" if preview else "a.payload"
+            sql = """
+                SELECT x.*, c.source, c.upstream, %s AS request,
+                       %s AS response, q.metadata AS request_meta,
+                       COALESCE(a.metadata, '{}') AS response_meta
+                FROM recording_exchanges x JOIN recording_connections c ON c.id=x.connection_id
+                JOIN recording_events q ON q.id=x.request_id
+                LEFT JOIN recording_events a ON a.id=x.response_id
+                WHERE c.session_id=?
+            """ % (request, response)
+            params = [session_id]
+            if exchange_id is not None:
+                sql += " AND x.id=?"
+                params.append(exchange_id)
+            sql += " ORDER BY q.timestamp DESC, q.sequence DESC"
+            if limit is not None:
+                sql += " LIMIT ?"
+                params.append(limit)
+            rows = conn.execute(sql, params).fetchall()
+            return [RecordingExchange(**dict(r)) for r in reversed(rows)]
+
+    def get_recording_events(self, session_id: int, limit: int | None = None,
+                             preview: bool = False, event_id: str | None = None,
+                             connection_id: str | None = None) -> list[RecordingEvent]:
+        with self._connect() as conn:
+            body = "substr(e.payload,1,256)" if preview else "e.payload"
+            wire = "X''" if preview else "e.wire"
+            sql = """SELECT e.id,e.connection_id,e.direction,e.sequence,e.timestamp,
+                %s AS wire, %s AS payload,e.metadata,length(e.payload) AS payload_size
+                FROM recording_events e JOIN recording_connections c ON c.id=e.connection_id
+                WHERE c.session_id=?""" % (wire, body)
+            params = [session_id]
+            if event_id is not None:
+                sql += " AND e.id=?"
+                params.append(event_id)
+            if connection_id is not None:
+                sql += " AND e.connection_id=?"
+                params.append(connection_id)
+            sql += " ORDER BY e.timestamp DESC, e.sequence DESC"
+            if limit is not None:
+                sql += " LIMIT ?"
+                params.append(limit)
+            rows = conn.execute(sql, params).fetchall()
+            return [RecordingEvent(**dict(r)) for r in reversed(rows)]
+
+    def pair_recording_events(self, request_id: str, response_id: str) -> None:
+        """人工配对只允许同一会话中的业务事件，一条响应不能重复使用。"""
+        import uuid
+        import json
+        with self._connect() as conn:
+            rows = conn.execute("""SELECT e.*, c.session_id FROM recording_events e
+                JOIN recording_connections c ON c.id=e.connection_id WHERE e.id IN (?,?)""",
+                                (request_id, response_id)).fetchall()
+            events = {r["id"]: r for r in rows}
+            q, a = events.get(request_id), events.get(response_id)
+            if q is None or a is None or q["direction"] != "request" or a["direction"] != "response" or q["session_id"] != a["session_id"]:
+                raise ValueError("请选择同一会话中的请求与响应")
+            for r in (q, a):
+                meta = json.loads(r["metadata"])
+                if any(meta.get(k) for k in ("control", "handshake", "informational")):
+                    raise ValueError("握手或控制事件不能配对为业务交互")
+            conn.execute("UPDATE recording_exchanges SET response_id=NULL,status='unpaired' WHERE response_id=?", (response_id,))
+            row = conn.execute("SELECT id FROM recording_exchanges WHERE request_id=?", (request_id,)).fetchone()
+            eid = row["id"] if row else uuid.uuid4().hex
+            conn.execute("INSERT OR REPLACE INTO recording_exchanges VALUES (?,?,?,?,?,?,?)",
+                         (eid, q["connection_id"], request_id, response_id, "complete", "manual",
+                          max(0.0, (a["timestamp"] - q["timestamp"]) * 1000)))
+
+    def delete_recording_session(self, session_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM recording_sessions WHERE id=?", (session_id,))
+
+    def add_recording_rule(self, session_id: int, name: str, protocol: str,
+                           exchange: RecordingExchange, mode: str = "exact",
+                           fields: str = "", copy_fields: str = "", delay_ms: int = 0) -> int:
+        if exchange.status != "complete" or exchange.response is None:
+            raise ValueError("只能从已配对的完整交互生成规则")
+        with self._connect() as conn:
+            return conn.execute("""INSERT INTO recording_replay_rules
+                (session_id,name,protocol,request,response,request_meta,response_meta,mode,fields,copy_fields,delay_ms)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (session_id, name, protocol, exchange.request, exchange.response,
+                 exchange.request_meta, exchange.response_meta, mode, fields, copy_fields, delay_ms)).lastrowid
+
+    def get_recording_rules(self, session_id: int, preview: bool = False) -> list[ReplayRule]:
+        with self._connect() as conn:
+            payloads = "X'' AS request, X'' AS response" if preview else "request, response"
+            return [ReplayRule(**dict(r)) for r in conn.execute(
+                "SELECT id,session_id,name,protocol," + payloads + ",request_meta,response_meta,mode,fields,copy_fields,delay_ms,enabled "
+                "FROM recording_replay_rules WHERE session_id=? ORDER BY id", (session_id,))]
+
+    def delete_recording_rule(self, rule_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM recording_replay_rules WHERE id=?", (rule_id,))
+
+    def get_recording_connections(self, session_id: int) -> list[RecordingConnection]:
+        with self._connect() as conn:
+            return [RecordingConnection(**dict(r)) for r in conn.execute(
+                "SELECT * FROM recording_connections WHERE session_id=? ORDER BY opened_at", (session_id,))]
+
+    def export_recording_case(self, name: str, protocol_type: str, preset: str,
+                              exchange: RecordingExchange, config: dict,
+                              request: str, response: str, server: dict | None = None) -> int:
+        """将用例、预期响应历史和可选固定 Mock 原子保存，失败时整体回滚。"""
+        import json
+        with self._connect() as conn:
+            cid = conn.execute("INSERT INTO protocol_collections(name,protocol_type) VALUES (?,?)",
+                               (name, protocol_type)).lastrowid
+            values = dict(collection_id=cid, name="交互 " + exchange.id[:8], send_presets=preset)
+            columns = {r["name"] for r in conn.execute("PRAGMA table_info(protocol_targets)")}
+            # 兼容尚未清理的旧目标表必填列。
+            legacy = dict(ip="", port=0, encoding="UTF-8", recv_encoding="UTF-8", head_length=0,
+                          timeout=30, ws_path="", ws_use_ssl=0, send_message="", url="", http_config="{}")
+            values.update({k: v for k, v in legacy.items() if k in columns})
+            tid = conn.execute("INSERT INTO protocol_targets ({}) VALUES ({})".format(
+                ",".join(values), ",".join("?" for _ in values)), tuple(values.values())).lastrowid
+            conn.execute("""INSERT INTO protocol_test_sessions
+                (collection_id,collection_name,target_id,protocol_type,target_ip,target_port,success,
+                 request,response,test_params,request_raw,response_raw)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (cid, name, tid, protocol_type, config["upstream_host"], config["upstream_port"],
+                 exchange.status == "complete", request, response, json.dumps(config, ensure_ascii=False),
+                 exchange.request, exchange.response))
+            if server:
+                values = dict(server, target_id=tid)
+                conn.execute("INSERT INTO protocol_servers ({}) VALUES ({})".format(
+                    ",".join(values), ",".join("?" for _ in values)), tuple(values.values()))
+            return tid

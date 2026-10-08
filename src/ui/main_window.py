@@ -1,4 +1,4 @@
-"""主窗口 —— 连通测试 / 协议测试两大标签页，菜单栏和状态栏。"""
+"""主窗口 —— 连通测试 / 协议测试 / 联调录制标签页，菜单栏和状态栏。"""
 
 from __future__ import annotations
 
@@ -28,6 +28,7 @@ from src.ui.connectivity_panel import ConnectivityPanel
 from src.ui.csp_parser_dialog import CspParserDialog
 from src.ui.port_scan_dialog import PortScanDialog
 from src.ui.protocol_panel import ProtocolPanel
+from src.ui.recording_panel import RecordingPanel
 from src.ui.shortcut_settings_dialog import ShortcutSettingsDialog
 from src.ui.scaling import (
     UIScaleManager, MIN_SCALE_PERCENT, MAX_SCALE_PERCENT, SCALE_STEP,
@@ -253,6 +254,11 @@ class MainWindow(QMainWindow):
         )
         self._tabs.addTab(self._conn_panel, "连通测试")
 
+        self._recording_panel = RecordingPanel(self._db)
+        self._recording_panel.targets_changed.connect(self._proto_panel._sidebar.refresh)
+        self._recording_panel.targets_changed.connect(self._proto_panel._detail_tab._refresh_targets)
+        self._recording_panel.targets_changed.connect(self._update_statusbar)
+        self._tabs.addTab(self._recording_panel, "联调录制")
         layout.addWidget(self._tabs)
 
         # 恢复上次打开的标签页
@@ -358,6 +364,7 @@ class MainWindow(QMainWindow):
                         detail._save_params()
         active = self._conn_panel.is_test_running()
         active = active or self._proto_panel.has_active_servers()
+        active = active or self._recording_panel.is_running()
         if active:
             reply = QMessageBox.question(
                 self, "确认退出",
@@ -373,4 +380,5 @@ class MainWindow(QMainWindow):
             if worker and worker.isRunning():
                 worker.wait()
             self._proto_panel.stop_all_servers()
+        self._recording_panel.stop_all()
         event.accept()
