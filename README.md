@@ -269,7 +269,13 @@ python packaging/build_deb.py --bundle dist/TestTool --arch amd64 --minimum-glib
 
 脚本拒绝单文件构建和架构错标，输出 deb 与 SHA256 文件。使用相同包名 `testtool` 和递增版本号支持升级；CI 在 x86_64/ARM64 原生运行器上分别生成目录包。
 
-`--minimum-glibc` 接受数字主/次版本号，默认 `2.31`，需与目录包的实际构建环境及依赖要求匹配；此参数只设置 deb 的 `libc6` 依赖，不会降低二进制的 glibc 要求。打包时仅从 deb 暂存目录删除 libxkbcommon/libxkbcommon-x11 的库文件和符号链接，保留其他 Qt/Wayland 库及原始目录包，并声明系统键盘映射库和 `xkb-data` 依赖。
+`--minimum-glibc` 接受数字主/次版本号，默认 `2.31`，需与目录包的实际构建环境及依赖要求匹配；此参数只设置 deb 的 `libc6` 依赖，不会降低二进制的 glibc 要求。默认打包时仅从 deb 暂存目录删除 libxkbcommon/libxkbcommon-x11 的库文件和符号链接，保留其他 Qt/Wayland 库及原始目录包，并声明系统键盘映射库和 `xkb-data` 依赖。
+
+ARM64 兼容版 deb 使用 `--offline`：完整保留目录版中的库，仅声明 `libc6 (>= 2.31)` 硬依赖，不要求安装 Ubuntu 包名的 `libopengl0` 等图形库。适用于目录版已能正常运行的银河麒麟 ARM64 内网桌面系统；不代表包内包含全部显卡驱动或支持无桌面环境的系统。可直接执行 `sudo dpkg -i testtool_<版本>_arm64-compat.deb` 离线安装。自行打包时使用：
+
+```bash
+python packaging/build_deb.py --arch arm64 --minimum-glibc 2.31 --offline
+```
 
 ## 测试
 

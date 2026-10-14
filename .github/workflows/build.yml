@@ -266,7 +266,7 @@ jobs:
 
       - name: Build Debian compatibility package
         run: |
-          python3.8 packaging/build_deb.py --arch arm64 --minimum-glibc 2.31
+          python3.8 packaging/build_deb.py --arch arm64 --minimum-glibc 2.31 --offline
           cd dist
           for package in testtool_*_arm64.deb; do
             compat_package="${package%.deb}-compat.deb"

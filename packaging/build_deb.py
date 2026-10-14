@@ -81,11 +81,15 @@ def write_file(path: Path, content: str, mode: int = 0o644):
 
 def build_deb(bundle: Path, architecture: str, version: str, output_dir: Path,
               maintainer: str = 'Quasimodo <wangaimeng@outlook.com>',
-              minimum_glibc: str = DEFAULT_MINIMUM_GLIBC) -> Path:
+              minimum_glibc: str = DEFAULT_MINIMUM_GLIBC,
+              offline: bool = False) -> Path:
     # 仅接受主/次版本号，防止无效版本或控制字段注入；默认值与 CLI 共用。
     if not isinstance(minimum_glibc, str) or not re.fullmatch(r'[0-9]+\.[0-9]+', minimum_glibc):
         raise ValueError('最低 glibc 版本应为数字版本号，如 2.39')
-    dependencies = f'libc6 (>= {minimum_glibc}), {DEPENDENCIES}'
+    # 离线模式保持目录包原样，避免国产发行版的图形库包名差异阻止安装。
+    dependencies = f'libc6 (>= {minimum_glibc})'
+    if not offline:
+        dependencies += f', {DEPENDENCIES}'
     binary = bundle / 'TestTool'
     if not bundle.is_dir() or not (bundle / '_internal').is_dir():
         raise ValueError('需要 PyInstaller --onedir 生成的目录（含 TestTool 和 _internal），不接受单文件')
@@ -106,7 +110,7 @@ def build_deb(bundle: Path, architecture: str, version: str, output_dir: Path,
         installed_dir.parent.mkdir(parents=True)
         shutil.copytree(bundle, installed_dir, symlinks=True)
         # xkbcommon-x11 由系统提供；核心库也必须来自同一系统版本，避免 ABI 混用。
-        for library in installed_dir.rglob('libxkbcommon*.so*'):
+        for library in ([] if offline else installed_dir.rglob('libxkbcommon*.so*')):
             if (re.fullmatch(r'libxkbcommon(?:-x11)?\.so(?:\..+)?', library.name)
                     and (library.is_file() or library.is_symlink())):
                 library.unlink()
@@ -165,12 +169,15 @@ def main():
     parser.add_argument('--version', default=None)
     parser.add_argument('--output-dir', type=Path, default=ROOT / 'dist')
     parser.add_argument('--maintainer', default='Quasimodo <wangaimeng@outlook.com>')
+    parser.add_argument('--offline', action='store_true',
+                        help='保留目录包全部库，仅声明最低 glibc 依赖；目标系统需具备可运行目录版的桌面环境')
     parser.add_argument('--minimum-glibc', default=DEFAULT_MINIMUM_GLIBC,
                         help=f'最低 glibc 主/次版本号；默认 {DEFAULT_MINIMUM_GLIBC}（Ubuntu 20.04 兼容构建），Ubuntu 24.04 构建使用 2.39')
     args = parser.parse_args()
     try:
         result = build_deb(args.bundle, args.arch, args.version or project_version(),
-                           args.output_dir, args.maintainer, minimum_glibc=args.minimum_glibc)
+                           args.output_dir, args.maintainer, minimum_glibc=args.minimum_glibc,
+                           offline=args.offline)
     except (ValueError, OSError, subprocess.CalledProcessError) as exc:
         parser.exit(1, str(exc) + '\n')
     print(result)

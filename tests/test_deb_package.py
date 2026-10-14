@@ -187,6 +187,35 @@ def test_package_dependencies_and_bundled_libraries(tmp_path, use_cli, minimum_g
     assert (nested / 'libxkbcommon-x11.so.0').is_symlink()
 
 
+@pytest.mark.parametrize('use_cli', [False, True])
+def test_offline_package_preserves_directory_bundle(tmp_path, use_cli):
+    """离线包不再要求 Ubuntu 图形库包名，并保留目录版使用的库及链接。"""
+    architecture = subprocess.check_output(['dpkg', '--print-architecture'], text=True).strip()
+    bundle = make_bundle(tmp_path / 'bundle', Path('/bin/true'))
+    internal = bundle / '_internal'
+    (internal / 'libOpenGL.so.0').write_bytes(b'bundled-opengl')
+    (internal / 'libxkbcommon.so').symlink_to('libxkbcommon.so.0')
+    output = tmp_path / 'packages'
+    if use_cli:
+        subprocess.run([sys.executable, str(deb.ROOT / 'packaging/build_deb.py'),
+                        '--bundle', str(bundle), '--arch', architecture,
+                        '--version', '1.1.2', '--output-dir', str(output), '--offline'],
+                       check=True, capture_output=True, text=True)
+        package = output / f'testtool_1.1.2-1_{architecture}.deb'
+    else:
+        package = deb.build_deb(bundle, architecture, '1.1.2', output, offline=True)
+    dependencies = subprocess.check_output(['dpkg-deb', '-f', str(package), 'Depends'],
+                                           text=True).strip()
+    assert dependencies == 'libc6 (>= 2.31)'
+    extracted = tmp_path / 'extracted'
+    subprocess.run(['dpkg-deb', '-x', str(package), str(extracted)], check=True)
+    installed = extracted / 'usr/lib/testtool/_internal'
+    for name in ['libOpenGL.so.0', 'libxkbcommon.so.0', 'libxkbcommon-x11.so.0']:
+        assert (installed / name).read_bytes() == (internal / name).read_bytes()
+    assert (installed / 'libxkbcommon.so').is_symlink()
+    assert os.readlink(installed / 'libxkbcommon.so') == 'libxkbcommon.so.0'
+
+
 def test_install_upgrade_remove_keeps_user_database(tmp_path):
     architecture = subprocess.check_output(['dpkg', '--print-architecture'], text=True).strip()
     old = deb.build_deb(make_bundle(tmp_path / 'old', Path('/bin/true')), architecture, '1.0.5', tmp_path / 'packages')
