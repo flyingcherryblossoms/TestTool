@@ -104,7 +104,7 @@ Windows 安装器仅包含 64 位 x86_64 程序，不提供 ARM64 或 32 位版�
 
 ### Debian / Ubuntu（x86_64、ARM64）
 
-新版 deb 与标准 Linux 目录包使用相同的 Qt 和 Wayland 装饰插件，需要 glibc 2.39 及以上（如 Ubuntu 24.04）。旧系统可使用 `-compat.tar.gz` 目录包。早期 `1.0.7-1` 至 `1.0.7-5` deb 来自 Qt 6.6.3 兼容构建，与标准目录包不同。
+标准 deb 与标准 Linux 目录包使用相同的 Qt 和 Wayland 装饰插件，需要 glibc 2.39 及以上（如 Ubuntu 24.04）。旧系统可使用 `-compat.tar.gz` 目录包；ARM64 还提供 `testtool_<版本>_arm64-compat.deb` 兼容安装包，基于 Ubuntu 20.04 构建，要求 glibc 2.31 及以上，附带 SHA256 校验文件。兼容版与标准版使用相同的包名和安装目录，按系统要求选择其中一种安装。早期 `1.0.7-1` 至 `1.0.7-5` deb 来自 Qt 6.6.3 兼容构建，与标准目录包不同。
 
 根据 `dpkg --print-architecture` 选择 `amd64` 或 `arm64` 文件，使用 APT 安装并处理系统库依赖：
 
