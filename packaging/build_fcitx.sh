@@ -21,7 +21,13 @@ cmake --build . --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-2}"
 cmake --install .
 cd "$work_dir"
 git clone --depth 1 --branch 1.2.7 https://github.com/fcitx/fcitx-qt5.git
-# 随二进制保留上游源代码及许可证。
+# 通过 Qt 私有目标传递头文件，不依赖新版 Qt 中为空的旧变量。
+# 同时适用于旧 Qt，避免 moc 找不到插件 IID 定义。
+cat >> fcitx-qt5/qt6/platforminputcontext/CMakeLists.txt <<'CMAKE'
+
+target_link_libraries(fcitxplatforminputcontextplugin-qt6 Qt6::GuiPrivate)
+CMAKE
+# 随二进制保留已修补的上游源代码及许可证。
 mkdir -p "$qt_plugins/fcitx4-source"
 tar --exclude=.git -cJf "$qt_plugins/fcitx4-source/fcitx-qt5-1.2.7.tar.xz" fcitx-qt5
 cp fcitx-qt5/COPYING "$qt_plugins/fcitx4-source/"
