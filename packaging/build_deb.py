@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MINIMUM_GLIBC = '2.31'
 DEPENDENCIES = (
     'libstdc++6, libgcc-s1, libegl1, libgl1, libopengl0, '
+    'libdouble-conversion3, libpcre2-16-0, '
     'libdbus-1-3, libx11-6, libx11-xcb1, libxext6, libxrender1, libxi6, '
     'libxkbcommon0, libxkbcommon-x11-0, libxcb1, libxcb-cursor0, '
     'libxcb-icccm4, libxcb-image0, libxcb-keysyms1, libxcb-randr0, '
