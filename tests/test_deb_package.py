@@ -23,7 +23,7 @@ def make_launcher(tmp_path):
     mock.write_text('#!' + sys.executable + '\nimport json,os,sys\n'
                     'open(os.environ["TEST_ARGS"],"w").write(json.dumps(sys.argv[1:]))\n'
                     'keys = ["QT_QPA_PLATFORM", "QT_WAYLAND_DISABLE_WINDOWDECORATION", '
-                    '"QT_QPA_PLATFORMTHEME", "QT_WAYLAND_DECORATION", "XDG_CONFIG_HOME", "DISPLAY", "WAYLAND_DISPLAY"]\n'
+                    '"QT_QPA_PLATFORMTHEME", "QT_WAYLAND_DECORATION", "XDG_CONFIG_HOME", "DISPLAY", "WAYLAND_DISPLAY", "QT_IM_MODULE", "XMODIFIERS"]\n'
                     'open(os.environ["TEST_ARGS"]+".environment","w").write('
                     'json.dumps({key: os.environ.get(key) for key in keys}))\n')
     mock.chmod(0o755)
@@ -74,6 +74,7 @@ def test_launcher_preserves_desktop_environment(tmp_path, display, wayland, requ
     launcher, environment = make_launcher(tmp_path)
     expected = {
         'DISPLAY': display, 'WAYLAND_DISPLAY': wayland, 'QT_QPA_PLATFORM': requested,
+        'QT_IM_MODULE': None, 'XMODIFIERS': None,
         'QT_WAYLAND_DISABLE_WINDOWDECORATION': '0' if requested is not None else None,
         'QT_QPA_PLATFORMTHEME': 'custom-theme' if requested is not None else None,
         'QT_WAYLAND_DECORATION': 'adwaita' if requested is not None else None,
@@ -239,3 +240,37 @@ def test_install_upgrade_remove_keeps_user_database(tmp_path):
                    check=True, capture_output=True, text=True)
     assert database.read_bytes() == b'user-history-and-config'
     assert not (root / 'usr/lib/testtool/TestTool').exists()
+
+
+@pytest.mark.parametrize('wayland,module,modifiers,expected', [
+    (None, None, '@im=fcitx', 'fcitx'),
+    (None, 'fcitx', '@im=fcitx', 'fcitx'),
+    (None, 'ibus', '@im=fcitx', 'ibus'),
+    (None, None, '@im=ibus', None),
+    ('wayland-0', None, '@im=fcitx', None),
+])
+@pytest.mark.parametrize('arguments', [[], ['--help'], ['--db', '/tmp/custom db']])
+def test_launcher_fcitx_input_method(tmp_path, wayland, module, modifiers, expected, arguments):
+    launcher, environment = make_launcher(tmp_path)
+    for key, value in {'DISPLAY': ':0', 'WAYLAND_DISPLAY': wayland,
+                       'QT_IM_MODULE': module, 'XMODIFIERS': modifiers}.items():
+        environment.pop(key, None)
+        if value is not None:
+            environment[key] = value
+    subprocess.run([str(launcher)] + arguments, env=environment, check=True)
+    actual = json.loads(Path(environment['TEST_ARGS'] + '.environment').read_text())
+    assert actual['QT_IM_MODULE'] == expected
+    assert actual['XMODIFIERS'] == modifiers
+
+
+def test_desktop_icon_resolves_in_package(tmp_path):
+    architecture = subprocess.check_output(['dpkg', '--print-architecture'], text=True).strip()
+    package = deb.build_deb(make_bundle(tmp_path / 'bundle', Path('/bin/true')),
+                            architecture, '1.1.2', tmp_path / 'packages')
+    extracted = tmp_path / 'extracted'
+    subprocess.run(['dpkg-deb', '-x', str(package), str(extracted)], check=True)
+    desktop = (extracted / 'usr/share/applications/testtool.desktop').read_text()
+    fields = dict(line.split('=', 1) for line in desktop.splitlines() if '=' in line)
+    icon = extracted / fields['Icon'].lstrip('/')
+    assert icon.read_bytes() == (deb.ROOT / 'resources/icon.png').read_bytes()
+    assert fields['StartupWMClass'] == 'TestTool'

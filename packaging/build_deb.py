@@ -27,6 +27,16 @@ LAUNCHER = '''#!/bin/sh
 set -eu
 # 应用自身负责配置目录，不覆盖桌面的 XDG_CONFIG_HOME（主题/窗口装饰配置）。
 # 不修改 Qt 显示后端和装饰设置，保持与直接运行二进制相同的行为。
+# X11 的 fcitx 会话使用随包 Qt6 插件；保留其他输入法和 Wayland 设置。
+if [ -n "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+    case "${QT_IM_MODULE:-}" in
+        ""|fcitx)
+            case "${XMODIFIERS:-}" in
+                @im=fcitx) export QT_IM_MODULE=fcitx ;;
+            esac
+            ;;
+    esac
+fi
 # 显式 --db 参数保持原样；安装/升级不会覆盖数据库。
 for argument in "$@"; do
     case "$argument" in
@@ -45,10 +55,11 @@ Name[zh_CN]=TestTool 网络测试工具
 Comment=TCP, WebSocket and HTTP network testing
 Comment[zh_CN]=TCP 连通性检测与 WebSocket、HTTP 协议测试
 Exec=testtool
-Icon=testtool
+Icon=/usr/share/icons/hicolor/256x256/apps/testtool.png
 Terminal=false
 Categories=Network;
 StartupNotify=true
+StartupWMClass=TestTool
 '''
 
 

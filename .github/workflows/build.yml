@@ -114,10 +114,19 @@ jobs:
       - name: Install Python deps
         run: pip install PySide6 openpyxl xlrd websocket-client websockets requests pyinstaller
 
+      - name: Build fcitx4 Qt input method plugin
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential cmake ninja-build curl git extra-cmake-modules libxkbcommon-dev libdbus-1-dev libfontconfig1-dev libfreetype6-dev libx11-dev libx11-xcb-dev libxext-dev libxfixes-dev libxi-dev libxrender-dev libxcb1-dev libxcb-util-dev libxcb-cursor-dev libxcb-icccm4-dev libxcb-image0-dev libxcb-keysyms1-dev libxcb-randr0-dev libxcb-render-util0-dev libxcb-shape0-dev libxcb-sync-dev libxcb-xfixes0-dev libxcb-xinerama0-dev libxcb-xkb-dev libxkbcommon-x11-dev
+          sh packaging/build_fcitx.sh python
+
       - name: Build
         run: |
           pyinstaller --onedir --windowed --name TestTool \
             --add-data "resources/icon.png:resources" \
+            --hidden-import PySide6.QtDBus \
+            --add-binary "$(python -c 'from PySide6.QtCore import QLibraryInfo; print(QLibraryInfo.path(QLibraryInfo.PluginsPath))')/platforminputcontexts/libfcitxplatforminputcontextplugin-qt6.so:PySide6/Qt/plugins/platforminputcontexts" \
+            --add-data "$(python -c 'from PySide6.QtCore import QLibraryInfo; print(QLibraryInfo.path(QLibraryInfo.PluginsPath))')/fcitx4-source:licenses/fcitx4" \
             --clean --noconfirm main.py
 
       - name: Package
@@ -162,11 +171,20 @@ jobs:
       - name: Install Python deps
         run: python3.8 -m pip install PySide6 openpyxl xlrd websocket-client websockets requests pyinstaller
 
+      - name: Build fcitx4 Qt input method plugin
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq build-essential cmake ninja-build curl git extra-cmake-modules libxkbcommon-dev libdbus-1-dev libfontconfig1-dev libfreetype6-dev libx11-dev libx11-xcb-dev libxext-dev libxfixes-dev libxi-dev libxrender-dev libxcb1-dev libxcb-util-dev libxcb-cursor-dev libxcb-icccm4-dev libxcb-image0-dev libxcb-keysyms1-dev libxcb-randr0-dev libxcb-render-util0-dev libxcb-shape0-dev libxcb-sync-dev libxcb-xfixes0-dev libxcb-xinerama0-dev libxcb-xkb-dev libxkbcommon-x11-dev
+          sh packaging/build_fcitx.sh python3.8
+
       - name: Build
         run: |
           QT_PLUGINS=$(python3.8 -c "import PySide6,os;print(os.path.join(os.path.dirname(PySide6.__file__),'Qt','plugins'))")
           python3.8 -m PyInstaller --onedir --name TestTool \
             --add-data "resources/icon.png:resources" \
+            --hidden-import PySide6.QtDBus \
+            --add-binary "$(python3.8 -c 'from PySide6.QtCore import QLibraryInfo; print(QLibraryInfo.path(QLibraryInfo.PluginsPath))')/platforminputcontexts/libfcitxplatforminputcontextplugin-qt6.so:PySide6/Qt/plugins/platforminputcontexts" \
+            --add-data "$(python3.8 -c 'from PySide6.QtCore import QLibraryInfo; print(QLibraryInfo.path(QLibraryInfo.PluginsPath))')/fcitx4-source:licenses/fcitx4" \
             --add-data "${QT_PLUGINS}/platforms:PySide6/Qt/plugins/platforms" \
             --clean --noconfirm main.py
 
@@ -202,10 +220,19 @@ jobs:
       - name: Install Python deps
         run: pip install PySide6 openpyxl xlrd websocket-client websockets requests pyinstaller
 
+      - name: Build fcitx4 Qt input method plugin
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential cmake ninja-build curl git extra-cmake-modules libxkbcommon-dev libdbus-1-dev libfontconfig1-dev libfreetype6-dev libx11-dev libx11-xcb-dev libxext-dev libxfixes-dev libxi-dev libxrender-dev libxcb1-dev libxcb-util-dev libxcb-cursor-dev libxcb-icccm4-dev libxcb-image0-dev libxcb-keysyms1-dev libxcb-randr0-dev libxcb-render-util0-dev libxcb-shape0-dev libxcb-sync-dev libxcb-xfixes0-dev libxcb-xinerama0-dev libxcb-xkb-dev libxkbcommon-x11-dev
+          sh packaging/build_fcitx.sh python
+
       - name: Build
         run: |
           pyinstaller --onedir --windowed --name TestTool \
             --add-data "resources/icon.png:resources" \
+            --hidden-import PySide6.QtDBus \
+            --add-binary "$(python -c 'from PySide6.QtCore import QLibraryInfo; print(QLibraryInfo.path(QLibraryInfo.PluginsPath))')/platforminputcontexts/libfcitxplatforminputcontextplugin-qt6.so:PySide6/Qt/plugins/platforminputcontexts" \
+            --add-data "$(python -c 'from PySide6.QtCore import QLibraryInfo; print(QLibraryInfo.path(QLibraryInfo.PluginsPath))')/fcitx4-source:licenses/fcitx4" \
             --clean --noconfirm main.py
 
       - name: Package
@@ -250,11 +277,20 @@ jobs:
       - name: Install Python deps
         run: python3.8 -m pip install PySide6 openpyxl xlrd websocket-client websockets requests pyinstaller
 
+      - name: Build fcitx4 Qt input method plugin
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq build-essential cmake ninja-build curl git extra-cmake-modules libxkbcommon-dev libdbus-1-dev libfontconfig1-dev libfreetype6-dev libx11-dev libx11-xcb-dev libxext-dev libxfixes-dev libxi-dev libxrender-dev libxcb1-dev libxcb-util-dev libxcb-cursor-dev libxcb-icccm4-dev libxcb-image0-dev libxcb-keysyms1-dev libxcb-randr0-dev libxcb-render-util0-dev libxcb-shape0-dev libxcb-sync-dev libxcb-xfixes0-dev libxcb-xinerama0-dev libxcb-xkb-dev libxkbcommon-x11-dev
+          sh packaging/build_fcitx.sh python3.8
+
       - name: Build
         run: |
           QT_PLUGINS=$(python3.8 -c "import PySide6,os;print(os.path.join(os.path.dirname(PySide6.__file__),'Qt','plugins'))")
           python3.8 -m PyInstaller --onedir --name TestTool \
             --add-data "resources/icon.png:resources" \
+            --hidden-import PySide6.QtDBus \
+            --add-binary "$(python3.8 -c 'from PySide6.QtCore import QLibraryInfo; print(QLibraryInfo.path(QLibraryInfo.PluginsPath))')/platforminputcontexts/libfcitxplatforminputcontextplugin-qt6.so:PySide6/Qt/plugins/platforminputcontexts" \
+            --add-data "$(python3.8 -c 'from PySide6.QtCore import QLibraryInfo; print(QLibraryInfo.path(QLibraryInfo.PluginsPath))')/fcitx4-source:licenses/fcitx4" \
             --add-data "${QT_PLUGINS}/platforms:PySide6/Qt/plugins/platforms" \
             --clean --noconfirm main.py
 

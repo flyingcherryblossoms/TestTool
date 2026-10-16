@@ -304,3 +304,17 @@ git push origin main v1.1.2
 ## License
 
 MIT
+
+
+### Linux deb 的 fcitx4 / 搜狗输入法
+
+发布构建会编译并携带与 PySide6 的 Qt 版本一致的 fcitx4 Qt6 输入法插件，
+适用于 X11 下运行的 fcitx4 / 搜狗输入法。目标桌面仍需正常启动 fcitx，
+会话应设置 `XMODIFIERS=@im=fcitx`。deb 启动器会在此 X11 会话中补充
+`QT_IM_MODULE=fcitx`，并保留已明确选择的其他输入法。
+
+手动打包 Linux 版本时，先安装构建工作流中列出的 C++、CMake、Qt 桌面开发依赖，
+运行 `sh packaging/build_fcitx.sh /path/to/python`（使用安装 PySide6 的 Python），
+再按工作流的 `--add-binary` 参数将生成的输入法插件加入 PyInstaller 包。
+此步骤会下载 Qt 源码和 fcitx-qt5 1.2.7，首次编译需要额外时间和磁盘空间。
+菜单图标直接引用 deb 安装的 PNG 文件；升级后需关闭旧程序再重新启动。

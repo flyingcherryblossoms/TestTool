@@ -137,6 +137,8 @@ def run_gui(db_path: str) -> None:
     app = QApplication(sys.argv)
     app.setApplicationName("TestTool")
     app.setOrganizationName("TestTool")
+    if sys.platform.startswith("linux"):
+        app.setDesktopFileName("testtool")
 
     # 设置窗口图标（无效图标会被兜底替换，避免 QPixmap::scaled 空图警告）
     icon = _load_icon()
