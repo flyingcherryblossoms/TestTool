@@ -1004,24 +1004,25 @@ class TargetMockServerPanel(ServerPanelBase):
         return self._db.get_protocol_servers_by_target(self._owner._target.id)
 
     def _server_columns(self):
-        return ["名称", "监听地址", "端口", "发送编码", "接收编码", "HeadLen", "响应模式", "延迟(ms)", "状态", "操作"]
+        return ["名称", "协议", "监听地址", "端口", "发送编码", "接收编码", "HeadLen", "状态", "操作"]
 
     def _row_cells(self, s):
+        protocol = {"tcp_server": "TCP", "ws_server": "WebSocket",
+                    "http_server": "HTTP"}.get(s.server_type, s.server_type)
         if s.server_type == "http_server":
-            return [s.name, s.ip, str(s.port), "-", "-", "-", "固定",
-                    str(s.response_delay)]
-        return [s.name, s.ip, str(s.port), s.encoding or "", s.recv_encoding or "",
-                str(s.head_length), "回显" if s.response_mode == "echo" else "固定",
-                str(s.response_delay)]
+            return [s.name, protocol, s.ip, str(s.port), "-", "-", "-"]
+        return [s.name, protocol, s.ip, str(s.port), s.encoding or "",
+                s.recv_encoding or "", str(s.head_length)]
 
     def _center_columns(self):
-        return {2, 5}
+        return {3, 6}
 
     def _sortable_column(self, col: int) -> bool:
-        return col < 3
+        return col < 4
 
     def _sort_key(self, col: int):
-        key_map = {0: lambda s: s.name, 1: lambda s: s.ip, 2: lambda s: s.port}
+        key_map = {0: lambda s: s.name, 1: lambda s: s.server_type,
+                   2: lambda s: s.ip, 3: lambda s: s.port}
         return key_map.get(col)
 
     def _default_add_type(self) -> str:
@@ -2324,17 +2325,15 @@ class _ServerTab(ServerPanelBase):
         return self._db.get_all_protocol_servers(self._type_filter.currentData())
 
     def _server_columns(self):
-        return ["名称", "类型", "监听地址", "端口", "发送编码", "接收编码", "关联目标", "响应模式", "延迟(ms)", "状态", "操作"]
+        return ["名称", "协议", "监听地址", "端口", "发送编码", "接收编码", "关联目标", "状态", "操作"]
 
     def _row_cells(self, s):
         if s.server_type == "http_server":
             return [s.name, "HTTP", s.ip, str(s.port), "-", "-",
-                    self._target_cell(s), "固定", str(s.response_delay)]
+                    self._target_cell(s)]
         return [s.name, "TCP" if "tcp" in s.server_type else "WS",
                 s.ip, str(s.port), s.encoding or "", s.recv_encoding or "",
-                self._target_cell(s),
-                "回显" if s.response_mode == "echo" else "固定",
-                str(s.response_delay)]
+                self._target_cell(s)]
 
     def _target_cell(self, s) -> str:
         if s.target_id:

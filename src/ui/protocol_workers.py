@@ -266,6 +266,7 @@ class HttpServerWorker(QThread):
         self._response_delay_ms = response_delay_ms
         self._engine: HttpServerEngine | None = None
         self._pending_raw: bytes | None = None
+        self._routes = []
 
     def run(self) -> None:
         """在 QThread 中阻塞运行 accept 循环。"""
@@ -287,6 +288,10 @@ class HttpServerWorker(QThread):
         self._headers = list(headers or [])
         self._response_message = body
 
+    def set_routes(self, routes: list) -> None:
+        """整体替换路由快照，避免工作线程读取到半更新的配置。"""
+        self._routes = [dict(it) for it in routes]
+
     def _on_raw_received(self, client_addr: str, raw: bytes) -> None:
         self._pending_raw = raw
 
@@ -298,6 +303,21 @@ class HttpServerWorker(QThread):
             self.message_received_raw.emit(client_addr, raw)
         if self._response_delay_ms > 0:
             time.sleep(self._response_delay_ms / 1000.0)
+        routes = self._routes
+        if routes:
+            path = req["path"].split("?", 1)[0] or "/"
+            matches = [it for it in routes if it.get("path", "/") == path]
+            if not matches:
+                return 404, [], "Not Found"
+            method = req["method"].upper()
+            candidates = [it for it in matches if it.get("method", "*") == method]
+            if not candidates:
+                candidates = [it for it in matches if it.get("method", "*") == "*"]
+            if not candidates:
+                allowed = sorted({it.get("method", "*") for it in matches})
+                return 405, [("Allow", ", ".join(allowed))], "Method Not Allowed"
+            selected = next((it for it in candidates if it.get("active")), candidates[0])
+            return selected["status_code"], list(selected["headers"]), selected["body"]
         if self._response_mode == "echo":
             body = req["body"].decode("utf-8", errors="replace")
             status, headers = 200, list(self._headers)

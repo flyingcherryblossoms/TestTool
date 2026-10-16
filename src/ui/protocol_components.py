@@ -20,7 +20,7 @@ from functools import partial
 from src.protocol_history import protocol_history_params
 from src.mock_config import client_to_mock_config
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QItemSelectionModel
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -1938,7 +1938,7 @@ class ServerPanelBase(QWidget):
         srv_splitter.addWidget(self._table)
         self._response_section = ResponseMessageSection(self._db)
         self._response_section.set_panel(self)
-        self._response_section.setMinimumHeight(170)
+        self._response_section.setMinimumHeight(320)
         self._response_section.saved.connect(self._on_response_saved)
         srv_splitter.addWidget(self._response_section)
         self._log_tabs = QTabWidget()
@@ -1946,9 +1946,9 @@ class ServerPanelBase(QWidget):
         self._log_tabs.tabCloseRequested.connect(self._on_log_tab_close)
         srv_splitter.addWidget(self._log_tabs)
         srv_splitter.setStretchFactor(0, 1)
-        srv_splitter.setStretchFactor(1, 0)
+        srv_splitter.setStretchFactor(1, 2)
         srv_splitter.setStretchFactor(2, 1)
-        srv_splitter.setSizes([320, 190, 320])
+        srv_splitter.setSizes([220, 360, 250])
         layout.addWidget(srv_splitter)
         self._table.itemSelectionChanged.connect(self._on_server_selection_changed)
 
@@ -2008,6 +2008,13 @@ class ServerPanelBase(QWidget):
 
     def _populate_table(self):
         t = self._table
+        selected_ids = {
+            t.item(index.row(), 0).data(Qt.UserRole)
+            for index in t.selectionModel().selectedRows()
+            if t.item(index.row(), 0) is not None
+        }
+        t.blockSignals(True)
+        t.clearSelection()
         cols = self._server_columns()
         t.setColumnCount(len(cols))
         t.setHorizontalHeaderLabels(cols)
@@ -2036,6 +2043,13 @@ class ServerPanelBase(QWidget):
             btn.setStyleSheet("color: #e74c3c;" if running else "color: #27ae60;")
             btn.clicked.connect(partial(self._toggle_server, s))
             set_button_cell(t, row, len(cols) - 1, btn)
+        selection = t.selectionModel()
+        for row, srv in enumerate(self._servers):
+            if srv.id in selected_ids:
+                selection.select(t.model().index(row, 0),
+                                 QItemSelectionModel.Select | QItemSelectionModel.Rows)
+        t.blockSignals(False)
+        self._on_server_selection_changed()
         fit_table_buttons(t)
         refresh_tooltips(t)
         if hasattr(self, "_status_label"):
@@ -2046,7 +2060,7 @@ class ServerPanelBase(QWidget):
         s = text.strip().lower()
         for row in range(self._table.rowCount()):
             match = False
-            for col in (0, 2, 3, 6):
+            for col in range(self._table.columnCount() - 2):
                 item = self._table.item(row, col)
                 if item and s in item.text().lower():
                     match = True
@@ -2156,6 +2170,7 @@ class ServerPanelBase(QWidget):
                                      headers=active["headers"],
                                      response_message=active["body"],
                                      response_delay_ms=s.response_delay)
+                w.set_routes(s.response_list)
                 w.message_received.connect(lambda addr, msg, sid=s.id, nm=s.name:
                                            self._on_srv_msg(sid, nm, addr, msg))
                 w.message_received_raw.connect(partial(self._on_srv_msg_raw, s.id))
@@ -2675,8 +2690,7 @@ class ServerPanelBase(QWidget):
             return
         active = srv.active_response()
         if st == "http_server":
-            w.set_active_response(active["status_code"], active["headers"],
-                                  active["body"])
+            w.set_routes(srv.response_list)
         else:
             w.set_active_message(active["body"])
 

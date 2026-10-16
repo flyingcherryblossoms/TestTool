@@ -611,6 +611,8 @@ class HttpServerEngine:
                     self._on_message_raw(addr_str, req["text"].encode("latin-1"))
                 status, headers, body = self._on_request(addr_str, req)
                 response_bytes = build_http_response(status, headers, body)
+                if req["method"].upper() == "HEAD":
+                    response_bytes = response_bytes.partition(b"\r\n\r\n")[0] + b"\r\n\r\n"
                 client_sock.sendall(response_bytes)
                 if self._on_sent:
                     self._on_sent(addr_str, response_bytes)

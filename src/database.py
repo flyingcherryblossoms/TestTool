@@ -122,7 +122,8 @@ class ProtocolServer:
 def default_response_messages(body: str = "") -> list:
     """返回单条「默认响应」的返回报文列表（新建服务端时的初始值）。"""
     return [{"name": "默认响应", "active": True, "status_code": 200,
-             "headers": [], "body": body or "", "format": "text"}]
+             "headers": [], "body": body or "", "format": "text",
+             "path": "/", "method": "*"}]
 
 
 def _json_dumps(obj) -> str:
@@ -148,6 +149,8 @@ def parse_server_responses(srv) -> list:
         normalized.append({
             "name": str(it.get("name", "") or "返回报文"),
             "active": bool(it.get("active", False)),
+            "path": str(it.get("path") or "/"),
+            "method": str(it.get("method") or "*").upper(),
             "status_code": int(it.get("status_code", 200) or 200),
             "headers": it.get("headers", []) or [],
             "body": it.get("body", "") or "",

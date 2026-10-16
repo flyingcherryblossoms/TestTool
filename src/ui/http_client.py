@@ -41,7 +41,8 @@ from src.ui.message_format import format_payload
 
 
 
-HTTP_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]
+HTTP_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS",
+                "TRACE", "CONNECT"]
 BODY_TYPES = ["none", "x-www-form-urlencoded", "form-data", "json", "xml", "text", "binary"]
 
 DEFAULT_HEADERS = [

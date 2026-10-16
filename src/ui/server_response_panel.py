@@ -16,6 +16,8 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
+    QComboBox,
+    QLineEdit,
     QInputDialog,
     QLabel,
     QListWidget,
@@ -33,7 +35,7 @@ from PySide6.QtWidgets import (
 from src.database import Database, default_response_messages, parse_server_responses
 from src.ui import shortcuts
 from src.ui.format_text import FormatTextEdit
-from src.ui.http_client import _CompactKvTable
+from src.ui.http_client import HTTP_METHODS, _CompactKvTable
 from src.ui.message_format import format_payload
 
 
@@ -56,6 +58,7 @@ class ResponseMessageSection(QWidget):
         self._dirty = False
         self._loading = False            # 装载期间屏蔽编辑信号
         self._setup_ui()
+        self.hide()
 
     # ── UI ────────────────────────────────────────────────
 
@@ -107,6 +110,20 @@ class ResponseMessageSection(QWidget):
         self._http_box = QWidget()
         hb = QVBoxLayout(self._http_box)
         hb.setContentsMargins(0, 0, 0, 0)
+        route_row = QHBoxLayout()
+        route_row.addWidget(QLabel("路由路径:"))
+        self._path_edit = QLineEdit("/")
+        self._path_edit.setPlaceholderText("例如 /api1")
+        self._path_edit.textChanged.connect(self._mark_dirty)
+        route_row.addWidget(self._path_edit, 1)
+        route_row.addWidget(QLabel("请求方法:"))
+        self._method_combo = QComboBox()
+        self._method_combo.addItems(["*"] + HTTP_METHODS)
+        self._method_combo.setToolTip("* 表示接受所有请求方法；同一路由优先匹配指定方法。")
+        self._method_combo.currentTextChanged.connect(self._mark_dirty)
+        route_row.addWidget(self._method_combo)
+        hb.addLayout(route_row)
+        hb.addWidget(QLabel("每条返回报文配置一个路由；相同路径和方法优先使用 ● 当前项，否则使用第一条。"))
         status_row = QHBoxLayout()
         status_row.addWidget(QLabel("状态码:"))
         self._status_spin = QSpinBox()
@@ -157,6 +174,7 @@ class ResponseMessageSection(QWidget):
                 self._panel._restore_selection(self._srv.id)
             return
         self._srv = srv
+        self.setVisible(srv is not None)
         if srv is None:
             self._stack.setCurrentIndex(0)
             self._responses = []
@@ -186,6 +204,8 @@ class ResponseMessageSection(QWidget):
     def _item_text(self, idx: int) -> str:
         it = self._responses[idx]
         text = ("● " if it.get("active") else "") + it["name"]
+        if self._srv and self._srv.server_type == "http_server":
+            text += "  {} {}".format(it.get("method", "*"), it.get("path", "/"))
         if self._dirty and idx == self._sel_idx:
             text += " *"
         return text
@@ -204,6 +224,8 @@ class ResponseMessageSection(QWidget):
         is_http = self._srv.server_type == "http_server"
         self._http_box.setVisible(is_http)
         self._loading = True
+        self._path_edit.setText(it.get("path", "/"))
+        self._method_combo.setCurrentText(it.get("method", "*"))
         self._status_spin.setValue(it.get("status_code", 200))
         self._headers_table.set_data(
             [tuple(x) for x in (it.get("headers") or [])])
@@ -280,7 +302,15 @@ class ResponseMessageSection(QWidget):
     def _save(self):
         if self._srv is None or self._sel_idx is None:
             return
+        path = self._path_edit.text().strip() or "/"
+        if self._srv.server_type == "http_server" and (
+                not path.startswith("/") or any(c in path for c in "?#")
+                or any(c.isspace() for c in path)):
+            QMessageBox.warning(self, "验证失败", "路由路径须以 / 开头，且不能包含空白、? 或 #。")
+            return False
         it = self._responses[self._sel_idx]
+        it["path"] = path
+        it["method"] = self._method_combo.currentText()
         it["status_code"] = self._status_spin.value()
         it["headers"] = self._read_headers()
         it["body"] = self._body.toPlainText()
@@ -289,6 +319,7 @@ class ResponseMessageSection(QWidget):
         self._persist()
         self._update_item_label()
         self.saved.emit(self._srv.id)
+        return True
 
     def _add(self):
         if self._srv is None:
@@ -356,8 +387,7 @@ class ResponseMessageSection(QWidget):
             QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
             QMessageBox.Save)
         if ret == QMessageBox.Save:
-            self._save()
-            return True
+            return self._save()
         if ret == QMessageBox.Discard:
             self._dirty = False
             return True
