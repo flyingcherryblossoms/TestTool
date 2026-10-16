@@ -5,8 +5,8 @@
   独立客户端（_StandaloneClientTab）与目标详情客户端（TargetClientPanel）
   各自持有一个实例，仅顶部按钮、持久化方式与会话记录不同。
 - ServerPanelBase：服务端表格 + 启停 + 逐服务端日志/编码。
-  独立服务端（_ServerTab，显示全部）与目标 Mock服务端
-  （TargetMockServerPanel，按 target_id 过滤）各自持有一个实例。
+  每个目标详情的 Mock服务端（TargetMockServerPanel，按 target_id 过滤）
+  各自持有一个实例。
 
 ServerDialog / ENCODINGS / _hex_dump 一并搬至此模块，避免循环导入。
 """

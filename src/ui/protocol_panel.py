@@ -6,12 +6,11 @@
   └── [右] QTabWidget
         ├── Tab 0: _CollectionDetailTab (目标表格，双击打开目标标签页)
         ├── Tab 1: _StandaloneClientTab (独立客户端，固定)
-        ├── Tab 2: _ServerTab (全部服务端，固定)
         └── [动态] 目标标签页 (客户端 / Mock服务端 / 历史)
 
 客户端与服务端的公共逻辑抽到 src/ui/protocol_components.py：
 - ClientPanelBase —— 独立客户端与每个目标详情内的客户端各持一个实例
-- ServerPanelBase —— 独立服务端与每个目标详情内的 Mock服务端各持一个实例
+- ServerPanelBase —— 每个目标详情内的 Mock服务端各持一个实例
 """
 
 from __future__ import annotations
@@ -2296,89 +2295,6 @@ class _CollectionDetailTab(QWidget):
             super().keyPressEvent(event)
 
 
-# ── 服务端标签页（全部服务端）────────────────────────────
-
-
-class _ServerTab(ServerPanelBase):
-    """显示全部服务端配置（全局 + 目标关联），支持筛选排序。"""
-
-    def __init__(self, db: Database, client=None):
-        """关联独立客户端供「生成 Mock」按钮取参数。"""
-        self._mock_source = client
-        super().__init__(db)
-
-    def _mock_client(self):
-        return self._mock_source
-
-    # ── 钩子：全局服务端与目标 Mock 的差异 ──────────────────
-
-    def _has_filter_bar(self) -> bool:
-        return True
-
-    def _show_status_label(self) -> bool:
-        return True
-
-    def _content_margins(self):
-        return (9, 9, 9, 9)
-
-    def _load_servers(self):
-        return self._db.get_all_protocol_servers(self._type_filter.currentData())
-
-    def _server_columns(self):
-        return ["名称", "协议", "监听地址", "端口", "发送编码", "接收编码", "关联目标", "状态", "操作"]
-
-    def _row_cells(self, s):
-        if s.server_type == "http_server":
-            return [s.name, "HTTP", s.ip, str(s.port), "-", "-",
-                    self._target_cell(s)]
-        return [s.name, "TCP" if "tcp" in s.server_type else "WS",
-                s.ip, str(s.port), s.encoding or "", s.recv_encoding or "",
-                self._target_cell(s)]
-
-    def _target_cell(self, s) -> str:
-        if s.target_id:
-            target = self._db.get_protocol_target(s.target_id)
-            if target:
-                info = target_display_info(target)
-                return f"{info['ip']}:{info['port']}"
-            return f"ID:{s.target_id}"
-        return "(全局)"
-
-    def _center_columns(self):
-        return {3}
-
-    def _sort_key(self, col: int):
-        key_map = {0: lambda s: s.name, 1: lambda s: s.server_type,
-                   2: lambda s: s.ip, 3: lambda s: s.port,
-                   4: lambda s: (s.encoding or "").lower(),
-                   5: lambda s: (s.recv_encoding or "").lower()}
-        return key_map.get(col)
-
-    def _default_add_type(self) -> str:
-        return self._type_filter.currentData() or "tcp_server"
-
-    def _check_port_conflict(self, s) -> bool:
-        for sid in self._all_workers():
-            other = self._db.get_protocol_server(sid)
-            if other and other.port == s.port:
-                QMessageBox.warning(self, "端口冲突", f"端口 {s.port} 已被 [{other.name}] 占用。")
-                return True
-        return False
-
-    def _confirm_delete_text(self, ids) -> str:
-        names = []
-        for sid in ids:
-            srv = self._db.get_protocol_server(sid)
-            names.append(srv.name if srv else f"#{sid}")
-        return f"确定要删除选中的 {len(ids)} 个监听器吗？\n{', '.join(names[:5])}"
-
-    def _running_delete_warning(self, running) -> str:
-        return f"有 {len(running)} 个监听器正在运行，请先停止再删除。"
-
-    def _on_stop_all(self):
-        for log in self._logs.values():
-            log.appendPlainText("服务端已停止")
-
 # ── 独立客户端 ──────────────────────────────────────────────
 
 
@@ -2607,16 +2523,10 @@ class ProtocolPanel(QWidget):
         self._standalone_client.test_finished.connect(self.test_finished.emit)
         self._tabs.addTab(self._standalone_client, "客户端")
 
-        # Tab 2: 服务端（全部）
-        self._server_tab = _ServerTab(self._db, self._standalone_client)
-        self._tabs.addTab(self._server_tab, "服务端")
-        self._standalone_client.mock_server_created.connect(self._show_generated_mock)
-
-        self._tabs.currentChanged.connect(self._on_tab_changed)
         self._tabs.tabCloseRequested.connect(self._on_tab_close)
 
-        # 记录固定标签页: [0, 1, 2]
-        self._fixed_tab_count = 3
+        # 记录固定标签页: [0, 1]
+        self._fixed_tab_count = 2
         self._tabs.setTabsClosable(True)
         self._hide_fixed_close_buttons()
 
@@ -2725,27 +2635,17 @@ class ProtocolPanel(QWidget):
         # 关闭后切回集合详情
         self._tabs.setCurrentIndex(0)
 
-    def _on_tab_changed(self, idx: int):
-        widget = self._tabs.widget(idx)
-        if widget == self._server_tab:
-            self._server_tab.refresh()
-
     # ── 公共方法 ─────────────────────────────────────────────
 
     def has_active_servers(self) -> bool:
-        active = self._server_tab.has_active_servers()
+        active = False
         for _, detail in self._target_tabs.values():
             active = active or detail.has_active_servers()
         return active
 
     def stop_all_servers(self) -> None:
-        self._server_tab.stop_all_servers()
         for _, detail in self._target_tabs.values():
             detail.stop_all_servers()
-
-    def _show_generated_mock(self, sid: int):
-        self._tabs.setCurrentWidget(self._server_tab)
-        self._server_tab.select_server(sid)
 
     def _all_client_panels(self) -> list:
         """独立客户端 + 所有已打开目标详情的客户端面板。"""
