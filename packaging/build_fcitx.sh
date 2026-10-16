@@ -25,6 +25,10 @@ git clone --depth 1 --branch 1.2.7 https://github.com/fcitx/fcitx-qt5.git
 # 同时适用于旧 Qt，避免 moc 找不到插件 IID 定义。
 cat >> fcitx-qt5/qt6/platforminputcontext/CMakeLists.txt <<'CMAKE'
 
+# 新 Qt 将私有目标拆分为独立包，旧 Qt 已由 Qt6Gui 自动加载。
+if(NOT TARGET Qt6::GuiPrivate)
+    find_package(Qt6GuiPrivate CONFIG REQUIRED)
+endif()
 target_link_libraries(fcitxplatforminputcontextplugin-qt6 Qt6::GuiPrivate)
 CMAKE
 # 随二进制保留已修补的上游源代码及许可证。
