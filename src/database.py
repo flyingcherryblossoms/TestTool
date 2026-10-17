@@ -1565,6 +1565,7 @@ class Database:
             "close": "UPDATE recording_connections SET closed_at=?,status=?,error=? WHERE id=?",
             "event": "INSERT INTO recording_events VALUES (?,?,?,?,?,?,?,?)",
             "exchange": "INSERT OR REPLACE INTO recording_exchanges VALUES (?,?,?,?,?,?,?)",
+            "invalidate": "UPDATE recording_exchanges SET status='incomplete' WHERE connection_id=?",
         }
         with self._connect() as conn:
             for kind, values in actions:
@@ -1624,14 +1625,19 @@ class Database:
         import uuid
         import json
         with self._connect() as conn:
-            rows = conn.execute("""SELECT e.*, c.session_id FROM recording_events e
-                JOIN recording_connections c ON c.id=e.connection_id WHERE e.id IN (?,?)""",
+            rows = conn.execute("""SELECT e.*, c.session_id, c.status AS connection_status,
+                s.config AS session_config FROM recording_events e
+                JOIN recording_connections c ON c.id=e.connection_id
+                JOIN recording_sessions s ON s.id=c.session_id WHERE e.id IN (?,?)""",
                                 (request_id, response_id)).fetchall()
             events = {r["id"]: r for r in rows}
             q, a = events.get(request_id), events.get(response_id)
             if q is None or a is None or q["direction"] != "request" or a["direction"] != "response" or q["session_id"] != a["session_id"]:
                 raise ValueError("请选择同一会话中的请求与响应")
             for r in (q, a):
+                if (r["connection_status"] == "incomplete"
+                        and json.loads(r["session_config"]).get("capture_mode", "proxy") != "proxy"):
+                    raise ValueError("抓包连接不完整，不能人工配对为可回放交互")
                 meta = json.loads(r["metadata"])
                 if any(meta.get(k) for k in ("control", "handshake", "informational")):
                     raise ValueError("握手或控制事件不能配对为业务交互")

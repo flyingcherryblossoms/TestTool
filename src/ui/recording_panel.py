@@ -1,4 +1,4 @@
-"""联调录制：透明代理、会话详情、人工配对、客户端导出和 Mock 回放。"""
+"""联调录制：被动抓包、代理、会话详情、客户端导出和 Mock 回放。"""
 from __future__ import annotations
 
 import json
@@ -14,9 +14,10 @@ from PySide6.QtWidgets import (
 
 from src.database import Database, DEFAULT_PRESET_NAME
 from src.proxy import validate_config
+from src.capture import validate_capture_config
 from src.recording import ReplayRule
 from src.replay import validate_rule
-from src.ui.recording_workers import RecordingWorker, ReplayWorker, RecordingExportWorker
+from src.ui.recording_workers import RecordingWorker, ReplayWorker, RecordingExportWorker, CaptureWorker
 
 
 def _table(headers):
@@ -56,8 +57,8 @@ class RecordingPanel(QWidget):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        hint = QLabel("在线：业务系统 → 本页监听地址 → 真实服务。离线：停止代理后，在本页启动录制 Mock。\n"
-                      "支持明文 TCP / HTTP/1.1 / WebSocket（无压缩）。HTTPS/WSS 不解密；HTTP Host 原样转发。")
+        hint = QLabel("被动抓包：业务程序仍访问原目标地址；在业务所在机器或可见流量的网卡采集。支持 SSH Linux 远端采集和 pcap/pcapng 导入。\n"
+                      "本地用 TShark 解析；SSH 远端只需 tcpdump 和抓包权限。SSH 使用密钥认证；请在建立连接前开始抓包。TLS 仅保存密文。")
         hint.setWordWrap(True)
         layout.addWidget(hint)
         grid = QGridLayout()
@@ -85,21 +86,57 @@ class RecordingPanel(QWidget):
         self.timeout = QSpinBox()
         self.timeout.setRange(1, 3600)
         self.timeout.setValue(30)
-        items = [("会话名称", self.name), ("协议", self.protocol),
-                 ("监听地址", self.listen_host), ("监听端口", self.listen_port),
+        self.capture_mode = QComboBox()
+        for label, value in (("本机被动抓包", "local"), ("SSH Linux 远端抓包", "ssh"),
+                             ("导入 pcap / pcapng", "file"), ("代理录制（已有功能）", "proxy")):
+            self.capture_mode.addItem(label, value)
+        self.capture_interface = QLineEdit("1")
+        self.capture_interface.setPlaceholderText("网卡名称或编号；Linux 可填 any；tshark -D 查看")
+        self.capture_port = QSpinBox()
+        self.capture_port.setRange(1, 65535)
+        self.capture_port.setValue(8000)
+        self.capture_host = QLineEdit()
+        self.capture_host.setPlaceholderText("可选：只采集涉及此 IP 的流量")
+        self.tshark_path = QLineEdit()
+        self.tshark_path.setPlaceholderText("本机 TShark 完整路径；留空自动查找")
+        self.tcpdump_path = QLineEdit()
+        self.tcpdump_path.setPlaceholderText("远端 tcpdump 可执行文件路径；留空使用 tcpdump")
+        self.ssh_host = QLineEdit()
+        self.ssh_host.setPlaceholderText("user@linux-host 或 SSH 配置别名")
+        self.ssh_port = QSpinBox()
+        self.ssh_port.setRange(1, 65535)
+        self.ssh_port.setValue(22)
+        self.ssh_key = QLineEdit()
+        self.ssh_key.setPlaceholderText("可选：本机私钥路径；留空使用 SSH 默认配置/agent")
+        self.capture_file = QLineEdit()
+        self.capture_file.setPlaceholderText("pcap / pcapng 文件完整路径")
+        self.browse_capture = QPushButton("选择抓包文件…")
+        self.browse_capture.clicked.connect(self._browse_capture)
+        items = [("采集方式", self.capture_mode), ("采集网卡", self.capture_interface),
+                 ("服务端端口", self.capture_port), ("IP 过滤", self.capture_host),
+                 ("本地 TShark", self.tshark_path), ("远端 tcpdump", self.tcpdump_path),
+                 ("SSH 主机", self.ssh_host),
+                 ("SSH 端口", self.ssh_port), ("SSH 私钥", self.ssh_key),
+                 ("抓包文件", self.capture_file), ("文件选择", self.browse_capture),
+                 ("会话名称", self.name), ("协议", self.protocol),
+                 ("Mock / 代理监听地址", self.listen_host), ("Mock / 代理监听端口", self.listen_port),
                  ("上游地址", self.upstream_host), ("上游端口", self.upstream_port),
                  ("文本编码", self.encoding), ("TCP 分帧", self.framing),
                  ("长度头位数", self.head), ("分隔符（Hex）", self.delimiter),
                  ("关联字段", self.association), ("空闲超时（秒）", self.timeout)]
         self.config_controls = [widget for _, widget in items]
+        self.config_labels = {}
         for i, (label, widget) in enumerate(items):
             row, col = divmod(i, 2)
-            grid.addWidget(QLabel(label), row, col * 2)
+            title = QLabel(label)
+            self.config_labels[widget] = title
+            grid.addWidget(title, row, col * 2)
             grid.addWidget(widget, row, col * 2 + 1)
         layout.addLayout(grid)
         self.protocol.currentIndexChanged.connect(self._framing_enabled)
         self.framing.currentIndexChanged.connect(self._framing_enabled)
         self._framing_enabled()
+        self.capture_mode.currentIndexChanged.connect(self._capture_mode_changed)
         bar = QHBoxLayout()
         self.start_button = QPushButton("开始代理录制")
         self.stop_button = QPushButton("停止并保存")
@@ -186,6 +223,32 @@ class RecordingPanel(QWidget):
         splitter.addWidget(right)
         splitter.setStretchFactor(1, 2)
         layout.addWidget(splitter, 1)
+        self._capture_mode_changed()
+
+    def _browse_capture(self):
+        path, _ = QFileDialog.getOpenFileName(self, "选择抓包文件", "", "抓包文件 (*.pcap *.pcapng *.cap);;所有文件 (*)")
+        if path:
+            self.capture_file.setText(path)
+
+    def _capture_mode_changed(self):
+        mode = self.capture_mode.currentData()
+        for widget in (self.ssh_host, self.ssh_port, self.ssh_key, self.tcpdump_path):
+            widget.setEnabled(mode == "ssh")
+            widget.setVisible(mode == "ssh")
+            self.config_labels[widget].setVisible(mode == "ssh")
+        for widget in (self.capture_file, self.browse_capture):
+            widget.setEnabled(mode == "file")
+            widget.setVisible(mode == "file")
+            self.config_labels[widget].setVisible(mode == "file")
+        for widget in (self.upstream_host, self.upstream_port):
+            widget.setEnabled(mode == "proxy")
+            widget.setVisible(mode == "proxy")
+            self.config_labels[widget].setVisible(mode == "proxy")
+        for widget in (self.capture_port, self.capture_host, self.tshark_path):
+            widget.setEnabled(mode != "proxy")
+        self.capture_interface.setEnabled(mode in ("local", "ssh"))
+        self.start_button.setText({"local": "开始被动抓包", "ssh": "开始远端抓包",
+                                   "file": "导入抓包文件", "proxy": "开始代理录制"}[mode])
 
     def _framing_enabled(self):
         tcp = self.protocol.currentData() == "tcp"
@@ -199,7 +262,12 @@ class RecordingPanel(QWidget):
                     upstream_port=self.upstream_port.value(), encoding=self.encoding.currentText(),
                     framing=self.framing.currentData(), head_length=self.head.value(),
                     delimiter=self.delimiter.text().strip(), association_field=self.association.text().strip(),
-                    timeout=self.timeout.value())
+                    timeout=self.timeout.value(), capture_mode=self.capture_mode.currentData(),
+                    capture_port=self.capture_port.value(), capture_host=self.capture_host.text().strip(),
+                    capture_interface=self.capture_interface.text().strip(), tshark_path=self.tshark_path.text().strip(),
+                    tcpdump_path=self.tcpdump_path.text().strip(),
+                    ssh_host=self.ssh_host.text().strip(), ssh_port=self.ssh_port.value(),
+                    ssh_key=self.ssh_key.text().strip(), capture_file=self.capture_file.text().strip())
 
     def is_running(self):
         return any(worker and worker.isRunning() for worker in (self.worker, self.replay_worker, self.file_worker))
@@ -223,6 +291,7 @@ class RecordingPanel(QWidget):
             widget.setEnabled(not busy)
         if not busy:
             self._framing_enabled()
+            self._capture_mode_changed()
 
     def _start(self):
         if self.is_running():
@@ -230,12 +299,14 @@ class RecordingPanel(QWidget):
         sid = None
         try:
             config = self._config()
-            validate_config(config)
+            passive = config["capture_mode"] != "proxy"
+            (validate_capture_config if passive else validate_config)(config)
             name = self.name.text().strip()
             if not name:
                 raise ValueError("会话名称不能为空")
             sid = self.db.create_recording_session(name, json.dumps(config, ensure_ascii=False))
-            worker = RecordingWorker(self.db, sid, config, self)
+            worker_class = CaptureWorker if passive else RecordingWorker
+            worker = worker_class(self.db, sid, config, self)
             self.worker, self.active_session = worker, sid
             worker.status_changed.connect(self.status.setText)
             worker.error_occurred.connect(self._error)
@@ -252,7 +323,7 @@ class RecordingPanel(QWidget):
         if self.worker:
             self.worker.stop()
             self.stop_button.setEnabled(False)
-            self.status.setText("正在关闭连接并保存录制…")
+            self.status.setText("正在停止采集并保存录制…")
 
     def _finished(self):
         worker = self.worker
@@ -261,7 +332,7 @@ class RecordingPanel(QWidget):
         worker.deleteLater()
         self._busy_ui()
         self.refresh_sessions()
-        self.status.setText("代理已停止：" + error if error else "代理已停止，会话已保存")
+        self.status.setText("录制已结束：" + error if error else "录制已结束，会话已保存")
 
     def _error(self, text):
         self.status.setText(text)
@@ -364,6 +435,12 @@ class RecordingPanel(QWidget):
                              (self.head, "head_length"), (self.timeout, "timeout")):
             control.setValue(cfg.get(key, control.value()))
         self.encoding.setCurrentText(cfg.get("encoding", "UTF-8"))
+        self.capture_mode.setCurrentIndex(self.capture_mode.findData(cfg.get("capture_mode", "proxy")))
+        for key in ("capture_interface", "capture_host", "tshark_path", "tcpdump_path", "ssh_host", "ssh_key", "capture_file"):
+            getattr(self, key).setText(cfg.get(key, ""))
+        self.capture_port.setValue(cfg.get("capture_port", 8000))
+        self.ssh_port.setValue(cfg.get("ssh_port", 22))
+        self._capture_mode_changed()
 
     def _editable_session(self):
         session = self._selected_session()
@@ -485,6 +562,14 @@ class RecordingPanel(QWidget):
             ex = self._selected_exchange()
             cfg = json.loads(session.config)
             proto, encoding = cfg["protocol"], cfg.get("encoding", "UTF-8")
+            if cfg.get("capture_mode", "proxy") != "proxy":
+                if ex.status != "complete":
+                    raise ValueError("被动采集交互不完整，不能导出为客户端或 Mock")
+                host, port = ex.upstream.rsplit(":", 1)
+                cfg.update(upstream_host=host.strip("[]"), upstream_port=int(port))
+            url_host = cfg["upstream_host"]
+            if ":" in url_host:
+                url_host = "[" + url_host + "]"
             if proto == "tcp" and cfg.get("framing") == "delimiter":
                 raise ValueError("现有客户端/固定 Mock 不支持分隔符协议，请使用本页录制 Mock 回放")
             if mock and ex.response is None:
@@ -510,16 +595,16 @@ class RecordingPanel(QWidget):
             if proto == "http":
                 meta = json.loads(ex.request_meta)
                 headers = [(k, v) for k, v in meta.get("headers", []) if k.lower() not in ("content-length", "transfer-encoding", "connection")]
-                url = "http://{}:{}{}".format(cfg["upstream_host"], cfg["upstream_port"], meta.get("path", "/"))
+                url = "http://{}:{}{}".format(url_host, cfg["upstream_port"], meta.get("path", "/"))
                 preset = dict(proto=client_type, url=url, method=meta.get("method", "GET"), headers=headers,
                               body={"type": "text", "text": request}, settings={"timeout": cfg["timeout"]})
             else:
                 preset = dict(proto=client_type, ip=cfg["upstream_host"], port=cfg["upstream_port"],
                               encoding=encoding, recv_encoding=encoding, head_length=cfg["head_length"] if cfg["framing"] == "length" else 0,
-                              timeout=cfg["timeout"], send_message=request, ws_url="ws://{}:{}/".format(cfg["upstream_host"], cfg["upstream_port"]), ws_timeout=cfg["timeout"])
+                              timeout=cfg["timeout"], send_message=request, ws_url="ws://{}:{}/".format(url_host, cfg["upstream_port"]), ws_timeout=cfg["timeout"])
                 if proto == "ws":
                     handshake = next((json.loads(e.metadata) for e in self.db.get_recording_events(session.id, preview=True, connection_id=ex.connection_id) if e.direction == "request" and json.loads(e.metadata).get("handshake")), {})
-                    preset["ws_url"] = "ws://{}:{}{}".format(cfg["upstream_host"], cfg["upstream_port"], handshake.get("path", "/"))
+                    preset["ws_url"] = "ws://{}:{}{}".format(url_host, cfg["upstream_port"], handshake.get("path", "/"))
             # 现有表保存可编辑文本；原始录制和预期响应仍保留在录制库和历史中。
             server = None
             if mock:

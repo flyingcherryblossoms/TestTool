@@ -312,12 +312,13 @@ class ExchangeRecorder:
         self.parsers = {d: MessageParser(config, d, methods) for d in ("request", "response")}
         self.failed = False
 
-    def feed(self, direction, data, eof=False):
+    def feed(self, direction, data, eof=False, timestamp=None):
         if self.failed:
             return
         for wire, payload, meta in self.parsers[direction].feed(data, eof):
             self.sequence += 1
-            event_id, now = uuid.uuid4().hex, time.time()
+            event_id, now = uuid.uuid4().hex, time.time() if timestamp is None else timestamp
+            clock = time.monotonic() if timestamp is None else timestamp
             self.emit("event", (event_id, self.connection_id, direction, self.sequence,
                                 now, wire, payload, json.dumps(meta, ensure_ascii=False)))
             if meta.get("control") or meta.get("handshake") or meta.get("informational"):
@@ -333,7 +334,7 @@ class ExchangeRecorder:
                 if len(self.pending) >= 1000:
                     raise ValueError("单连接未响应请求超过 1000 条，停止录制解析")
                 eid = uuid.uuid4().hex
-                self.pending.append((eid, event_id, now, key, time.monotonic()))
+                self.pending.append((eid, event_id, now, key, clock))
                 self.emit("exchange", (eid, self.connection_id, event_id, None, "pending",
                                        "json:" + field if field else "sequence", 0.0))
             else:
@@ -345,7 +346,7 @@ class ExchangeRecorder:
                 self.pending.remove(pending)
                 self.emit("exchange", (pending[0], self.connection_id, pending[1], event_id,
                                        "complete", "json:" + field if field else "sequence",
-                                       max(0.0, (time.monotonic() - pending[4]) * 1000)))
+                                       max(0.0, (clock - pending[4]) * 1000)))
 
     def close(self, status):
         for eid, req, _, _, _ in self.pending:

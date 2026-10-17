@@ -5,18 +5,20 @@ from PySide6.QtCore import QThread, Signal
 
 from src.proxy import RecordingProxyEngine, RecordingWriter
 from src.replay import ReplayServerEngine
+from src.capture import PassiveCaptureEngine
 
 
 class RecordingWorker(QThread):
     status_changed = Signal(str)
     error_occurred = Signal(str)
+    engine_class = RecordingProxyEngine
 
     def __init__(self, db, session_id, config, parent=None):
         super().__init__(parent)
         self.db, self.session_id = db, session_id
         self.writer = RecordingWriter(db, self.error_occurred.emit)
         # 提前创建引擎，使开始后立即停止也不会丢失停止信号。
-        self.engine = RecordingProxyEngine(config, session_id, self.writer.emit,
+        self.engine = self.engine_class(config, session_id, self.writer.emit,
                                            self.status_changed.emit, self.error_occurred.emit)
 
     def run(self):
@@ -33,6 +35,11 @@ class RecordingWorker(QThread):
 
     def stop(self):
         self.engine.stop()
+
+
+class CaptureWorker(RecordingWorker):
+    """本机/SSH 抓包和 pcap 导入共用持久化与生命周期。"""
+    engine_class = PassiveCaptureEngine
 
 
 class ReplayWorker(QThread):
